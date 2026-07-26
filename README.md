@@ -311,6 +311,27 @@ Noncommercial use, including personal, hobby, academic, and research use, is per
 
 ---
 
+## 9. 👥 Contributors
+
+GAVEL-Studio is developed and maintained by the Offensive AI Lab.
+
+### Core contributors
+
+- **Shir Rozenfeld** ([shirozenfeld](https://github.com/shirozenfeld))
+- **Ofek Avigezer** ([OfekAvi](https://github.com/OfekAvi))
+- **Shahaf Har-Tsvi** ([hartsvis](https://github.com/hartsvis))
+- **Shahar Navian** ([ShaharNavian](https://github.com/ShaharNavian))
+- **Sean Shuhman** ([SeanSh1](https://github.com/SeanSh1))
+- **Gilad Gressel** ([giladgressel](https://github.com/giladgressel))
+- **Fadi Amon** ([FadiAmon](https://github.com/FadiAmon))
+- **Rahul Pankajakshan** ([rahulgitsit](https://github.com/rahulgitsit))
+- **Yisroel Mirsky** ([ymirsky](https://github.com/ymirsky))
+  
+### Community contributors
+
+We thank everyone who has contributed code, bug reports, testing, documentation, and feature suggestions.
+
+---
 ## 9. Acknowledgment
 
 This work was funded by the European Union, supported by ERC grant: (AGI-Safety, 101222135).
@@ -319,4 +340,6 @@ those of the European Union or the European Research Council Executive Agency. N
 European Union nor the granting authority can be held responsible for them.
 This work was also supported by the Israeli Ministry of Innovation Science and Technology (grant
 number 1001948211).
+
+
 
