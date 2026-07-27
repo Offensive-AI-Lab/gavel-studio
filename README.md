@@ -316,17 +316,19 @@ Noncommercial use, including personal, hobby, academic, and research use, is per
 GAVEL-Studio is developed and maintained by the Offensive AI Lab.
 
 ### Core contributors
-
+Principal Investigator
+- **Yisroel Mirsky** ([ymirsky](https://github.com/ymirsky))
+Research Team
 - **Shir Rozenfeld** ([shirozenfeld](https://github.com/shirozenfeld))
+- **Rahul Pankajakshan** ([rahulgitsit](https://github.com/rahulgitsit))
+- **Gilad Gressel** ([giladgressel](https://github.com/giladgressel))
+Software Design and Development
 - **Ofek Avigezer** ([OfekAvi](https://github.com/OfekAvi))
 - **Shahaf Har-Tsvi** ([hartsvis](https://github.com/hartsvis))
 - **Shahar Navian** ([ShaharNavian](https://github.com/ShaharNavian))
 - **Sean Shuhman** ([SeanSh1](https://github.com/SeanSh1))
-- **Gilad Gressel** ([giladgressel](https://github.com/giladgressel))
 - **Fadi Amon** ([FadiAmon](https://github.com/FadiAmon))
-- **Rahul Pankajakshan** ([rahulgitsit](https://github.com/rahulgitsit))
-- **Yisroel Mirsky** ([ymirsky](https://github.com/ymirsky))
-  
+
 ### Community contributors
 
 We thank everyone who has contributed code, bug reports, testing, documentation, and feature suggestions.
