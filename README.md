@@ -318,10 +318,12 @@ GAVEL-Studio is developed and maintained by the Offensive AI Lab.
 ### Core contributors
 Principal Investigator
 - **Yisroel Mirsky** ([ymirsky](https://github.com/ymirsky))
+
 Research Team
 - **Shir Rozenfeld** ([shirozenfeld](https://github.com/shirozenfeld))
 - **Rahul Pankajakshan** ([rahulgitsit](https://github.com/rahulgitsit))
 - **Gilad Gressel** ([giladgressel](https://github.com/giladgressel))
+
 Software Design and Development
 - **Ofek Avigezer** ([OfekAvi](https://github.com/OfekAvi))
 - **Shahaf Har-Tsvi** ([hartsvis](https://github.com/hartsvis))
