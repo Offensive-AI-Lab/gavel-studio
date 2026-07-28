@@ -1,18 +1,19 @@
-"""Unit tests for services.central_server — the HTTP client wrapping the
-GAVEL central identity/bookmark/ratings server.
+"""Unit tests for services.central_server — the HTTP client for the central
+server's HuggingFace WRITE proxy.
 
-These are pure-logic tests: no real network, no live central server. The
-module under test uses a single module-level httpx.Client (`_client`) and a
-module-level `CENTRAL_SERVER_URL`. We monkeypatch both:
+Since login was removed, that proxy is the module's only remaining
+responsibility: no auth, no user directory, no ratings, no bookmarks, and no
+tokens to forward. What is left to test is request shaping and error mapping.
 
-  * `central_server._client` -> a tiny fake client whose `.request(...)`
-    returns a canned `_FakeResponse` (or raises an httpx.RequestError to
-    model timeouts / connection failures).
-  * `central_server.CENTRAL_SERVER_URL` -> a known base URL so request
-    shaping (method, path, headers, json body, params) can be asserted on.
+Pure-logic: no real network, no live central server. The module uses a single
+module-level httpx.Client (`_client`) and a module-level `CENTRAL_SERVER_URL`;
+we monkeypatch both:
 
-The fake client records every call so we can assert on request shaping +
-auth header. We never touch a real socket.
+  * `central_server._client` -> a fake client whose `.request(...)` returns a
+    canned `_FakeResponse` (or raises httpx.RequestError to model a timeout /
+    connection failure).
+  * `central_server.CENTRAL_SERVER_URL` -> a known base URL so the method,
+    path, JSON body and params can be asserted on.
 """
 import httpx
 import pytest
@@ -88,28 +89,6 @@ def _install_client(monkeypatch, response=None, exc=None):
 # ---------------------------------------------------------------------------
 
 
-class TestHeaders:
-    def test_includes_bearer_token_when_present(self):
-        h = cs._headers("abc123")
-        assert h["Authorization"] == "Bearer abc123"
-        assert h["Content-Type"] == "application/json"
-
-    def test_omits_auth_header_when_token_none(self):
-        h = cs._headers(None)
-        assert "Authorization" not in h
-        assert h["Content-Type"] == "application/json"
-
-    def test_empty_token_treated_as_no_auth(self):
-        # "" is falsy, so no Authorization header. This is the documented
-        # "no auth required" path (e.g. get_team_users).
-        h = cs._headers("")
-        assert "Authorization" not in h
-
-
-# ---------------------------------------------------------------------------
-# is_enabled
-# ---------------------------------------------------------------------------
-
 
 class TestIsEnabled:
     def test_enabled_when_url_set(self, monkeypatch):
@@ -139,21 +118,17 @@ class TestRequestCore:
     def test_builds_full_url_and_passes_method(self, base_url, monkeypatch):
         client = _install_client(
             monkeypatch, response=_FakeResponse(json_body={"ok": True}))
-        out = cs._request("GET", "/auth/me", token="tok")
+        out = cs._request("GET", "/hf/head-sha")
         assert out == {"ok": True}
         assert client.last["method"] == "GET"
-        assert client.last["url"] == base_url + "/auth/me"
+        assert client.last["url"] == base_url + "/hf/head-sha"
 
-    def test_auth_header_threaded_through(self, base_url, monkeypatch):
+
+    def test_never_sends_an_authorization_header(self, base_url, monkeypatch):
+        # There is no login, so nothing can ever be authenticated to central.
         client = _install_client(
             monkeypatch, response=_FakeResponse(json_body={}))
-        cs._request("GET", "/x", token="secret-token")
-        assert client.last["headers"]["Authorization"] == "Bearer secret-token"
-
-    def test_no_auth_header_when_token_absent(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={}))
-        cs._request("GET", "/auth/team-users")
+        cs._request("GET", "/hf/head-sha")
         assert "Authorization" not in client.last["headers"]
 
     def test_json_body_and_params_forwarded(self, base_url, monkeypatch):
@@ -300,275 +275,34 @@ class TestCentralServerError:
 # ---------------------------------------------------------------------------
 
 
-class TestBookmarks:
-    def test_add_bookmark_shape(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={"created": True}))
-        out = cs.add_bookmark("tok", "rule", "pub-123")
-        assert out == {"created": True}
-        assert client.last["method"] == "POST"
-        assert client.last["url"] == base_url + "/bookmarks"
-        assert client.last["json"] == {"asset_type": "rule", "public_id": "pub-123"}
-        assert client.last["headers"]["Authorization"] == "Bearer tok"
-
-    def test_remove_bookmark_shape(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={"removed": True}))
-        out = cs.remove_bookmark("tok", "ce", "pub-9")
-        assert out == {"removed": True}
-        assert client.last["method"] == "DELETE"
-        assert client.last["url"] == base_url + "/bookmarks/ce/pub-9"
-        # DELETE carries no JSON body.
-        assert client.last["json"] is None
-
-    def test_list_bookmarks_extracts_list(self, base_url, monkeypatch):
-        rows = [{"public_id": "a"}, {"public_id": "b"}]
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={"bookmarks": rows}))
-        out = cs.list_bookmarks("tok", "rule")
-        assert out == rows
-        assert client.last["url"] == base_url + "/bookmarks/rule"
-
-    def test_list_bookmarks_missing_key_returns_empty(self, base_url, monkeypatch):
-        _install_client(
-            monkeypatch, response=_FakeResponse(json_body={"other": 1}))
-        assert cs.list_bookmarks("tok", "rule") == []
-
-    def test_list_bookmarks_non_dict_response_returns_empty(self, base_url, monkeypatch):
-        # If the server returns a bare list (or anything non-dict), the helper
-        # must defensively return [] rather than blow up on .get().
-        _install_client(
-            monkeypatch,
-            response=_FakeResponse(
-                json_body=None, text="surprise", content_type="text/plain"))
-        assert cs.list_bookmarks("tok", "rule") == []
 
 
-# ---------------------------------------------------------------------------
-# Auth helpers
-# ---------------------------------------------------------------------------
-
-
-class TestAuthHelpers:
-    def test_register_shape(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={"id": 1}))
-        cs.register("alice", "a@x.io", "pw")
-        assert client.last["method"] == "POST"
-        assert client.last["url"] == base_url + "/auth/register"
-        assert client.last["json"] == {
-            "username": "alice", "email": "a@x.io", "password": "pw"}
-        # register is unauthenticated.
-        assert "Authorization" not in client.last["headers"]
-
-    def test_login_shape(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={"token": "t"}))
-        cs.login("a@x.io", "pw")
-        assert client.last["json"] == {"email": "a@x.io", "password": "pw"}
-        assert "Authorization" not in client.last["headers"]
-
-    def test_get_me_uses_token(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={"me": True}))
-        cs.get_me("mytoken")
-        assert client.last["url"] == base_url + "/auth/me"
-        assert client.last["headers"]["Authorization"] == "Bearer mytoken"
-
-    def test_update_me_only_includes_provided_fields(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={}))
-        cs.update_me("tok", display_name="New Name")
-        assert client.last["method"] == "PATCH"
-        assert client.last["json"] == {"display_name": "New Name"}
-        # bio omitted entirely since it was None.
-        assert "bio" not in client.last["json"]
-
-    def test_update_me_empty_when_nothing_provided(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={}))
-        cs.update_me("tok")
-        assert client.last["json"] == {}
-
-    def test_update_me_includes_empty_string_bio(self, base_url, monkeypatch):
-        # "" is not None, so an explicit empty bio (clearing it) IS sent.
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={}))
-        cs.update_me("tok", bio="")
-        assert client.last["json"] == {"bio": ""}
-
-    def test_get_users_by_username_empty_short_circuits(self, base_url, monkeypatch):
-        # Empty list returns [] WITHOUT hitting the network at all.
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={"users": [1]}))
-        assert cs.get_users_by_username([]) == []
-        assert client.calls == []
-
-    def test_get_users_by_username_joins_params(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch,
-            response=_FakeResponse(json_body={"users": [{"id": 1}]}))
-        out = cs.get_users_by_username(["alice", "bob"])
-        assert out == [{"id": 1}]
-        assert client.last["params"] == {"usernames": "alice,bob"}
-        # No auth required.
-        assert "Authorization" not in client.last["headers"]
-
-    def test_get_users_by_username_non_dict_returns_empty(self, base_url, monkeypatch):
-        _install_client(
-            monkeypatch,
-            response=_FakeResponse(
-                json_body=None, text="x", content_type="text/plain"))
-        assert cs.get_users_by_username(["alice"]) == []
-
-    def test_get_team_users_extracts_users(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch,
-            response=_FakeResponse(json_body={"users": [{"is_team": True}]}))
-        out = cs.get_team_users()
-        assert out == [{"is_team": True}]
-        assert client.last["url"] == base_url + "/auth/team-users"
-        assert "Authorization" not in client.last["headers"]
-
-    def test_get_team_users_missing_key_returns_empty(self, base_url, monkeypatch):
-        _install_client(
-            monkeypatch, response=_FakeResponse(json_body={}))
-        assert cs.get_team_users() == []
-
-    def test_get_team_users_non_dict_returns_empty(self, base_url, monkeypatch):
-        _install_client(
-            monkeypatch,
-            response=_FakeResponse(
-                json_body=None, text="x", content_type="text/plain"))
-        assert cs.get_team_users() == []
-
-    def test_record_publish_attribution_omits_published_at(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={}))
-        cs.record_publish_attribution("tok", "rule")
-        assert client.last["json"] == {"asset_type": "rule"}
-
-    def test_record_publish_attribution_includes_published_at(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={}))
-        cs.record_publish_attribution("tok", "rule", published_at="2026-01-01")
-        assert client.last["json"] == {
-            "asset_type": "rule", "published_at": "2026-01-01"}
-
-
-# ---------------------------------------------------------------------------
-# Ratings
-# ---------------------------------------------------------------------------
-
-
-class TestRatings:
-    def test_rate_minimal_payload(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={}))
-        cs.rate("tok", "rule", "pub-1", 5)
-        assert client.last["method"] == "POST"
-        assert client.last["url"] == base_url + "/ratings"
-        assert client.last["json"] == {
-            "asset_type": "rule", "asset_public_id": "pub-1", "score": 5}
-        assert "created_by_username" not in client.last["json"]
-
-    def test_rate_includes_created_by(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={}))
-        cs.rate("tok", "rule", "pub-1", 3, created_by_username="alice")
-        assert client.last["json"]["created_by_username"] == "alice"
-
-    def test_delete_rating_params(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={}))
-        cs.delete_rating("tok", "ce", "pub-7", created_by_username="bob")
-        assert client.last["method"] == "DELETE"
-        assert client.last["url"] == base_url + "/ratings/ce/pub-7"
-        assert client.last["params"] == {"created_by_username": "bob"}
-
-    def test_delete_rating_no_created_by_empty_params(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={}))
-        cs.delete_rating("tok", "ce", "pub-7")
-        assert client.last["params"] == {}
-
-    def test_get_rating_summary_path(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={"avg": 4.0}))
-        out = cs.get_rating_summary("tok", "rule", "pub-2")
-        assert out == {"avg": 4.0}
-        assert client.last["url"] == base_url + "/ratings/rule/pub-2"
-
-
-# ---------------------------------------------------------------------------
-# User discovery + search
-# ---------------------------------------------------------------------------
-
-
-class TestUserDiscovery:
-    def test_get_profile_path(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={"u": 1}))
-        cs.get_profile("alice")
-        assert client.last["url"] == base_url + "/users/profile/alice"
-
-    def test_search_users_default_params(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={}))
-        cs.search_users()
-        assert client.last["params"] == {"page": 1, "page_size": 20}
-        assert "q" not in client.last["params"]
-
-    def test_search_users_includes_query(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={}))
-        cs.search_users(q="bob", page=2, page_size=5)
-        assert client.last["params"] == {"page": 2, "page_size": 5, "q": "bob"}
-
-    def test_leaderboard_params(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={}))
-        cs.leaderboard(sort="contributions", page=3, page_size=10)
-        assert client.last["params"] == {
-            "sort": "contributions", "page": 3, "page_size": 10, "min_ratings": 0}
-
-    def test_leaderboard_forwards_min_ratings(self, base_url, monkeypatch):
-        client = _install_client(
-            monkeypatch, response=_FakeResponse(json_body={}))
-        cs.leaderboard(sort="rating", page=1, page_size=20, min_ratings=5)
-        assert client.last["params"] == {
-            "sort": "rating", "page": 1, "page_size": 20, "min_ratings": 5}
-
-
-# ---------------------------------------------------------------------------
-# HuggingFace write proxy
-# ---------------------------------------------------------------------------
 
 
 class TestHfProxy:
     def test_hf_head_sha_extracts_sha(self, base_url, monkeypatch):
         _install_client(
             monkeypatch, response=_FakeResponse(json_body={"sha": "deadbeef"}))
-        assert cs.hf_head_sha("tok") == "deadbeef"
+        assert cs.hf_head_sha() == "deadbeef"
 
     def test_hf_head_sha_missing_returns_none(self, base_url, monkeypatch):
         _install_client(
             monkeypatch, response=_FakeResponse(json_body={}))
-        assert cs.hf_head_sha("tok") is None
+        assert cs.hf_head_sha() is None
 
     def test_hf_head_sha_non_dict_returns_none(self, base_url, monkeypatch):
         _install_client(
             monkeypatch,
             response=_FakeResponse(
                 json_body=None, text="x", content_type="text/plain"))
-        assert cs.hf_head_sha("tok") is None
+        assert cs.hf_head_sha() is None
 
     def test_hf_commit_base64_encodes_content(self, base_url, monkeypatch):
         import base64
         client = _install_client(
             monkeypatch, response=_FakeResponse(json_body={"commit": "c1"}))
         ops = [{"path": "a.txt", "content": b"hello"}]
-        cs.hf_commit("tok", operations=ops, commit_message="msg")
+        cs.hf_commit(operations=ops, commit_message="msg")
         sent = client.last["json"]
         assert sent["commit_message"] == "msg"
         assert sent["parent_commit"] is None
@@ -580,14 +314,14 @@ class TestHfProxy:
     def test_hf_commit_passes_parent_commit(self, base_url, monkeypatch):
         client = _install_client(
             monkeypatch, response=_FakeResponse(json_body={}))
-        cs.hf_commit("tok", operations=[{"path": "p", "content": b""}],
+        cs.hf_commit(operations=[{"path": "p", "content": b""}],
                      commit_message="m", parent_commit="abc")
         assert client.last["json"]["parent_commit"] == "abc"
 
     def test_hf_commit_empty_operations(self, base_url, monkeypatch):
         client = _install_client(
             monkeypatch, response=_FakeResponse(json_body={}))
-        cs.hf_commit("tok", operations=[], commit_message="m")
+        cs.hf_commit(operations=[], commit_message="m")
         assert client.last["json"]["operations"] == []
 
 
@@ -601,21 +335,21 @@ class TestRpcLogging:
         _install_client(
             monkeypatch, response=_FakeResponse(status_code=200, json_body={}))
         with caplog.at_level("INFO", logger="central-rpc"):
-            cs._request("GET", "/auth/me", token="tok")
+            cs._request("GET", "/hf/head-sha")
         # The one-line breadcrumb records method, path, and status code.
         msgs = " ".join(r.getMessage() for r in caplog.records)
         assert "GET" in msgs
-        assert "/auth/me" in msgs
+        assert "/hf/head-sha" in msgs
         assert "200" in msgs
 
     def test_failure_logs_warning(self, base_url, monkeypatch, caplog):
         _install_client(monkeypatch, exc=httpx.ConnectError("refused"))
         with caplog.at_level("WARNING", logger="central-rpc"):
             with pytest.raises(cs.CentralServerError):
-                cs._request("GET", "/auth/me", token="tok")
+                cs._request("GET", "/hf/head-sha")
         msgs = " ".join(r.getMessage() for r in caplog.records)
         assert "FAIL" in msgs
-        assert "/auth/me" in msgs
+        assert "/hf/head-sha" in msgs
 
 
 # ---------------------------------------------------------------------------

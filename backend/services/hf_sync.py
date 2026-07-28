@@ -373,7 +373,7 @@ def ensure_neutral_corpus() -> int:
     token = _resolve_token()  # None is fine — public-repo reads work anonymously
     try:
         from services.hf_publish import _fetch_head_sha_and_manifest
-        _sha, manifest = _fetch_head_sha_and_manifest(token)
+        _sha, manifest = _fetch_head_sha_and_manifest()
     except Exception as e:
         logger.warning(f"[hf_sync] ensure_neutral_corpus: manifest fetch failed: {e}")
         return 0
@@ -968,7 +968,7 @@ def pull_all_aux_datasets() -> dict:
 
     try:
         from services.hf_publish import _fetch_head_sha_and_manifest
-        _sha, manifest = _fetch_head_sha_and_manifest(token)
+        _sha, manifest = _fetch_head_sha_and_manifest()
     except Exception as e:
         logger.warning(f"[hf_sync] aux pull: manifest fetch failed: {e}")
         return summary
@@ -1223,7 +1223,7 @@ def recover_pending_publishes(manifest: Optional[dict] = None, token: Optional[s
             logger.warning("[hf_sync] recover_pending_publishes: no HF_TOKEN, skipping")
             return out
         try:
-            _sha, manifest = _fetch_head_sha_and_manifest(token)
+            _sha, manifest = _fetch_head_sha_and_manifest()
         except Exception as e:
             logger.warning(f"[hf_sync] recover_pending_publishes: manifest fetch failed: {e}")
             return out

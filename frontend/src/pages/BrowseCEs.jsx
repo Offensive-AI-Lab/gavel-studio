@@ -66,13 +66,9 @@ const BrowseCEs = () => {
 
 
     useEffect(() => {
-        if (!user) {
-            navigate('/login');
-        } else {
-            fetchCes();
-            fetchCategories();
-            fetchBookmarks();
-        }
+        fetchCes();
+        fetchCategories();
+        fetchBookmarks();
     }, [navigate]);
 
     // Auto-refresh on any library mutation app-wide (AI-pipeline finishes,
@@ -381,7 +377,7 @@ const BrowseCEs = () => {
     });
 
     return (
-        <Layout onLogout={() => { sessionStorage.removeItem('token'); sessionStorage.removeItem('user'); sessionStorage.removeItem('models'); navigate('/login'); }}>
+        <Layout>
             <header className="page-header">
                 <div>
                     <CommunityTabs active="ces" />

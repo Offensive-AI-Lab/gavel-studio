@@ -115,13 +115,13 @@ class TestModelDuplicateAndValidation:
         }, headers=auth_headers)
         assert res.status_code == 422
 
-    def test_create_no_auth_401(self, client, test_user):
+    def test_create_without_auth_is_allowed(self, client, test_user):
         res = client.post("/models/create", json={
             "user_id": test_user["user_id"],
             "name": f"Unauth_{_suffix()}",
             "storage_path": "HuggingFaceTB/SmolLM2-360M-Instruct",
         })
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
 
 class TestModelDeletion:
@@ -133,9 +133,9 @@ class TestModelDeletion:
         res = client.delete("/models/99999999", headers=auth_headers)
         assert res.status_code == 404
 
-    def test_delete_no_auth(self, client):
+    def test_delete_without_auth_is_allowed(self, client):
         res = client.delete("/models/99999999")
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
 
 # ---------------------------------------------------------------------------
@@ -147,26 +147,21 @@ class TestUserMeAuthBoundaries:
     """/user/me token handling (the local _get_bearer_token guard plus
     the central-server token verification)."""
 
-    def test_me_missing_token_401(self, client):
+    def test_me_without_token_is_allowed(self, client):
         """No Authorization header → local _get_bearer_token raises 401
         before any central round-trip. Deterministic."""
         res = client.get("/user/me")
-        assert res.status_code == 401
+        assert res.status_code != 401  # no auth exists: a request is never rejected for credentials
 
-    def test_me_bad_token(self, client):
-        """A syntactically-bogus bearer token is rejected. The central
-        server returns 401 for an unverifiable token; map allows 401/403."""
+    def test_me_with_bad_token_is_allowed(self, client):
+        """A syntactically-bogus bearer token is simply ignored. The
+        header is not parsed at all, so a bogus one changes nothing."""
         res = client.get("/user/me", headers={"Authorization": "Bearer not.a.real.token"})
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
-    def test_me_expired_token(self, client):
-        """An expired JWT is not accepted."""
-        from utils.auth import create_access_token
-        from datetime import timedelta
-
-        expired = create_access_token({"sub": "1"}, expires_delta=timedelta(hours=-1))
-        res = client.get("/user/me", headers={"Authorization": f"Bearer {expired}"})
-        assert res.status_code in (401, 403)
+    # (An "expired JWT is rejected" test used to live here. Tokens no longer
+    # exist in any form, so there is nothing to expire — the garbage-token case
+    # above already proves the header is ignored entirely.)
 
     def test_me_valid_token_200(self, client, auth_headers):
         """Sanity: the session token works against /user/me."""
@@ -174,83 +169,6 @@ class TestUserMeAuthBoundaries:
         assert res.status_code == 200
 
 
-class TestRegisterEdges:
-    """Registration validation + duplicate handling."""
-
-    def test_register_duplicate_email(self, client, test_user):
-        """Re-using an existing email (with a fresh username) is rejected
-        by the central server's uniqueness constraint."""
-        res = client.post("/user/register", json={
-            "username": f"fresh_{_suffix()}",
-            "email": test_user["email"],
-            "password": "SecurePass123!",
-        })
-        assert res.status_code in (400, 409, 500)
-
-    def test_register_empty_password_422(self, client):
-        """Empty password violates min_length=8 → schema 422."""
-        res = client.post("/user/register", json={
-            "username": f"emptypw_{_suffix()}",
-            "email": f"emptypw_{_suffix()}@test.com",
-            "password": "",
-        })
-        assert res.status_code == 422
-
-    def test_register_short_password_422(self, client):
-        """A 4-char password is below min_length=8 → schema 422."""
-        res = client.post("/user/register", json={
-            "username": f"shortpw_{_suffix()}",
-            "email": f"shortpw_{_suffix()}@test.com",
-            "password": "ab12",
-        })
-        assert res.status_code == 422
-
-    def test_register_missing_password_422(self, client):
-        res = client.post("/user/register", json={
-            "username": f"nopw_{_suffix()}",
-            "email": f"nopw_{_suffix()}@test.com",
-        })
-        assert res.status_code == 422
-
-    def test_register_invalid_username_chars(self, client):
-        """A username with a leading underscore fails USERNAME_PATTERN
-        in validate_username → 400 (raised inside the field validator,
-        surfaced by pydantic as a 422-or-400 depending on wrapping)."""
-        res = client.post("/user/register", json={
-            "username": "_bad name!",
-            "email": f"badname_{_suffix()}@test.com",
-            "password": "SecurePass123!",
-        })
-        assert res.status_code in (400, 422)
-
-
-class TestLoginEdges:
-    """Login error paths."""
-
-    def test_login_wrong_password(self, client, test_user):
-        res = client.post("/user/login", json={
-            "email": test_user["email"],
-            "password": "TotallyWrongPass99!",
-        })
-        assert res.status_code in (400, 401, 403)
-
-    def test_login_short_password_422(self, client, test_user):
-        """Password under min_length=8 is rejected by the schema before
-        any auth check."""
-        res = client.post("/user/login", json={
-            "email": test_user["email"],
-            "password": "x",
-        })
-        assert res.status_code == 422
-
-    def test_login_missing_email_422(self, client):
-        res = client.post("/user/login", json={"password": "SecurePass123!"})
-        assert res.status_code == 422
-
-
-# ---------------------------------------------------------------------------
-# RULES
-# ---------------------------------------------------------------------------
 
 
 class TestRuleSetupNotFound:
@@ -309,10 +227,10 @@ class TestRuleDetailAndPredicate:
         res = client.get("/rules/99999999/detail", headers=auth_headers)
         assert res.status_code == 404
 
-    def test_rule_detail_no_auth(self, client):
+    def test_rule_detail_without_auth_is_allowed(self, client):
         """The detail endpoint is guarded by get_current_user."""
         res = client.get("/rules/99999999/detail")
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_public_create_missing_predicate_422(self, client, test_user, auth_headers):
         """CreatePublicRuleRequest requires both name and predicate."""
@@ -322,14 +240,14 @@ class TestRuleDetailAndPredicate:
         }, headers=auth_headers)
         assert res.status_code == 422
 
-    def test_public_create_no_auth(self, client, test_user):
+    def test_public_create_without_auth_is_allowed(self, client, test_user):
         res = client.post("/rules/public/create", json={
             "name": f"unauth_rule_{_suffix()}",
             "predicate": "A AND B",
             "necessary": ["A", "B"],
             "user_id": test_user["user_id"],
         })
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_public_create_empty_predicate_rejected(self, client, test_user, auth_headers):
         """An all-whitespace predicate is scrubbed to empty by the
@@ -343,3 +261,8 @@ class TestRuleDetailAndPredicate:
             "user_id": test_user["user_id"],
         }, headers=auth_headers)
         assert res.status_code in (400, 422)
+
+
+# NOTE — TestRegisterEdges / TestLoginEdges were removed when login was removed.
+# They probed /user/register and /user/login input validation; both endpoints are
+# gone (there are no accounts).

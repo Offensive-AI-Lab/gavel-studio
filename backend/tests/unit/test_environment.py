@@ -74,13 +74,13 @@ class TestEnvironmentVariables:
         assert not hasattr(auth, "SECRET_KEY"), "backend must not hold a JWT signing secret"
         assert hasattr(auth, "get_current_user")
 
-    def test_test_only_token_helpers_roundtrip(self):
-        """The TEST-ONLY helpers (used by the suite, not by real auth) still
-        round-trip a token using a fixed test secret — no env var involved."""
-        from utils.auth import create_access_token, decode_access_token
-        token = create_access_token({"sub": "1"})
-        decoded = decode_access_token(token)
-        assert decoded["sub"] == "1"
+    def test_identity_is_a_fixed_local_user(self):
+        """There is no login: get_current_user always resolves to the one
+        seeded local user, and no token machinery survives."""
+        import utils.auth as auth
+        assert auth.get_current_user() == auth.LOCAL_USER_ID
+        assert not hasattr(auth, "create_access_token")
+        assert not hasattr(auth, "decode_access_token")
 
     # NOTE: a `test_database_env_vars_present` check (which actually connects
     # to verify env vars resolve to a working DB) lives in the integration

@@ -40,10 +40,6 @@ vi.mock('../../src/api', () => ({
     removeRuleBookmark: vi.fn(() => empty()),
     // useLibrarySearch reaches for this; default = no results.
     searchLibrary: vi.fn(() => empty({ results: [], total_results: 0 })),
-    // StarRating (RuleCard child) fetches this on mount once a public_id exists.
-    getRatingSummary: vi.fn(() => empty({ asset_type: 'rule', rating_count: 0, rating_avg: null, your_score: null })),
-    rateAsset: vi.fn(() => empty()),
-    withdrawRating: vi.fn(() => empty()),
 }));
 
 // ---- Publish service: assert it's called, never run the real pipeline ----
@@ -93,7 +89,6 @@ const renderBrowse = (entry = '/browse') =>
             <MemoryRouter initialEntries={[entry]}>
                 <Routes>
                     <Route path="/browse" element={<Browse />} />
-                    <Route path="/login" element={<div data-testid="login-page" />} />
                 </Routes>
             </MemoryRouter>
         </TutorialProvider>,
@@ -138,15 +133,7 @@ beforeEach(() => {
     mockShowAlertDialog.mockResolvedValue(undefined);
 });
 
-describe('Browse — mount & auth', () => {
-    it('redirects to /login when there is no stored user', async () => {
-        sessionStorage.removeItem('user');
-        renderBrowse();
-        await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/login'));
-        // The data fetches are skipped when unauthenticated.
-        expect(api.getPublicRules).not.toHaveBeenCalled();
-    });
-
+describe('Browse — mount', () => {
     it('fetches rules, categories and bookmarks on mount when authenticated', async () => {
         renderBrowse();
         await waitFor(() => expect(api.getPublicRules).toHaveBeenCalled());

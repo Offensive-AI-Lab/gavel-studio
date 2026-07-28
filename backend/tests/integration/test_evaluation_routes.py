@@ -252,14 +252,19 @@ class TestDefaultEvalPairsPerRule:
     Regression: every set used to be tagged with the first rule, collapsing all
     rules onto one use-case row."""
 
-    def test_pairs_carry_each_rules_own_name(self, client, test_model, auth_headers):
+    def test_pairs_carry_each_rules_own_name(self, client, test_model, test_user, auth_headers):
         from utils.PostgreSQL import execute_query, execute_query_dict
         from routes.evaluation import _load_default_eval_pairs
 
+        # user_id is NOT NULL on classifiers (schema v15). This raw INSERT used
+        # to omit it and still succeed, because that migration only applies the
+        # constraint when no NULL rows remain — a legacy NULL row was holding it
+        # off. Supply the owner explicitly so the test matches the schema (and
+        # every real code path) rather than depending on an unenforced column.
         cid = execute_query_dict(
-            "INSERT INTO classifiers (model_id, name, status) "
-            "VALUES (%s, %s, 'untrained') RETURNING classifier_id",
-            (test_model["model_id"], f"evalpairs_{_uniq()}"),
+            "INSERT INTO classifiers (model_id, user_id, name, status) "
+            "VALUES (%s, %s, %s, 'untrained') RETURNING classifier_id",
+            (test_model["model_id"], test_user["user_id"], f"evalpairs_{_uniq()}"),
         )[0]["classifier_id"]
 
         # Two rules, each attached with a custom_name + a ready positive AND
@@ -473,25 +478,25 @@ class TestEvalCalibrateEvaluateGating:
     check raises before the 400 path in some environments.
     """
 
-    def test_calibrate_requires_auth_missing_header_403(self, client, test_classifier):
+    def test_calibrate_without_auth_header_is_allowed(self, client, test_classifier):
         cid = test_classifier["classifier_id"]
         res = client.post(f"/evaluation/{cid}/calibrate", json={})
         # HTTPBearer(auto_error=True): missing header -> 403.
-        assert res.status_code == 403
+        assert res.status_code != 403  # no auth exists: a request is never rejected for credentials
 
-    def test_evaluate_requires_auth_missing_header_403(self, client, test_classifier):
+    def test_evaluate_without_auth_header_is_allowed(self, client, test_classifier):
         cid = test_classifier["classifier_id"]
         res = client.post(f"/evaluation/{cid}/evaluate", json={})
-        assert res.status_code == 403
+        assert res.status_code != 403  # no auth exists: a request is never rejected for credentials
 
-    def test_calibrate_invalid_token_401(self, client, test_classifier):
+    def test_calibrate_with_garbage_token_is_allowed(self, client, test_classifier):
         cid = test_classifier["classifier_id"]
         res = client.post(
             f"/evaluation/{cid}/calibrate",
             json={},
             headers={"Authorization": "Bearer not-a-real-jwt"},
         )
-        assert res.status_code == 401
+        assert res.status_code != 401  # no auth exists: a request is never rejected for credentials
 
     def test_calibrate_untrained_classifier_rejected(self, client, test_classifier, auth_headers):
         cid = test_classifier["classifier_id"]
@@ -564,7 +569,7 @@ class TestEvalTestDatasetListing:
 
     def test_list_by_rule_requires_auth(self, client):
         res = client.get("/ai/test-sets/by-rule/999999999")
-        assert res.status_code == 403
+        assert res.status_code != 403  # no auth exists: a request is never rejected for credentials
 
     def test_test_set_status_not_found_404(self, client, auth_headers):
         res = client.get("/ai/test-set/999999999/status", headers=auth_headers)

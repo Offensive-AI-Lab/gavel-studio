@@ -1,13 +1,4 @@
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-
-_bookmark_bearer = HTTPBearer(auto_error=False)
-
-
-def _bookmark_token(creds: HTTPAuthorizationCredentials = Depends(_bookmark_bearer)) -> str:
-    if not creds:
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    return creds.credentials
 from pydantic import BaseModel, Field, field_validator
 from typing import List
 from utils.auth import get_current_user
@@ -533,20 +524,20 @@ def create_public_rule(req: CreatePublicRuleRequest, _: int = Depends(get_curren
 # --- Rule Bookmarks ---
 
 @router.get("/public/bookmarks/{user_id}")
-def get_rule_bookmarks(user_id: int, token: str = Depends(_bookmark_token)):
-    """List rule bookmarks for the authenticated user (user_id in path
-    is ignored — the token is authoritative)."""
+def get_rule_bookmarks(user_id: int):
+    """List rule bookmarks (user_id in the path is ignored — there is one
+    local user)."""
     try:
-        return {"bookmarks": BookmarkService.list(_BOOKMARK_ASSET, token)}
+        return {"bookmarks": BookmarkService.list(_BOOKMARK_ASSET)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/public/bookmark")
-def bookmark_rule(req: RuleBookmarkRequest, token: str = Depends(_bookmark_token)):
+def bookmark_rule(req: RuleBookmarkRequest):
     from services.bookmarks import BookmarkLookupError
     try:
-        BookmarkService.add(_BOOKMARK_ASSET, token, req.rule_id)
+        BookmarkService.add(_BOOKMARK_ASSET, req.rule_id)
         return {"status": "bookmarked"}
     except BookmarkLookupError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -555,9 +546,9 @@ def bookmark_rule(req: RuleBookmarkRequest, token: str = Depends(_bookmark_token
 
 
 @router.delete("/public/bookmark/{user_id}/{rule_id}")
-def remove_rule_bookmark_endpoint(user_id: int, rule_id: int, token: str = Depends(_bookmark_token)):
+def remove_rule_bookmark_endpoint(user_id: int, rule_id: int):
     try:
-        BookmarkService.remove(_BOOKMARK_ASSET, token, rule_id)
+        BookmarkService.remove(_BOOKMARK_ASSET, rule_id)
         return {"status": "removed"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -579,20 +570,19 @@ def get_public_rule_sets_endpoint():
 
 
 @router.get("/public/rule-set/bookmarks/{user_id}")
-def get_rule_set_bookmarks(user_id: int, token: str = Depends(_bookmark_token)):
-    """List the user's rule-set bookmarks (token authoritative; path user_id
-    ignored). Hydrated from the local rule_sets cache by public_id."""
+def get_rule_set_bookmarks(user_id: int):
+    """List rule-set bookmarks (path user_id ignored — one local user)."""
     try:
-        return {"bookmarks": BookmarkService.list(_RULE_SET_BOOKMARK_ASSET, token)}
+        return {"bookmarks": BookmarkService.list(_RULE_SET_BOOKMARK_ASSET)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/public/rule-set/bookmark")
-def bookmark_rule_set(req: RuleSetBookmarkRequest, token: str = Depends(_bookmark_token)):
+def bookmark_rule_set(req: RuleSetBookmarkRequest):
     from services.bookmarks import BookmarkLookupError
     try:
-        BookmarkService.add(_RULE_SET_BOOKMARK_ASSET, token, req.rule_set_id)
+        BookmarkService.add(_RULE_SET_BOOKMARK_ASSET, req.rule_set_id)
         return {"status": "bookmarked"}
     except BookmarkLookupError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -601,9 +591,9 @@ def bookmark_rule_set(req: RuleSetBookmarkRequest, token: str = Depends(_bookmar
 
 
 @router.delete("/public/rule-set/bookmark/{user_id}/{rule_set_id}")
-def remove_rule_set_bookmark_endpoint(user_id: int, rule_set_id: int, token: str = Depends(_bookmark_token)):
+def remove_rule_set_bookmark_endpoint(user_id: int, rule_set_id: int):
     try:
-        BookmarkService.remove(_RULE_SET_BOOKMARK_ASSET, token, rule_set_id)
+        BookmarkService.remove(_RULE_SET_BOOKMARK_ASSET, rule_set_id)
         return {"status": "removed"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

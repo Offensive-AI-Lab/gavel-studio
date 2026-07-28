@@ -43,11 +43,6 @@ vi.mock('../../src/api', () => ({
     getTrainingStatus: vi.fn(() => ok({ status: 'untrained', is_training: false, training_phase: null, training_phase_detail: null })),
     downloadClassifier: vi.fn(() => Promise.resolve()),
     listLocalDrafts: vi.fn(() => ok({ rules: [] })),
-    // StarRating (rendered transitively by RuleCard) reaches for these.
-    getRatingSummary: vi.fn(() => ok({ rating_count: 0, rating_avg: null, your_score: null })),
-    rateAsset: vi.fn(() => ok()),
-    withdrawRating: vi.fn(() => ok()),
-    // ComputeBadge (rendered by RulesManager) fetches this on mount.
     getComputeStatus: vi.fn(() => Promise.resolve({ data: { workloads: {} } })),
     // Machine picker — default to a single target so training proceeds directly.
     getComputeTargets: vi.fn(() => Promise.resolve({ data: { targets: [{ name: 'local', label: 'This machine' }] } })),

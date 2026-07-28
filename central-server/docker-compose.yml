@@ -7,16 +7,13 @@
 # backend + frontend + postgres) — different machine, different lifecycle.
 #
 #   cd central-server
-#   cp .env.example .env          # set JWT_SECRET_KEY + HF_TOKEN (see below)
+#   cp .env.example .env          # set HF_TOKEN (see below)
 #   docker compose up --build
 #
 # Serves on http://localhost:8001 — put a TLS reverse proxy (nginx/Caddy) in
 # front of it for anything internet-facing.
 #
 # Config comes from central-server/.env:
-#   * JWT_SECRET_KEY  (required) — the signing secret for the tokens this server
-#                                  issues. Generate one:
-#                                  python -c "import secrets; print(secrets.token_urlsafe(48))"
 #   * HF_TOKEN        (optional) — write-scope HF token, only to allow publishing.
 #   * ALLOWED_ORIGINS (optional) — CORS allowlist.
 # DATABASE_URL from .env is IGNORED here — this compose points the server at its
@@ -51,7 +48,7 @@ services:
     depends_on:
       central-postgres:
         condition: service_healthy
-    # JWT_SECRET_KEY / HF_TOKEN / ALLOWED_ORIGINS come from central-server/.env;
+    # HF_TOKEN / ALLOWED_ORIGINS come from central-server/.env;
     # DATABASE_URL is forced to the bundled postgres so the stack is isolated.
     env_file:
       - .env

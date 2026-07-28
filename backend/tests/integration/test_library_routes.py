@@ -277,7 +277,7 @@ class TestDraftCEGating:
 class TestDraftsResponseShape:
     def test_drafts_requires_auth(self, client):
         res = client.get("/library/drafts")
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_drafts_returns_rules_and_ces_keys(self, client, auth_headers):
         res = client.get("/library/drafts", headers=auth_headers)
@@ -319,7 +319,7 @@ class TestDeleteDraftRule:
 
     def test_delete_requires_auth(self, client):
         res = client.delete("/library/drafts/rule/1")
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
 
 class TestDeleteDraftCE:
@@ -358,7 +358,7 @@ class TestDeleteDraftCE:
 class TestCheckNameValidation:
     def test_check_name_requires_auth(self, client):
         res = client.get("/library/check-name", params={"kind": "rule", "name": "x"})
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_check_name_bad_kind_400(self, client, auth_headers):
         res = client.get(
@@ -384,7 +384,7 @@ class TestCheckNameValidation:
 class TestGetPublicRecord:
     def test_record_requires_auth(self, client):
         res = client.get("/library/record/rule/some-pid")
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_record_bad_kind_400(self, client, auth_headers):
         res = client.get("/library/record/widget/some-pid", headers=auth_headers)

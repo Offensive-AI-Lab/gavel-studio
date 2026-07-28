@@ -13,14 +13,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.utils.auth import get_current_user
 from app.services.manifest_versions import augment_manifest
 
 
 @pytest.fixture
 def client(monkeypatch):
-    app.dependency_overrides[get_current_user] = lambda: 1
-
     from app.routes import hf as hf_route
     monkeypatch.setattr(hf_route, "HF_TOKEN", "fake-token")
 

@@ -7,7 +7,6 @@ import time
 import zipfile
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from typing import List, Optional
 from utils.auth import get_current_user
@@ -15,16 +14,6 @@ from utils.ownership import (
     assert_owns_classifier, assert_owns_model,
     require_classifier_owner, require_model_owner,
 )
-
-# Forwarded bearer token for publish-before-export (the central server holds the
-# HF write token; we pass the user's JWT through so it can authorize the commit).
-_bundle_bearer = HTTPBearer(auto_error=False)
-
-
-def _bundle_token(creds: HTTPAuthorizationCredentials = Depends(_bundle_bearer)) -> str:
-    if not creds:
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    return creds.credentials
 from sql_scripts.model_scripts import (
     create_classifier,
     get_model_classifiers,
@@ -1050,7 +1039,6 @@ def export_start(
     background_tasks: BackgroundTasks,
     tier: str = "model+calibration",
     user_id: int = Depends(get_current_user),
-    auth_token: str = Depends(_bundle_token),
 ):
     """Kick off an export as a background job and return its job_id immediately.
 
@@ -1072,7 +1060,7 @@ def export_start(
 
     job_id = bundle_jobs.create_job(user_id, "export", classifier_id=classifier_id, tier=tier, phase="Queued…")
     bundle_jobs.cleanup_prior_export_artifacts(user_id, classifier_id, keep_job_id=job_id)
-    background_tasks.add_task(bundle_jobs.run_export_job, job_id, user_id, classifier_id, tier, auth_token)
+    background_tasks.add_task(bundle_jobs.run_export_job, job_id, user_id, classifier_id, tier)
     return {"job_id": job_id}
 
 

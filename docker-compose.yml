@@ -1,7 +1,7 @@
 # Single-command bring-up for the WHOLE stack (the alternative to ./run.sh).
 #
 # ONE env file for everything: backend/.env. Point compose at it with
-# --env-file so its ${VAR} interpolation (JWT_SECRET_KEY, HF_TOKEN,
+# --env-file so its ${VAR} interpolation (HF_TOKEN,
 # SLURM_SSH_KEY_FILE) comes from that same file — there is NO repo-root .env.
 #
 #   docker compose --env-file backend/.env up --build
@@ -31,7 +31,7 @@
 # (Native dev also uses backend/.env — see ./run.sh. One file, both modes.)
 #
 # This stack = postgres + backend + frontend ONLY. It connects to a REMOTE
-# central server (auth/community); set its URL in backend/.env (CENTRAL_SERVER_URL).
+# central server (HF publish proxy); set its URL in backend/.env (CENTRAL_SERVER_URL).
 # The central server is a SEPARATE, isolated deployment — see
 # central-server/docker-compose.yml. It is NOT started by this file.
 #
@@ -75,16 +75,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      # NB: no hard dependency on `central` — the backend only calls it at
-      # login, not at boot. That lets you point CENTRAL_SERVER_URL at a REMOTE
-      # central and skip the local one entirely:
+      # NB: no hard dependency on `central` — the backend only calls it when
+      # PUBLISHING, never at boot (there is no login). That lets you point
+      # CENTRAL_SERVER_URL at a REMOTE central, or omit it entirely:
       #   docker compose up postgres backend frontend
     # ── Config: ONE source of truth = backend/.env ──────────────────────────
     # backend/.env is bind-mounted at /app/.env (see volumes) and loaded by the
     # backend's load_dotenv. load_dotenv does NOT override variables that are
     # already set, so the handful of CONTAINER-ONLY values in `environment:`
     # below win, and EVERYTHING ELSE (OPENAI_API_KEY, CENTRAL_SERVER_URL,
-    # JWT_SECRET_KEY, SLURM_HOST, SLURM_USER, the optional SLURM_* tuning, ...)
+    # SLURM_HOST, SLURM_USER, the optional SLURM_* tuning, ...)
     # comes from backend/.env. So you edit ONE file — backend/.env — whether you
     # run with Docker or natively. There is no separate repo-root app config.
     environment:

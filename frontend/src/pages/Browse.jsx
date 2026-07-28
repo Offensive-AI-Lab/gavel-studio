@@ -61,14 +61,9 @@ const Browse = () => {
     });
 
     useEffect(() => {
-        const storedUser = sessionStorage.getItem('user');
-        if (!storedUser) {
-            navigate('/login');
-        } else {
-            fetchRules();
-            fetchCategories();
-            fetchBookmarks();
-        }
+        fetchRules();
+        fetchCategories();
+        fetchBookmarks();
     }, [navigate]);
 
     const normalizeRule = (rule) => {
@@ -239,11 +234,6 @@ const Browse = () => {
 
     const readonlyNotice = () => showAlertDialog({ title: 'Read-only', message: 'Public rules cannot be modified here.', variant: 'info' });
 
-    const handleLogout = () => {
-        sessionStorage.removeItem('token'); sessionStorage.removeItem('user'); sessionStorage.removeItem('models');
-        navigate('/login');
-    };
-
     // Filter rules locally based on search categories when not performing a text search
     const filteredRules = rules.filter((rule) => {
         if (searchCategories.length === 0) return true;
@@ -265,7 +255,7 @@ const Browse = () => {
     });
 
     return (
-        <Layout onLogout={handleLogout}>
+        <Layout>
             <header className="page-header">
                 <div>
                     <CommunityTabs active="rules" />

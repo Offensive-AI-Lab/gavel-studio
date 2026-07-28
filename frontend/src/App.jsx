@@ -1,11 +1,7 @@
 import { useEffect, useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate, Link } from 'react-router-dom';
-import { FiArrowRight, FiLoader, FiShield } from 'react-icons/fi';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { FiLoader } from 'react-icons/fi';
 import './App.css';
-import './css/auth.css';
-import AuthAside from './components/AuthAside';
-import Login from './pages/Login';
-import Register from './pages/Register';
 import RulesManager from './pages/RulesManager';
 import Guardrails from './pages/Guardrails';
 import Workspace from './pages/Workspace';
@@ -29,40 +25,7 @@ import ComparePolicy from './pages/ComparePolicy';
 import Tutorial from './components/Tutorial/Tutorial';
 import HelpButton from './components/Tutorial/HelpButton';
 import { getBackendHealth } from './api';
-
-// Landing page — first thing the user sees at "/". Reuses the auth-page
-// shell (gradient background, brand aside on the left, focused card on
-// the right) so the visual transition Landing → Register/Login → app
-// reads as one continuous experience rather than three separate skins.
-const LandingPage = () => {
-  return (
-    <div className="auth-page">
-      <div className="auth-shell">
-        <AuthAside />
-        <div className="auth-card">
-          <div className="auth-header">
-            <div className="auth-logo"><FiShield size={28} /></div>
-            <h1 className="auth-title">Welcome to Gavel</h1>
-            <p className="auth-subtitle">
-              AI safety guardrails, evaluated end-to-end. Set up an
-              account in seconds — your rules and library sync from the
-              start.
-            </p>
-          </div>
-
-          <div className="landing-actions">
-            <Link to="/register" className="landing-cta-primary">
-              Get started <FiArrowRight />
-            </Link>
-            <Link to="/login" className="landing-cta-ghost">
-              I already have an account
-            </Link>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
+import { seedLocalUser } from './localUser';
 
 const WarmingUpSplash = ({ status }) => (
   <div style={{
@@ -102,6 +65,10 @@ const WarmingUpSplash = ({ status }) => (
   </div>
 );
 
+// Seed the single local user at module load — BEFORE any component renders, so
+// the pages that read sessionStorage during their first render already find it.
+seedLocalUser();
+
 function App() {
   const [backendReady, setBackendReady] = useState(false);
   const [healthStatus, setHealthStatus] = useState('checking'); // 'checking' | 'unreachable' | 'warming' | 'ready'
@@ -134,21 +101,6 @@ function App() {
     };
     check();
 
-    // Clear any stale token from previous sessions so a half-loaded login
-    // doesn't drop us into a protected page with an expired/invalid token.
-    const token = sessionStorage.getItem('token');
-    if (token) {
-      try {
-        const payload = JSON.parse(atob(token.split('.')[1] || ''));
-        if (payload.exp && payload.exp * 1000 < Date.now()) {
-          sessionStorage.removeItem('token');
-          sessionStorage.removeItem('user');
-        }
-      } catch {
-        sessionStorage.removeItem('token');
-        sessionStorage.removeItem('user');
-      }
-    }
     return () => { cancelled = true; };
   }, []);
 
@@ -168,9 +120,11 @@ function App() {
                 useLocation(), so it also lives inside the Router. */}
             <HelpButton />
             <Routes>
-              <Route path="/" element={<LandingPage />} />
-              <Route path="/login" element={<Login />} />
-              <Route path="/register" element={<Register />} />
+              {/* No login: "/" is the app itself. /login and /register are
+                  kept as redirects so old bookmarks don't 404. */}
+              <Route path="/" element={<Navigate to="/workspace" replace />} />
+              <Route path="/login" element={<Navigate to="/workspace" replace />} />
+              <Route path="/register" element={<Navigate to="/workspace" replace />} />
               <Route path="/workspace" element={<Workspace />} />
               {/* Community hub: Rules + CEs (content) and People (contributors)
                   under one section with tabs. /browse* are kept as redirects so

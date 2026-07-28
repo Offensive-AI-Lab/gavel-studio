@@ -163,7 +163,7 @@ def _safe_unlink(path) -> None:
 # Runners (executed on a background-task thread; must never raise)
 # ---------------------------------------------------------------------------
 
-def run_export_job(job_id: int, user_id: int, classifier_id: int, tier: str, auth_token: str) -> None:
+def run_export_job(job_id: int, user_id: int, classifier_id: int, tier: str) -> None:
     from services import classifier_bundle as cb
     try:
         a = cb.assess_export(classifier_id)
@@ -178,7 +178,7 @@ def run_export_job(job_id: int, user_id: int, classifier_id: int, tier: str, aut
             _set_phase(job_id, "Publishing rules to the library…")
             from services.hf_publish import publish_rule
             for item in a["unpublished"]:
-                res = publish_rule(item["rule_id"], publisher_user_id=user_id, auth_token=auth_token)
+                res = publish_rule(item["rule_id"], publisher_user_id=user_id)
                 ok = getattr(res, "status", None) is not None and res.status.name == "SUCCESS"
                 if not ok:
                     return _set_error(

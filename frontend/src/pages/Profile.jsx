@@ -7,22 +7,18 @@
 //
 // Layout:
 //   * Header card — display name, @username, member-since, is_team badge,
-//     stats (contribution counts + avg rating received), and an
+//     stats (contribution counts), and an
 //     "Edit profile" button when you're viewing your own profile.
 //   * Bio paragraph (read-only on others; editable inline on own profile).
 //   * Tab bar — Rules / CEs.
 //   * Paginated list of the user's published contributions of the
 //     active tab type.
 //
-// Phase 2 deliberately omits user-rating display (derived from
-// contribution ratings — same number as avg_rating_received on the
-// header), since the storage trigger already computes it; we just show
-// the value. Direct user-to-user ratings are out of scope per design.
 
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
-    FiArrowLeft, FiHome, FiUsers, FiUser, FiStar, FiAward, FiEdit2,
+    FiArrowLeft, FiHome, FiUsers, FiUser, FiAward, FiEdit2,
     FiSave, FiX,
 } from 'react-icons/fi';
 import Layout from '../components/Layout/Layout';
@@ -57,7 +53,7 @@ const Profile = () => {
     const [contribLoading, setContribLoading] = useState(false);
     const [contribData, setContribData] = useState({ items: [], total: 0 });
     // Bumped by useLibraryRefresh to force the contributions effect to
-    // re-fetch after any library-mutation event (rating, bookmark, etc.)
+    // re-fetch after any library-mutation event (bookmark, publish, etc.)
     // even when the (profile, tab, page, pageSize) tuple is unchanged.
     const [contribRefreshTick, setContribRefreshTick] = useState(0);
 
@@ -82,7 +78,7 @@ const Profile = () => {
     const pageHelp = {
         title: 'Profile',
         summary:
-            'Public profile pages show what a user has contributed to the library — their published rules and CEs, plus the average rating those have received. Click any "by [username]" link in Browse to get here.',
+            'Profile pages show what an author has contributed to the library — their published rules and CEs. Click any "by [username]" link in Browse to get here.',
         sections: [
             {
                 heading: 'On your own profile',
@@ -104,8 +100,8 @@ const Profile = () => {
     useTutorialContent(pageHelp);
 
     // refetchProfile is callable from both the URL-change effect AND
-    // the library-changed listener below, so a rating posted on this
-    // page updates the header stats (rules / CEs counts + avg rating)
+    // the library-changed listener below, so a publish from this page
+    // updates the header stats (rules / CEs counts)
     // immediately without a page refresh.
     //
     // The `silent` flag skips the full-page spinner — used by the
@@ -148,21 +144,9 @@ const Profile = () => {
         refetchProfile(false);
     }, [username, refetchProfile]);
 
-    // Re-fetch the profile header (avg rating, count) when a rating is
-    // submitted or withdrawn anywhere on the page. StarRating dispatches
-    // 'gavel:ratingChanged' after a successful rate — lighter than the
-    // full library-refresh event which would collapse expanded cards.
-    useEffect(() => {
-        const handler = () => refetchProfile(true);
-        window.addEventListener('gavel:ratingChanged', handler);
-        return () => window.removeEventListener('gavel:ratingChanged', handler);
-    }, [refetchProfile]);
-
-    // Listen for any library-mutation event in the app (rating posted /
-    // withdrawn, bookmark toggled, draft published, etc.) and refresh
-    // both the profile header AND the contributions list silently.
-    // This is what makes "rate a rule on the profile page" update the
-    // header's avg rating + count instantly.
+    // Listen for any library-mutation event in the app (bookmark toggled,
+    // draft published, etc.) and refresh both the profile header AND the
+    // contributions list silently.
     useLibraryRefresh(useCallback(() => {
         if (!username) return;
         refetchProfile(true);
@@ -232,9 +216,6 @@ const Profile = () => {
     // Keyed on profile?.username (stable string) instead of `profile`
     // (object reference that changes on every re-fetch). This prevents
     // the contributions list from re-fetching when only the profile
-    // header's rating stats changed — which is what happens after
-    // gavel:ratingChanged fires and refetchProfile(true) runs. Without
-    // this, every rating click re-fetches contributions → cards
     // re-render → expanded card collapses.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [profile?.username, tab, page, pageSize, contribRefreshTick]);
@@ -392,7 +373,6 @@ const Profile = () => {
     }
 
     const displayName = profile.display_name || profile.username;
-    const avgRating = profile.avg_rating_received;
 
     return (
         <Layout>
@@ -423,15 +403,6 @@ const Profile = () => {
                         <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', color: '#cbd5e1', fontSize: '0.9rem' }}>
                             <span><strong style={{ color: '#e2e8f0' }}>{profile.contribution_count_rules}</strong> rules</span>
                             <span><strong style={{ color: '#e2e8f0' }}>{profile.contribution_count_ces}</strong> CEs</span>
-                            {avgRating !== null && avgRating !== undefined ? (
-                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                                    <FiStar style={{ color: '#fcd34d' }} />
-                                    <strong style={{ color: '#e2e8f0' }}>{avgRating.toFixed(1)}</strong>
-                                    <span style={{ color: '#94a3b8' }}>({profile.total_rating_count} {profile.total_rating_count === 1 ? 'rating' : 'ratings'})</span>
-                                </span>
-                            ) : (
-                                <span style={{ color: '#64748b' }}>No ratings yet</span>
-                            )}
                         </div>
                         {profile.member_since && (
                             <p style={{ margin: '10px 0 0 0', color: '#64748b', fontSize: '0.85rem' }}>

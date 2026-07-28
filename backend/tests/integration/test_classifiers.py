@@ -15,12 +15,12 @@ class TestClassifierCreation:
         cls = data.get("classifier", data)
         assert "classifier_id" in cls
 
-    def test_create_classifier_no_auth(self, client, test_model):
+    def test_create_classifier_without_auth_is_allowed(self, client, test_model):
         res = client.post("/classifiers/create", json={
             "model_id": test_model["model_id"],
             "name": "NoAuth",
         })
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_create_classifier_invalid_model(self, client, auth_headers):
         res = client.post("/classifiers/create", json={

@@ -65,7 +65,8 @@ describe('Sidebar — header & nav', () => {
         expect(screen.getByText('RECENTS')).toBeInTheDocument();
         // "Rule Sets" appears twice — the workspace item and the recents group.
         expect(screen.getAllByText('Rule Sets').length).toBeGreaterThanOrEqual(2);
-        expect(screen.getByText('Logout')).toBeInTheDocument();
+        // No Logout: there is no login.
+        expect(screen.queryByText('Logout')).not.toBeInTheDocument();
     });
 
     it('no longer renders a Models item or tree', () => {
@@ -153,12 +154,4 @@ describe('Sidebar — footer', () => {
         expect(screen.getByText('a@b.c')).toBeInTheDocument();
     });
 
-    it('logout clears storage and navigates to /login', () => {
-        sessionStorage.setItem('token', 't');
-        renderSidebar();
-        fireEvent.click(screen.getByText('Logout'));
-        expect(sessionStorage.getItem('token')).toBeNull();
-        expect(sessionStorage.getItem('user')).toBeNull();
-        expect(mockNavigate).toHaveBeenCalledWith('/login');
-    });
 });

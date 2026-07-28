@@ -604,13 +604,11 @@ const RulesManager = () => {
         }
     };
 
-    const handleLogout = () => { sessionStorage.removeItem('token'); sessionStorage.removeItem('user'); sessionStorage.removeItem('models'); navigate('/login'); };
 
     if (!user) return null;
 
     return (
         <Layout 
-            onLogout={handleLogout} 
             currentModel={sidebarContext.modelName} 
             currentClassifier={sidebarContext.classifierName} 
             classifierId={classifierId}

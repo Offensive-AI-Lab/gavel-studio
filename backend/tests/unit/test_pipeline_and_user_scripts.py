@@ -482,54 +482,6 @@ def _patch_user_dict(monkeypatch, recorder):
     monkeypatch.setattr(us, "execute_query_dict", recorder)
 
 
-class TestSyncUserToLocal:
-    def test_upsert_passes_full_profile(self, monkeypatch):
-        rec = _Recorder(result=None)
-        _patch_user_query(monkeypatch, rec)
-        us.sync_user_to_local({
-            "user_id": 5,
-            "username": "alice",
-            "email": "a@x.io",
-            "display_name": "Alice",
-            "bio": "hi",
-            "is_team": True,
-            "tutorial_seen": True,
-        })
-        params = rec.last_params
-        assert params == (5, "alice", "a@x.io", "Alice", "hi", True, True)
-        assert "ON CONFLICT (user_id) DO UPDATE" in rec.last_sql
-
-    def test_optional_fields_default_to_none_and_false(self, monkeypatch):
-        # Missing display_name/bio -> None; missing is_team/tutorial_seen ->
-        # coerced to bool False.
-        rec = _Recorder(result=None)
-        _patch_user_query(monkeypatch, rec)
-        us.sync_user_to_local({
-            "user_id": 1, "username": "bob", "email": "b@x.io",
-        })
-        uid, uname, email, dname, bio, is_team, tut = rec.last_params
-        assert (uid, uname, email) == (1, "bob", "b@x.io")
-        assert dname is None and bio is None
-        assert is_team is False and tut is False
-
-    def test_truthy_flags_coerced_to_bool(self, monkeypatch):
-        # is_team given as 1 (truthy int) must become real bool True.
-        rec = _Recorder(result=None)
-        _patch_user_query(monkeypatch, rec)
-        us.sync_user_to_local({
-            "user_id": 1, "username": "b", "email": "b@x.io",
-            "is_team": 1, "tutorial_seen": 0,
-        })
-        *_rest, is_team, tut = rec.last_params
-        assert is_team is True
-        assert tut is False
-
-    def test_missing_required_key_raises_keyerror(self, monkeypatch):
-        # user_id/username/email are required (subscript access, not .get).
-        _patch_user_query(monkeypatch, _Recorder(result=None))
-        with pytest.raises(KeyError):
-            us.sync_user_to_local({"username": "x", "email": "e"})
-
 
 class TestGetUserById:
     def test_returns_first_row(self, monkeypatch):
@@ -550,117 +502,61 @@ class TestGetUserById:
 
 
 class TestEnsureCreatorsInLocal:
+    """After an HF sync, every `created_by_username` on the imported rules/CEs
+    must exist locally so attribution JOINs and profile lookups resolve. With
+    login (and the central user directory) gone, unknown authors get a local
+    placeholder row instead of being fetched from the central server."""
+
     def test_empty_list_short_circuits(self, monkeypatch):
         rec = _Recorder(result=[])
-        _patch_user_query(monkeypatch, rec)
+        _patch_user_dict(monkeypatch, rec)
         us.ensure_creators_in_local([])
         assert rec.calls == []
 
     def test_only_blank_or_none_usernames_short_circuits(self, monkeypatch):
-        # After filtering falsy values, `unique` is empty -> no DB call.
         rec = _Recorder(result=[])
-        _patch_user_query(monkeypatch, rec)
+        _patch_user_dict(monkeypatch, rec)
         us.ensure_creators_in_local([None, "", None])
         assert rec.calls == []
 
-    def test_all_present_locally_no_remote_fetch(self, monkeypatch):
-        # Local query returns every requested (lowercased) username -> missing
-        # set empty -> returns without ever calling the central server.
-        rec = _Recorder(result=[("alice",), ("bob",)])
-        _patch_user_query(monkeypatch, rec)
-
-        # If the central server were imported/called, this would explode the
-        # test — assert it's never reached by sabotaging the import path.
-        import services.central_server as cs
-        called = {"n": 0}
-
-        def _boom(_names):
-            called["n"] += 1
-            raise AssertionError("central server should not be called")
-
-        monkeypatch.setattr(cs, "get_users_by_username", _boom)
-
+    def test_all_present_locally_writes_nothing(self, monkeypatch):
+        # The existence probe finds both -> no INSERT is issued.
+        _patch_user_dict(monkeypatch, _Recorder(result=[{"u": "alice"}, {"u": "bob"}]))
+        writes = _Recorder(result=None)
+        _patch_user_query(monkeypatch, writes)
         us.ensure_creators_in_local(["Alice", "BOB"])
-        # Exactly one DB call (the local existence check), lowercased + ANY.
-        assert len(rec.calls) == 1
-        assert "LOWER(username)" in rec.calls[0][0]
-        # The param is the deduped, lowercased list (order-independent).
-        assert sorted(rec.calls[0][1][0]) == ["alice", "bob"]
-        assert called["n"] == 0
+        assert writes.calls == []
 
-    def test_missing_users_fetched_from_central_and_synced(self, monkeypatch):
-        # Local check returns nobody -> both are "missing" -> remote fetch ->
-        # each remote row upserted via sync_user_to_local (execute_query again).
-        local_rec = _Recorder(result=[])  # no local rows
-        sync_rec = _Recorder(result=None)
+    def test_missing_authors_get_a_local_placeholder_row(self, monkeypatch):
+        # Nobody is known locally -> one INSERT per author, lowercased.
+        _patch_user_dict(monkeypatch, _Recorder(result=[]))
+        writes = _Recorder(result=None)
+        _patch_user_query(monkeypatch, writes)
+        us.ensure_creators_in_local(["Alice", "BOB"])
+        assert len(writes.calls) == 2
+        inserted = sorted(c[1][0] for c in writes.calls)
+        assert inserted == ["alice", "bob"]
+        # Placeholder ids start above the local user so they can never collide
+        # with LOCAL_USER_ID.
+        assert "GREATEST" in writes.calls[0][0]
+        assert "ON CONFLICT DO NOTHING" in writes.calls[0][0]
 
-        # execute_query is used both for the local SELECT and inside
-        # sync_user_to_local's INSERT. Route by SQL content.
-        calls = []
-
-        def router(sql, params=None):
-            calls.append((sql, params))
-            if "SELECT LOWER(username)" in sql:
-                return []  # nobody local
-            return None  # the upsert
-
-        monkeypatch.setattr(us, "execute_query", router)
-
-        import services.central_server as cs
-        remote_rows = [
-            {"user_id": 10, "username": "alice", "email": "a@x.io"},
-            {"user_id": 11, "username": "bob", "email": "b@x.io"},
-        ]
-        monkeypatch.setattr(cs, "get_users_by_username", lambda names: remote_rows)
-
-        us.ensure_creators_in_local(["Alice", "bob"])
-
-        # One SELECT + two upserts.
-        selects = [c for c in calls if "SELECT LOWER(username)" in c[0]]
-        upserts = [c for c in calls if "ON CONFLICT (user_id)" in c[0]]
-        assert len(selects) == 1
-        assert len(upserts) == 2
-        upserted_ids = {c[1][0] for c in upserts}
-        assert upserted_ids == {10, 11}
-
-    def test_central_server_failure_is_swallowed(self, monkeypatch):
-        # Network/central error must not propagate — the helper logs and returns.
-        def router(sql, params=None):
-            return []  # nobody local -> triggers remote fetch
-
-        monkeypatch.setattr(us, "execute_query", router)
-
-        import services.central_server as cs
-
-        def _explode(_names):
-            raise RuntimeError("central server down")
-
-        monkeypatch.setattr(cs, "get_users_by_username", _explode)
-
-        # Should NOT raise.
-        us.ensure_creators_in_local(["ghost"])
-
-    def test_remote_none_result_is_safe(self, monkeypatch):
-        # central server returns None -> `for row in (remote_rows or [])` -> no
-        # upserts, no error.
-        def router(sql, params=None):
-            return []
-
-        monkeypatch.setattr(us, "execute_query", router)
-        import services.central_server as cs
-        monkeypatch.setattr(cs, "get_users_by_username", lambda names: None)
-
-        us.ensure_creators_in_local(["ghost"])  # no exception
-
-    def test_case_insensitive_dedup(self, monkeypatch):
-        # "Alice"/"alice"/"ALICE" collapse to one lowercased entry before the
-        # local query.
-        captured = {}
-
-        def router(sql, params=None):
-            captured["params"] = params
-            return [("alice",)]  # present -> no remote fetch
-
-        monkeypatch.setattr(us, "execute_query", router)
+    def test_probe_is_lowercased_and_deduped(self, monkeypatch):
+        probe = _Recorder(result=[])
+        _patch_user_dict(monkeypatch, probe)
+        _patch_user_query(monkeypatch, _Recorder(result=None))
         us.ensure_creators_in_local(["Alice", "alice", "ALICE"])
-        assert captured["params"][0] == ["alice"]
+        assert len(probe.calls) == 1
+        assert "LOWER(username)" in probe.calls[0][0]
+        assert probe.calls[0][1][0] == ["alice"]
+
+    def test_insert_failure_is_swallowed(self, monkeypatch):
+        # A bad row must not abort the sync — attribution just degrades to a
+        # bare username, which the UI already handles.
+        _patch_user_dict(monkeypatch, _Recorder(result=[]))
+
+        def _boom(*a, **k):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(us, "execute_query", _boom)
+        us.ensure_creators_in_local(["ghost"])  # no exception

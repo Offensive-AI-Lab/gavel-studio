@@ -16,6 +16,13 @@ Rather than relying on surface-text moderation, GAVEL Studio works at the activa
 - **Frontend:** React 19 + Vite
 - **Public registry:** Hugging Face datasets (rules + CEs)
 
+> **No login.** GAVEL Studio is a single-operator, localhost application: there
+> are no accounts, no passwords and no tokens. Every request is attributed to
+> one fixed local user that the backend seeds into the database on first boot.
+> This is only safe because the backend binds to `127.0.0.1` and serves one
+> person — if two people share a single backend process they share that
+> identity, and therefore each other's models, rule sets and trained weights.
+
 > 📄 **Paper**: [GAVEL: Towards Rule-Based Safety Through Activation Monitoring](https://arxiv.org/pdf/2601.19768) (Accepted to ICLR 2026)
 >
 > ⚙️ **[GAVEL](https://github.com/Offensive-AI-Lab/gavel)**: The backend framework powering GAVEL Studio — trains RNN probes on Cognitive Elements, calibrates thresholds, and evaluates rule-based safety detection.
@@ -50,9 +57,8 @@ safe to re-run; it keeps anything already set. (Prefer to do it by hand?
 `docker compose --env-file backend/.env up` — see §2.)
 
 That's it. After the first build (~3-5 min, downloads ~2 GB of base images +
-Python/Node packages), open http://localhost:5173 in your browser, register
-an account, and you're in. Subsequent `docker compose up` runs start in
-seconds.
+Python/Node packages), open http://localhost:5173 in your browser and you're
+in — there is no login. Subsequent `docker compose up` runs start in seconds.
 
 The only thing you have to install on your machine is **Docker Desktop**:
 https://www.docker.com/products/docker-desktop/
@@ -112,14 +118,14 @@ OPENAI_API_KEY=sk-...
 # public library READ-sync needs no token, so Browse works either way.
 HF_TOKEN=
 
-# REQUIRED — the remote central server (auth / login / community). The bundled
-# local central is opt-in (compose 'central' profile), so point this at your
-# server. The backend needs NO JWT secret — it verifies tokens via /auth/verify.
-CENTRAL_SERVER_URL=https://your.central.server
+# OPTIONAL — the central server. There is NO login; its only job is proxying
+# WRITES to the public HuggingFace registry (it holds the write token). Leave
+# blank and everything works except publishing — library sync, Browse and Fork
+# all read HuggingFace anonymously.
+CENTRAL_SERVER_URL=
 
-# JWT_SECRET_KEY is NOT used here — the backend never reads it. Self-hosting the
-# central server is a separate, isolated deployment: central-server/docker-compose.yml
-# (its signing secret lives in central-server/.env).
+# Self-hosting the central server is a separate, isolated deployment:
+# central-server/docker-compose.yml (configured via central-server/.env).
 ```
 
 **You do NOT need to set `DB_HOST`, `DB_USER`, `DB_PASSWORD`, etc.** —
@@ -136,10 +142,9 @@ so no separate `frontend/.env` is needed for the Docker workflow.
 
 After `docker compose up` settles:
 
-1. Open http://localhost:5173
-2. **Register** a user (it's a real DB write — this is your account)
-3. **Log in** — lands you on `/workspace`
-4. From the workspace:
+1. Open http://localhost:5173 — it lands straight on `/workspace`; there is no
+   login step
+2. From the workspace:
    - **Models** → create a model (e.g. any HF causal LM your machine can run)
    - **Classifiers** → create a classifier under that model
    - **Rules** (inside the classifier) → click _Generate from scenario_, type
@@ -265,7 +270,7 @@ backend/
   services/             HF publish/sync, library search, bookmark service
   classifier_engine/    GRU training + inference
   evaluation/           metrics, calibration, ruleset evaluation
-  utils/                DB, auth, embeddings, crash recovery
+  utils/                DB, local identity, embeddings, crash recovery
   tests/
     unit/               no-DB unit tests (run in seconds)
     integration/        real-DB tests using FastAPI TestClient
@@ -275,7 +280,7 @@ backend/
 frontend/
   Dockerfile            node:20-alpine base image
   src/
-    pages/              one component per route (Login, Workspace, RulesManager, ...)
+    pages/              one component per route (Workspace, RulesManager, ...)
     components/         reusable UI (TaskTray, RuleCard, ConfirmDialog, ...)
     contexts/           TaskTrayContext (background-task chip system)
     services/           RuleService, CEService — orchestration of multi-step AI flows

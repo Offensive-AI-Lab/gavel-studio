@@ -3,27 +3,15 @@
 // The card is a mostly-presentational component, but it has a fair amount of
 // conditional branching: draft/public badges, bookmark/publish/delete
 // affordances, author link, examples rendering (string vs object samples,
-// YES/NO verdicts), and the StarRating widget (only for published CEs).
+// YES/NO verdicts).
 //
-// StarRating fetches its own summary from '../../../src/api' on mount, so we mock
 // the api module to keep everything off the network. We don't assert on
-// StarRating internals here (it has its own tests) — we only assert whether
 // it renders at all, driven by ce.public_id.
 
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { render, screen, fireEvent, within } from '@testing-library/react';
-
-// Keep StarRating's data fetch benign. getRatingSummary resolves to a stable
-// summary so the widget renders its stars rather than the skeleton.
-vi.mock('../../../src/api', () => ({
-    getRatingSummary: vi.fn(() => Promise.resolve({
-        data: { rating_count: 0, rating_avg: null, your_score: null },
-    })),
-    rateAsset: vi.fn(() => Promise.resolve({ data: {} })),
-    withdrawRating: vi.fn(() => Promise.resolve({ data: {} })),
-}));
 
 import CognitiveElementCard from '../../../src/components/CognitiveElementCard/CognitiveElementCard';
 
@@ -432,35 +420,6 @@ describe('CognitiveElementCard — examples (expanded content)', () => {
     });
 });
 
-describe('CognitiveElementCard — StarRating widget gating', () => {
-    it('renders the StarRating widget for a published CE (has public_id) when open', () => {
-        const { container } = renderCard({
-            ce: baseCe({ public_id: 'pub-9' }),
-            isOpen: true,
-            onToggle: vi.fn(),
-        });
-        // StarRating's outer wrapper carries the .star-rating class.
-        expect(container.querySelector('.star-rating')).not.toBeNull();
-    });
-
-    it('does not render the StarRating widget when there is no public_id', () => {
-        const { container } = renderCard({
-            ce: baseCe(),
-            isOpen: true,
-            onToggle: vi.fn(),
-        });
-        expect(container.querySelector('.star-rating')).toBeNull();
-    });
-
-    it('does not render the StarRating widget while the card is collapsed', () => {
-        const { container } = renderCard({
-            ce: baseCe({ public_id: 'pub-9' }),
-            isOpen: false,
-            onToggle: vi.fn(),
-        });
-        expect(container.querySelector('.star-rating')).toBeNull();
-    });
-});
 
 describe('CognitiveElementCard — combined affordances', () => {
     it('can show publish and delete together for a draft', () => {

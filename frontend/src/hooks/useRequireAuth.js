@@ -1,21 +1,13 @@
-import { useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { LOCAL_USER } from '../localUser';
 
 /**
- * Redirects to /login if no user is stored in sessionStorage (per-tab).
- * Returns the parsed user object (or null if not authenticated).
+ * Returns the acting user.
+ *
+ * There is no login: GAVEL Studio is a single-operator localhost app, so this
+ * always resolves to the one local user and never redirects. Kept as a hook so
+ * the pages that call it needed no edit, and so there is still exactly one
+ * place to change if a real identity is ever reintroduced.
  */
-const useRequireAuth = () => {
-    const navigate = useNavigate();
-    const user = JSON.parse(sessionStorage.getItem('user'));
-
-    useEffect(() => {
-        if (!user) {
-            navigate('/login');
-        }
-    }, [navigate, user]);
-
-    return user;
-};
+const useRequireAuth = () => LOCAL_USER;
 
 export default useRequireAuth;

@@ -10,7 +10,7 @@
 // (their backend probe comes back "synced").
 //
 // Replaces the old 90s LibrarySyncPoller. The stream is reconnected on error
-// (backend restart / network blip) and only runs for a logged-in session.
+// (backend restart / network blip).
 
 import { useEffect } from 'react';
 import { useSyncStatus } from '../../contexts/SyncStatusContext';
@@ -22,10 +22,6 @@ const LibrarySyncStream = () => {
     const { setStatus } = useSyncStatus();
 
     useEffect(() => {
-        const token = sessionStorage.getItem('token');
-        const user = sessionStorage.getItem('user');
-        if (!token || !user) return; // only stream for a logged-in session
-
         let es = null;
         let stopped = false;
         let retry = null;

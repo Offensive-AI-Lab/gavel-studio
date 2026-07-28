@@ -18,7 +18,6 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from ..utils.auth import get_current_user
 from ..utils.rate_limit import rate_limit
 
 router = APIRouter(prefix="/hf", tags=["huggingface"])
@@ -100,13 +99,14 @@ def _manifest_required_record_paths(manifest: dict) -> set:
 
 
 @router.post("/commit", response_model=CommitResponse)
-def hf_commit(req: CommitRequest, _: int = Depends(get_current_user), _rl=Depends(_rl_commit)):
+def hf_commit(req: CommitRequest, _rl=Depends(_rl_commit)):
     """Commit a batch of files to the HF registry — ALL or NOTHING.
 
-    Requires a valid central-server JWT (any logged-in user). The user
-    identity is NOT propagated to HF — the commit is attributed to the
-    bot account that owns HF_TOKEN. Attribution flows through the
-    payload's `created_by_username` field instead.
+    Unauthenticated: there are no accounts. Note this was ALWAYS the case
+    from HuggingFace's point of view — the commit is attributed to the account
+    that owns HF_TOKEN, never to a caller. Authorship travels inside the
+    payload's `created_by_username` field, which this server does not verify.
+    The rate limit below is the only gate.
 
     Atomicity: every file goes into ONE HfApi.create_commit, which HF applies
     as a single atomic commit. We also decode + validate EVERY file before
@@ -224,19 +224,8 @@ def get_head_sha():
     startup library-sync thread to check whether the cached manifest is
     stale.
 
-    Intentionally PUBLIC (no `Depends(get_current_user)`):
-      * The HEAD SHA is non-sensitive — anyone with curl can hit the
-        underlying HF REST API and get the same value, no token needed.
-        Gating it on a JWT here just creates noise without adding any
-        protection.
-      * The startup library-sync thread runs before any user is logged
-        in (the local backend has no JWT to forward yet). Requiring
-        auth produces a 401 log line on every backend restart, which
-        the calling code already catches + continues from — making the
-        check pure tax with no signal.
-
-    What IS still gated: the actual /hf/commit endpoint that writes
-    to HF (publish_ce / publish_rule path). That stays authed.
+    Non-sensitive: anyone with curl can read the same value from the public
+    HuggingFace REST API without a token.
     """
     if not HF_TOKEN:
         raise HTTPException(status_code=503, detail="Central server has no HF_TOKEN configured")

@@ -16,7 +16,6 @@ import {
 } from '../api';
 import Breadcrumb from '../components/Breadcrumb/Breadcrumb';
 import BuildRuleFromCEsModal from './BuildRuleFromCEsModal';
-import StarRating from '../components/StarRating/StarRating';
 import { roleLabel } from '../utils/roleLabels';
 import { recordRecent } from '../utils/recents';
 import { useTutorialContent } from '../contexts/TutorialContext';
@@ -323,13 +322,7 @@ export default function RulePage() {
             {!loading && !loadError && (
                 <>
                     {detail?.public_id && (
-                        <div style={{ ...card, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
-                            <StarRating
-                                asset_type="rule"
-                                asset_public_id={detail.public_id}
-                                author_username={detail.created_by_username}
-                                compact={false}
-                            />
+                        <div style={{ ...card, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 16, flexWrap: 'wrap' }}>
                             {user?.user_id && (
                                 <button
                                     onClick={toggleBookmark}

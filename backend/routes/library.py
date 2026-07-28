@@ -3,15 +3,6 @@ import json
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-
-_publish_bearer = HTTPBearer(auto_error=False)
-
-
-def _publish_token(creds: HTTPAuthorizationCredentials = Depends(_publish_bearer)) -> str:
-    if not creds:
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    return creds.credentials
 from pydantic import BaseModel
 
 from utils.PostgreSQL import execute_query, execute_query_dict
@@ -616,7 +607,6 @@ class PublishResponse(BaseModel):
 async def publish_ce_endpoint(
     ce_id: int,
     user_id: int = Depends(get_current_user),
-    auth_token: str = Depends(_publish_token),
 ):
     """Push a local CE draft (and its excitation dataset) to the HF
     registry atomically. The actual HF write goes through the central
@@ -625,7 +615,7 @@ async def publish_ce_endpoint(
     that user's contribution counter."""
     from services.hf_publish import publish_ce
     try:
-        result = publish_ce(ce_id, publisher_user_id=user_id, auth_token=auth_token)
+        result = publish_ce(ce_id, publisher_user_id=user_id)
         return PublishResponse(**result.to_dict())
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -635,13 +625,12 @@ async def publish_ce_endpoint(
 async def publish_rule_endpoint(
     rule_id: int,
     user_id: int = Depends(get_current_user),
-    auth_token: str = Depends(_publish_token),
 ):
     """Push a local rule draft + any draft CE dependencies to the HF
     registry atomically (via the central server's HF write proxy)."""
     from services.hf_publish import publish_rule
     try:
-        result = publish_rule(rule_id, publisher_user_id=user_id, auth_token=auth_token)
+        result = publish_rule(rule_id, publisher_user_id=user_id)
         return PublishResponse(**result.to_dict())
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -651,7 +640,6 @@ async def publish_rule_endpoint(
 async def publish_rule_set_endpoint(
     classifier_id: int,
     user_id: int = Depends(get_current_user),
-    auth_token: str = Depends(_publish_token),
 ):
     """Share a private rule set (a model-less guardrail / classifier) to the
     public registry as a model-agnostic collection of already-published rules.
@@ -664,7 +652,7 @@ async def publish_rule_set_endpoint(
     from services.hf_publish import publish_rule_set
     assert_owns_classifier(user_id, classifier_id)
     try:
-        result = publish_rule_set(classifier_id, publisher_user_id=user_id, auth_token=auth_token)
+        result = publish_rule_set(classifier_id, publisher_user_id=user_id)
         return PublishResponse(**result.to_dict())
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -1060,7 +1048,7 @@ async def cleanup_local_drafts(_: int = Depends(get_current_user)):
     if not token:
         raise HTTPException(status_code=500, detail="HF_TOKEN not set on server")
     try:
-        _sha, manifest = _fetch_head_sha_and_manifest(token)
+        _sha, manifest = _fetch_head_sha_and_manifest()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Could not read registry: {exc}")
 

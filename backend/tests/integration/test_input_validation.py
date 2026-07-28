@@ -22,14 +22,6 @@ class TestSQLInjection:
         })
         assert res.status_code in (400, 401, 404)
 
-    def test_register_sql_injection_username(self, client):
-        res = client.post("/user/register", json={
-            "username": "'; DROP TABLE users; --",
-            "email": "sqli@test.com",
-            "password": "Pass123!",
-        })
-        # Should be rejected by username validation
-        assert res.status_code in (400, 422)
 
     def test_ce_name_sql_injection(self, client, auth_headers, test_user):
         res = client.post("/cognitive/create", json={
@@ -57,26 +49,10 @@ class TestXSSPrevention:
             # This is fine for API-only backends — XSS is a frontend concern
             pass
 
-    def test_xss_in_username(self, client):
-        res = client.post("/user/register", json={
-            "username": "<img src=x onerror=alert(1)>",
-            "email": "xss@test.com",
-            "password": "Pass123!",
-        })
-        # Username validation should reject non-alphanumeric
-        assert res.status_code in (400, 422)
-
 
 class TestBoundaryValues:
     """Boundary value tests for input fields."""
 
-    def test_very_long_username(self, client):
-        res = client.post("/user/register", json={
-            "username": "a" * 500,
-            "email": "long@test.com",
-            "password": "Pass123!",
-        })
-        assert res.status_code in (400, 422)
 
     def test_very_long_ce_definition(self, client, auth_headers, test_user):
         res = client.post("/cognitive/create", json={

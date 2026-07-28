@@ -1,7 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { FiChevronDown, FiChevronUp, FiPlus, FiMinus, FiUpload, FiTrash2, FiFileText } from 'react-icons/fi';
-import StarRating from '../StarRating/StarRating';
 import './CognitiveElementCard.css';
 
 const CognitiveElementCard = ({
@@ -147,22 +146,6 @@ const CognitiveElementCard = ({
                             {ce.categories.map((c) => (
                                 <span key={c} className="pill pill-soft">{c}</span>
                             ))}
-                        </div>
-                    )}
-                    {/* Rating widget — only on published CEs (those with
-                      * a public_id). Drafts can't be rated; the widget
-                      * gracefully renders nothing when public_id is
-                      * missing. Self-rating is blocked at the API and
-                      * read-only mode is shown if the current user is
-                      * the author. */}
-                    {ce.public_id && (
-                        <div style={{ marginBottom: '14px' }}>
-                            <StarRating
-                                asset_type="ce"
-                                asset_public_id={ce.public_id}
-                                author_username={ce.created_by_username}
-                                compact={false}
-                            />
                         </div>
                     )}
                     {/* Full definition — shown here (not just the clamped header

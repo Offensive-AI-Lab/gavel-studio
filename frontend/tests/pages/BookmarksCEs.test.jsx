@@ -35,10 +35,6 @@ vi.mock('../../src/api', () => {
         getCognitiveDataset: vi.fn(() => Promise.resolve({ data: { training_data_preview: [] } })),
         getCognitiveElements: vi.fn(() => Promise.resolve({ data: [] })),
         searchBookmarks: vi.fn(() => Promise.resolve({ data: { results: [], total_results: 0 } })),
-        // StarRating (inside expanded CognitiveElementCard) touches these.
-        getRatingSummary: vi.fn(() => Promise.resolve({ data: { average: 0, count: 0, my_rating: 0 } })),
-        rateAsset: vi.fn(() => empty()),
-        withdrawRating: vi.fn(() => empty()),
         // Misc exports Sidebar/Layout may touch.
         getBackendHealth: vi.fn(() => empty({ ready: true })),
         getUserModels: vi.fn(() => empty({ models: [] })),
@@ -74,7 +70,6 @@ const renderPage = () => render(
     <MemoryRouter initialEntries={['/bookmarks/ces']}>
         <Routes>
             <Route path="/bookmarks/ces" element={<BookmarksCEs />} />
-            <Route path="/login" element={<div data-testid="login-page" />} />
         </Routes>
     </MemoryRouter>,
 );
@@ -117,12 +112,6 @@ describe('BookmarksCEs', () => {
 
     afterEach(() => {
         vi.useRealTimers();
-    });
-
-    it('redirects to /login when no user is present', async () => {
-        sessionStorage.removeItem('user');
-        renderPage();
-        await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/login'));
     });
 
     it('renders the header and pill navigation', async () => {

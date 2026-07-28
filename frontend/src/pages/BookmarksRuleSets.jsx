@@ -27,12 +27,8 @@ const BookmarksRuleSets = ({ embedded = false, mineOnly = false }) => {
     const user = JSON.parse(sessionStorage.getItem('user'));
 
     useEffect(() => {
-        if (!user) {
-            navigate('/login');
-        } else {
-            fetchBookmarks();
-            fetchCategories();
-        }
+        fetchBookmarks();
+        fetchCategories();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [navigate]);
 
@@ -147,7 +143,7 @@ const BookmarksRuleSets = ({ embedded = false, mineOnly = false }) => {
     if (embedded) return body;
 
     return (
-        <Layout onLogout={() => { sessionStorage.clear(); navigate('/login'); }}>
+        <Layout>
             <header className="page-header">
                 <div>
                     <h1>My Bookmarked Rule Sets</h1>

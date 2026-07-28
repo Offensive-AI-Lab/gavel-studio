@@ -5,13 +5,13 @@
 //   * mocks every API function the page might call to a benign default
 //     so the data fetches in mount-effects don't blow up
 //   * sets a logged-in user in localStorage so pages don't immediately
-//     redirect back to /login on mount
+//     crash on mount
 //   * asserts SOMETHING visible rendered without throwing
 //
 // These don't simulate user interaction. They catch the easy regressions:
 // missing imports, undefined-prop crashes, broken lazy data assumptions
 // like `(data.rules || []).map(...)`. Behavior tests for the highest-
-// leverage flows (Login, Register, RuleService) live in their own files.
+// leverage flows (RuleService) live in their own files.
 
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -28,8 +28,6 @@ vi.mock('../../src/api', () => {
     return {
         default: { get: vi.fn(() => empty()), post: vi.fn(() => empty()), delete: vi.fn(() => empty()), put: vi.fn(() => empty()) },
         // Auth
-        loginUser: vi.fn(() => empty({ token: 't', user_id: 1 })),
-        registerUser: vi.fn(() => empty({ ok: true })),
         // Health
         getBackendHealth: vi.fn(() => empty({ ready: true })),
         // Dashboard
@@ -143,7 +141,6 @@ import RealtimeViewer from '../../src/pages/RealtimeViewer';
 
 
 const setUser = () => {
-    sessionStorage.setItem('token', 'fake-token');
     sessionStorage.setItem('user', JSON.stringify({ user_id: 1, email: 'a@b.c' }));
 };
 
@@ -157,7 +154,6 @@ const renderAt = (path, route, ui) => render(
         <MemoryRouter initialEntries={[path]}>
             <Routes>
                 <Route path={route} element={ui} />
-                <Route path="/login" element={<div data-testid="login-page" />} />
             </Routes>
         </MemoryRouter>
     </TaskTrayProvider>,

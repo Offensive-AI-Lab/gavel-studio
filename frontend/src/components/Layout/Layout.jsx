@@ -4,7 +4,6 @@ import './Layout.css'; // Import the CSS here once, so you don't have to elsewhe
 
 const Layout = ({
     children,
-    onLogout,
     currentModel,
     currentClassifier,
     modelId,
@@ -15,7 +14,6 @@ const Layout = ({
         <div className="app-layout">
             {/* 1. The Fixed Sidebar */}
             <Sidebar
-                onLogout={onLogout}
                 currentModel={currentModel}
                 currentClassifier={currentClassifier}
                 modelId={modelId}

@@ -6,7 +6,6 @@
 #
 # After deploy, set the following env vars in the Render dashboard (Environment
 # tab on the web service):
-#   * JWT_SECRET_KEY  — generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"`
 #   * HF_TOKEN        — write-scope HuggingFace token for the public registry
 #   * ALLOWED_ORIGINS — comma-separated list of frontend URLs allowed to call this server
 #
@@ -26,8 +25,6 @@ services:
         fromDatabase:
           name: gavel-central-db
           property: connectionString
-      - key: JWT_SECRET_KEY
-        sync: false
       - key: HF_TOKEN
         sync: false
       - key: HF_REPO_ID

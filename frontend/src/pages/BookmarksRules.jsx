@@ -30,11 +30,7 @@ const BookmarksRules = ({ embedded = false, mineOnly = false }) => {
     const user = JSON.parse(sessionStorage.getItem('user'));
 
     useEffect(() => {
-        if (!user) {
-            navigate('/login');
-        } else {
-            fetchBookmarks();
-        }
+        fetchBookmarks();
     }, [navigate]);
 
     // Auto-refresh on bookmark toggles, library sync, or any other
@@ -417,7 +413,7 @@ const BookmarksRules = ({ embedded = false, mineOnly = false }) => {
     if (embedded) return body;
 
     return (
-        <Layout onLogout={() => { sessionStorage.removeItem('token'); sessionStorage.removeItem('user'); sessionStorage.removeItem('models'); navigate('/login'); }}>
+        <Layout>
             <header className="page-header">
                 <div>
                     <div style={{ display: 'flex', gap: '10px', marginBottom: '8px', flexWrap: 'wrap' }}>

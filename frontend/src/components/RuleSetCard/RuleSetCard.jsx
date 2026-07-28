@@ -8,7 +8,6 @@
 
 import { Link, useNavigate } from 'react-router-dom';
 import { FiLayers, FiChevronDown, FiChevronUp, FiPlus, FiMinus, FiFileText } from 'react-icons/fi';
-import StarRating from '../StarRating/StarRating';
 
 const RuleSetCard = ({
     ruleSet,
@@ -102,15 +101,6 @@ const RuleSetCard = ({
                                     <span style={{ color: '#e2e8f0', fontWeight: 600, fontSize: '0.88rem' }}>{m.name}</span>
                                 </Link>
                             ))}
-                        </div>
-                    )}
-                    {hasPublicId && (
-                        <div style={{ marginTop: '14px' }}>
-                            <StarRating
-                                asset_type="rule_set"
-                                asset_public_id={ruleSet.public_id}
-                                author_username={author}
-                            />
                         </div>
                     )}
                 </div>

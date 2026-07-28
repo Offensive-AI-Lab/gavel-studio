@@ -383,12 +383,12 @@ class TestCreateEdges:
         )
         assert second.status_code == 409
 
-    def test_create_no_auth_is_401_or_403(self, client, test_model):
+    def test_create_without_auth_is_allowed(self, client, test_model):
         res = client.post(
             "/classifiers/create",
             json={"model_id": test_model["model_id"], "name": _unique("noauth")},
         )
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_create_missing_body_field_is_422(self, client, auth_headers):
         # `name` omitted -> pydantic validation error.
@@ -418,9 +418,9 @@ class TestDetailsAndDelete:
         res = client.delete("/classifiers/99999999", headers=auth_headers)
         assert res.status_code == 404
 
-    def test_delete_no_auth_is_401_or_403(self, client, test_classifier):
+    def test_delete_without_auth_is_allowed(self, client, test_classifier):
         res = client.delete(f"/classifiers/{test_classifier['classifier_id']}")
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_delete_then_details_gone(self, client, test_model, auth_headers):
         cid = _create_classifier(client, test_model["model_id"], auth_headers)
@@ -516,12 +516,12 @@ class TestTrainingConfig:
         )
         assert res.status_code == 404
 
-    def test_update_config_no_auth_is_401_or_403(self, client, test_classifier):
+    def test_update_config_without_auth_is_allowed(self, client, test_classifier):
         res = client.put(
             f"/classifiers/{test_classifier['classifier_id']}/config",
             json={"epochs": 2},
         )
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_update_config_empty_body_keeps_defaults(
         self, client, test_model, auth_headers

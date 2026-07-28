@@ -28,40 +28,15 @@ automatically removes children. The deletion order in `_TRACKED_TABLES` is
 children-first to avoid relying on cascade behavior, which keeps the cleanup
 robust if a future migration weakens any FK to RESTRICT.
 """
-import time
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
 
 from main import app
-from utils.auth import create_access_token
-
-
-@pytest.fixture(autouse=True)
-def _mock_central_verify(monkeypatch):
-    """The local backend now verifies bearer tokens via the central server
-    (it no longer holds the JWT secret). There's no live central server in
-    tests, so stand in for it: decode the locally-minted test token and return
-    its subject. Also clear the per-request verify cache so a token from one
-    test can't leak into the next."""
-    import utils.auth as _auth
-    from services import central_server
-
-    def _fake_verify(token):
-        try:
-            payload = _auth.decode_access_token(token)
-        except Exception:
-            raise central_server.CentralServerError("invalid token", status_code=401)
-        sub = payload.get("sub")
-        if sub is None:
-            raise central_server.CentralServerError("token missing subject", status_code=401)
-        return int(sub)
-
-    monkeypatch.setattr(central_server, "verify_token", _fake_verify)
-    monkeypatch.setattr(central_server, "is_enabled", lambda: True)
-    _auth._verify_cache.clear()
-    yield
-    _auth._verify_cache.clear()
+from utils.auth import (
+    LOCAL_USER_ID, LOCAL_USERNAME, LOCAL_EMAIL,
+)
 
 
 # Tables we track for per-test cleanup, listed children-first so deletes never
@@ -80,9 +55,11 @@ _TRACKED_TABLES = [
     # COMPOSITE keys — see note above.
     ("setup_ce_link", ("setup_id", "ce_id", "role", "fallback_group")),
     ("rule_ce_link", ("rule_id", "ce_id", "role", "fallback_group")),
-    # Bookmarks + ratings + their summary tables moved to the central
-    # server when we extracted the shared identity service. There's
-    # nothing left to clean up locally.
+    # Bookmarks are local tables again (login removal moved them back off the
+    # central server), so they need per-test cleanup. Ratings are gone entirely.
+    ("rule_bookmarks", ("user_id", "rule_id")),
+    ("ce_bookmarks", ("user_id", "ce_id")),
+    ("rule_set_bookmarks", ("user_id", "rule_set_id")),
     # Datasets attached to CEs.
     ("excitation_datasets", ("dataset_id",)),
     ("calibration_datasets", ("dataset_id",)),
@@ -164,13 +141,33 @@ def _session_baseline():
     _restore_to(baseline)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _materialize_session_fixtures(_session_baseline, request):
+    """Force the session-scoped resources into existence BEFORE any per-test
+    snapshot is taken.
+
+    This is load-bearing, and its absence was a latent bug. `_per_test_cleanup`
+    deletes every row that appeared while a test ran. `test_model` /
+    `test_classifier` are lazy session fixtures, so without this they are
+    created *during* whichever test first asks for them — and that test's
+    teardown then deletes them, leaving every later test holding a dangling
+    model_id / classifier_id (404s cascading through evaluation, realtime and
+    crash-recovery).
+
+    It stayed hidden while those fixtures reused a PRE-EXISTING row (they used
+    to return `models[0]`), because a pre-existing row is part of the session
+    baseline and is never considered "new". Now that they mint dedicated rows,
+    they must be materialized here instead.
+    """
+    request.getfixturevalue("test_classifier")   # pulls test_model -> test_user -> client
+
+
 @pytest.fixture(autouse=True)
-def _per_test_cleanup(_session_baseline):
+def _per_test_cleanup(_materialize_session_fixtures):
     """Inner cleanup. Captures DB state right before the test runs, then on
-    teardown deletes anything new. Depending on `_session_baseline` ensures
-    the session-scoped fixtures have run by the time we take this snapshot,
-    so test_user / test_model rows are part of the per-test baseline and do
-    NOT get deleted between tests."""
+    teardown deletes anything new. Depends on `_materialize_session_fixtures`
+    so the session-scoped rows already exist when this snapshot is taken and
+    are therefore NOT deleted between tests."""
     pre = _snapshot_pks()
     yield
     _restore_to(pre)
@@ -185,58 +182,53 @@ def client():
 
 @pytest.fixture(scope="session")
 def test_user(client):
-    """Register a dedicated test user once per session.
+    """The single local user, read from the DATABASE.
 
-    Returns a dict with user_id, username, email, password, token. The user
-    is created via the real /user/register endpoint so password hashing,
-    token issuance, and DB writes all exercise production code paths.
+    There is no registration or login: `DButils.ensure_local_user()` seeds a
+    fixed row at boot and every request is attributed to it. We read the row
+    rather than returning the seed constants, because `ensure_local_user()`
+    uses ON CONFLICT DO NOTHING — on a database that predates the login removal,
+    user_id=1 keeps whatever username it already had. Hardcoding the constants
+    here would make every test that compares this fixture's username against an
+    API response fail on such an install.
     """
-    suffix = int(time.time()) % 100000
-    username = f"testuser_{suffix}"
-    email = f"testuser_{suffix}@test.com"
-    password = "TestPass123!"
-
-    res = client.post("/user/register", json={
-        "username": username,
-        "email": email,
-        "password": password,
-    })
-    data = res.json()
-
-    # If the user already exists from a prior run, login instead.
-    if res.status_code != 200 or "user_id" not in data:
-        res = client.post("/user/login", json={"email": email, "password": password})
-        data = res.json()
-
-    user_id = data.get("user_id", 1)
-    token = data.get("token") or create_access_token({"sub": str(user_id)})
-    return {
-        "user_id": user_id,
-        "username": username,
-        "email": email,
-        "password": password,
-        "token": token,
-    }
+    from utils.PostgreSQL import execute_query_dict
+    rows = execute_query_dict(
+        "SELECT user_id, username, email FROM users WHERE user_id = %s",
+        (LOCAL_USER_ID,),
+    ) or []
+    if rows:
+        return {
+            "user_id": rows[0]["user_id"],
+            "username": rows[0]["username"],
+            "email": rows[0]["email"],
+        }
+    return {"user_id": LOCAL_USER_ID, "username": LOCAL_USERNAME, "email": LOCAL_EMAIL}
 
 
 @pytest.fixture(scope="session")
-def auth_headers(test_user):
-    """Authorization headers for authenticated requests."""
-    return {"Authorization": f"Bearer {test_user['token']}"}
+def auth_headers():
+    """Kept so the many `headers=auth_headers` call sites stay valid. There is
+    no authentication, so these are simply empty."""
+    return {}
 
 
 @pytest.fixture(scope="session")
 def test_model(client, test_user, auth_headers):
-    """Create a test model once per session using SmolLM2-360M-Instruct."""
-    models_res = client.get(f"/models/{test_user['user_id']}", headers=auth_headers)
-    models_data = models_res.json()
-    models_list = models_data.get("models", models_data) if isinstance(models_data, dict) else models_data
-    if isinstance(models_list, list) and models_list:
-        return models_list[0]
+    """Create a DEDICATED test model once per session.
 
+    It must be dedicated, not "the user's first model". These fixtures used to
+    reuse `models[0]`, which was harmless when every run registered a brand-new
+    empty user — there was nothing to reuse. There is only one user now (login
+    was removed), and it is the operator's real account, so reusing [0] would
+    hand the suite whatever real model happens to sort first and let tests
+    mutate it. The name is uniquified per run and the row is cleaned up by the
+    session baseline restore.
+    """
+    name = f"pytest-model-{uuid.uuid4().hex[:8]}"
     res = client.post("/models/create", json={
         "user_id": test_user["user_id"],
-        "name": "SmolLM2-Test",
+        "name": name,
         "storage_path": "HuggingFaceTB/SmolLM2-360M-Instruct",
     }, headers=auth_headers)
     if res.status_code == 200:
@@ -247,20 +239,20 @@ def test_model(client, test_user, auth_headers):
 
 @pytest.fixture(scope="session")
 def test_classifier(client, test_model, auth_headers):
-    """Create a test classifier once per session."""
+    """Create a DEDICATED test classifier once per session.
+
+    Same reasoning as test_model: this used to return `classifiers[0]` for the
+    model, which with a real account could hand the suite a guardrail that is
+    mid-training or already calibrated — and evaluation / realtime / crash-
+    recovery tests assume a clean one.
+    """
     model_id = test_model.get("model_id")
     if not model_id:
         pytest.skip("No model_id in test_model")
 
-    cls_res = client.get(f"/classifiers/{model_id}", headers=auth_headers)
-    cls_data = cls_res.json()
-    cls_list = cls_data if isinstance(cls_data, list) else cls_data.get("classifiers", [])
-    if cls_list:
-        return cls_list[0]
-
     res = client.post("/classifiers/create", json={
         "model_id": model_id,
-        "name": "TestClassifier",
+        "name": f"pytest-classifier-{uuid.uuid4().hex[:8]}",
     }, headers=auth_headers)
     if res.status_code == 200:
         data = res.json()

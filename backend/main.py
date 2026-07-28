@@ -25,7 +25,7 @@ for _stream in (sys.stdout, sys.stderr):
 # (DB_HOST=postgres, the mounted SSH key) overrides the file's native defaults.
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
-from fastapi import FastAPI, Request, Depends, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from utils.DButils import init_database
@@ -49,7 +49,6 @@ from routes.ai_pipeline import router as ai_router
 from routes.library import router as library_router
 from routes.evaluation import router as evaluation_router
 from routes.realtime import router as realtime_router
-from routes.ratings import router as ratings_router
 from routes.pipeline_runs import router as pipeline_runs_router
 
 # Suppress noisy polling endpoints from uvicorn access logs
@@ -109,50 +108,16 @@ def _boot_step(name: str, fn):
 _boot_step("db init", init_database)
 
 # ---------------------------------------------------------------------------
-# App-wide authentication gate (default-deny).
+# There is NO app-wide auth dependency.
 #
-# Every request must carry a valid bearer token EXCEPT a small, explicit
-# allowlist of genuinely public paths (login/register, public profiles, the
-# health/status probes, and the auto-docs). This is fail-safe: a newly added
-# endpoint is protected by default — you have to consciously add it to the
-# allowlist to make it public. Per-route `get_current_user` dependencies still
-# run where a handler needs the user_id; they share the same verify cache, so
-# this gate adds no extra central round-trip.
+# This used to be a default-deny gate that rejected any request without a valid
+# bearer token. GAVEL Studio has no login: it is a localhost, one-operator
+# application, so every request is attributed to the single local user seeded by
+# init_database(). Routes that need that id take `Depends(get_current_user)`,
+# which resolves to a constant (see utils/auth.py).
+#
+# Safe ONLY because the backend binds to 127.0.0.1 and serves one human.
 # ---------------------------------------------------------------------------
-_PUBLIC_EXACT = {
-    "/", "/health", "/compute/status",
-    "/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect",
-    "/user/login", "/user/register",
-    "/user/search", "/user/leaderboard",
-    # SSE freshness stream: non-sensitive ("you are/aren't behind the registry"),
-    # localhost per-user, and EventSource can't attach a bearer header. See the
-    # /library/events handler for the full rationale.
-    "/library/events",
-}
-_PUBLIC_PREFIXES = (
-    "/user/profile/",   # public profile lookups + contributions
-)
-
-
-def _is_public_path(path: str) -> bool:
-    if path in _PUBLIC_EXACT:
-        return True
-    return any(path.startswith(p) for p in _PUBLIC_PREFIXES)
-
-
-async def _enforce_auth(request: Request):
-    # CORS preflight carries no auth header by design; CORSMiddleware answers it
-    # before this runs, but guard anyway. Public paths skip the check.
-    if request.method == "OPTIONS" or _is_public_path(request.url.path):
-        return
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(
-            status_code=401, detail="Authentication required",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    from utils.auth import verify_bearer_token  # raises 401/503 on bad/no auth
-    request.state.user_id = verify_bearer_token(auth[len("Bearer "):])
 
 
 @asynccontextmanager
@@ -182,23 +147,23 @@ async def lifespan(app: FastAPI):
         _shutdown_end_realtime_sessions()
 
 
-app = FastAPI(dependencies=[Depends(_enforce_auth)], lifespan=lifespan)
+app = FastAPI(lifespan=lifespan)
 
 _allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
 # A wildcard origin combined with credentials is forbidden by the CORS spec and a
 # real foot-gun, so refuse to start that way rather than silently fall back.
 if "*" in _allowed_origins:
     raise RuntimeError(
-        "ALLOWED_ORIGINS must be an explicit allowlist, not '*'. The API is "
-        "authenticated and a wildcard origin defeats CORS' cross-site protection."
+        "ALLOWED_ORIGINS must be an explicit allowlist, not '*'. This API can "
+        "read and delete the operator's local models, rule sets and trained "
+        "weights, so a wildcard origin would let any website drive it."
     )
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
-    # Auth is a Bearer token in the Authorization header (never a cookie), so the
-    # browser does not send credentials cross-site. Keeping this False means a
-    # rogue origin can't even *attempt* a credentialed request, and it removes the
-    # CORS spec's wildcard-origin foot-gun entirely.
+    # There are no credentials of any kind (no login, no cookies, no bearer
+    # token), so nothing needs to travel cross-site. Keeping this False also
+    # removes the CORS spec's wildcard-origin foot-gun entirely.
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -519,7 +484,9 @@ app.include_router(evaluation_router, prefix="/evaluation", tags=["Evaluation"])
 app.include_router(realtime_router, prefix="/realtime", tags=["Realtime"])
 from routes.compute import router as compute_router
 app.include_router(compute_router, prefix="/compute", tags=["Compute"])
-app.include_router(ratings_router, prefix="/ratings", tags=["Ratings"])
+# Ratings were a multi-user community feature backed by the central server.
+# With no accounts there is nobody to attribute a rating to, so the router is
+# gone (see routes/ratings.py deletion).
 app.include_router(pipeline_runs_router, prefix="/pipeline-runs", tags=["Pipeline Runs"])
 from routes.guardrail_folders import router as guardrail_folders_router
 app.include_router(guardrail_folders_router, prefix="/guardrail-folders", tags=["Guardrail Folders"])

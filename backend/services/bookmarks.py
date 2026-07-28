@@ -1,31 +1,36 @@
-"""Bookmark CRUD service — proxied through the central server.
+"""Bookmark CRUD service — LOCAL tables.
 
-The central server stores bookmarks by `public_id` (the HF identifier),
-not by local SERIAL ids. That makes bookmarks portable across machines.
-This service translates between the two:
+Bookmarks used to be stored on the central server, keyed by the HuggingFace
+`public_id`, so they would follow a user's ACCOUNT between machines. With login
+removed there is no account and no second machine, so they are plain rows in the
+local database keyed by the local SERIAL id.
 
-  * On add/remove: local id -> public_id (lookup in local cache) -> central
-  * On list: public_ids from central -> local rows (join against cache)
+Two consequences of that, both improvements for a single-user install:
+
+  * You can bookmark a DRAFT. The central version couldn't — an unpublished
+    rule/CE has no `public_id`, so `add()` used to reject it outright.
+  * No network hop. Listing bookmarks is one SQL join instead of an HTTP
+    round-trip plus a join.
 """
 from dataclasses import dataclass
 from typing import List
 
-from services import central_server
-from services.central_server import CentralServerError
-from utils.PostgreSQL import execute_query_dict
+from utils.auth import LOCAL_USER_ID
+from utils.PostgreSQL import execute_query, execute_query_dict
 
 
 class BookmarkLookupError(Exception):
-    """Raised when a local asset id cannot be resolved to a public_id
-    (i.e., the user tried to bookmark a draft that hasn't been published).
-    Routes turn this into a 400."""
+    """Raised when a local asset id doesn't resolve to a row. Routes turn this
+    into a 400. (It no longer fires for "unpublished draft" — that is now
+    allowed — only for an id that genuinely doesn't exist.)"""
 
 
 @dataclass(frozen=True)
 class BookmarkSpec:
-    asset_type: str         # "rule" | "ce"
-    asset_table: str        # "rules" | "cognitive_elements"
-    asset_id_col: str       # "rule_id" | "ce_id"
+    asset_type: str         # "rule" | "ce" | "rule_set"
+    asset_table: str        # "rules" | "cognitive_elements" | "rule_sets"
+    asset_id_col: str       # "rule_id" | "ce_id" | "rule_set_id"
+    bookmark_table: str     # "rule_bookmarks" | "ce_bookmarks" | "rule_set_bookmarks"
     list_columns: str       # comma-separated columns to surface in list view
 
 
@@ -34,18 +39,21 @@ BOOKMARK_REGISTRY: dict = {
         asset_type="rule",
         asset_table="rules",
         asset_id_col="rule_id",
+        bookmark_table="rule_bookmarks",
         list_columns="a.name, a.predicate, a.description",
     ),
     "ce": BookmarkSpec(
         asset_type="ce",
         asset_table="cognitive_elements",
         asset_id_col="ce_id",
+        bookmark_table="ce_bookmarks",
         list_columns="a.name, a.definition, a.category",
     ),
     "rule_set": BookmarkSpec(
         asset_type="rule_set",
         asset_table="rule_sets",
         asset_id_col="rule_set_id",
+        bookmark_table="rule_set_bookmarks",
         list_columns="a.name, a.description",
     ),
 }
@@ -58,81 +66,59 @@ def _spec(asset_type: str) -> BookmarkSpec:
     return spec
 
 
-def _local_id_to_public_id(spec: BookmarkSpec, asset_id: int) -> str:
+def _assert_exists(spec: BookmarkSpec, asset_id: int) -> None:
     rows = execute_query_dict(
-        f"SELECT public_id FROM {spec.asset_table} WHERE {spec.asset_id_col} = %s",
+        f"SELECT 1 AS ok FROM {spec.asset_table} WHERE {spec.asset_id_col} = %s",
         (asset_id,),
     ) or []
     if not rows:
-        raise BookmarkLookupError(f"{spec.asset_type} #{asset_id} not found locally")
-    public_id = rows[0]["public_id"]
-    if not public_id:
-        raise BookmarkLookupError(
-            f"Cannot bookmark a draft {spec.asset_type} (no public_id). "
-            "Publish it to HF first."
-        )
-    return public_id
+        raise BookmarkLookupError(f"{spec.asset_type} #{asset_id} not found")
 
 
 class BookmarkService:
-    """Token-based bookmark API. The token authoritatively identifies
-    the user (no need to pass user_id separately)."""
+    """Bookmark API for the single local user.
+
+    Every method takes the asset id only — there is one user, so there is
+    nothing to disambiguate.
+    """
 
     @staticmethod
-    def add(asset_type: str, token: str, asset_id: int) -> bool:
+    def add(asset_type: str, asset_id: int) -> bool:
         spec = _spec(asset_type)
-        public_id = _local_id_to_public_id(spec, asset_id)
-        try:
-            central_server.add_bookmark(token, spec.asset_type, public_id)
-            return True
-        except CentralServerError as err:
-            raise RuntimeError(f"Central server: {err}") from err
+        _assert_exists(spec, asset_id)
+        # Idempotent: re-bookmarking is a no-op rather than a PK violation.
+        execute_query(
+            f"INSERT INTO {spec.bookmark_table} (user_id, {spec.asset_id_col}) "
+            f"VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (LOCAL_USER_ID, asset_id),
+        )
+        return True
 
     @staticmethod
-    def remove(asset_type: str, token: str, asset_id: int) -> bool:
+    def remove(asset_type: str, asset_id: int) -> bool:
         spec = _spec(asset_type)
-        try:
-            public_id = _local_id_to_public_id(spec, asset_id)
-        except BookmarkLookupError:
-            # Local row gone? Bookmark might still exist on central — but
-            # we don't know its public_id, so this is a no-op. Returning
-            # True keeps the UI idempotent.
-            return True
-        try:
-            central_server.remove_bookmark(token, spec.asset_type, public_id)
-            return True
-        except CentralServerError as err:
-            raise RuntimeError(f"Central server: {err}") from err
+        execute_query(
+            f"DELETE FROM {spec.bookmark_table} "
+            f"WHERE user_id = %s AND {spec.asset_id_col} = %s",
+            (LOCAL_USER_ID, asset_id),
+        )
+        return True
 
     @staticmethod
-    def list(asset_type: str, token: str) -> List[dict]:
-        """Return the user's bookmarks as a list of full local rows.
+    def list(asset_type: str) -> List[dict]:
+        """Bookmarked rows, most recently bookmarked first.
 
-        Pulls public_ids from central, then joins against the local
-        asset table to surface the columns the UI cares about. Bookmarks
-        for public_ids the local cache hasn't synced yet are silently
-        dropped — they'll show up on the next HF sync.
+        `public_id` is still surfaced (NULL for drafts) because the UI uses it
+        to decide whether an item can be shared / forked.
         """
         spec = _spec(asset_type)
-        try:
-            bookmarks = central_server.list_bookmarks(token, spec.asset_type)
-        except CentralServerError as err:
-            raise RuntimeError(f"Central server: {err}") from err
-
-        public_ids = [b["public_id"] for b in bookmarks if b.get("public_id")]
-        if not public_ids:
-            return []
-
-        rows = execute_query_dict(
+        return execute_query_dict(
             f"""
             SELECT a.{spec.asset_id_col}, a.public_id, {spec.list_columns}
-            FROM {spec.asset_table} a
-            WHERE a.public_id = ANY(%s)
+            FROM {spec.bookmark_table} b
+            JOIN {spec.asset_table} a ON a.{spec.asset_id_col} = b.{spec.asset_id_col}
+            WHERE b.user_id = %s
+            ORDER BY b.created_at DESC
             """,
-            (public_ids,),
+            (LOCAL_USER_ID,),
         ) or []
-
-        # Preserve the central server's ordering (most-recent-bookmark first)
-        order = {pid: i for i, pid in enumerate(public_ids)}
-        rows.sort(key=lambda r: order.get(r["public_id"], 1_000_000))
-        return rows

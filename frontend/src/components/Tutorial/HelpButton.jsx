@@ -10,7 +10,9 @@ import { useLocation } from 'react-router-dom';
 import { FiHelpCircle } from 'react-icons/fi';
 import { useTutorial } from '../../contexts/TutorialContext';
 
-const HIDDEN_ON = new Set(['/', '/login', '/register']);
+// '/' now redirects straight into the app, and there are no auth pages, so
+// there is nowhere left to hide the help button.
+const HIDDEN_ON = new Set();
 
 const HelpButton = () => {
     const { show, open } = useTutorial();

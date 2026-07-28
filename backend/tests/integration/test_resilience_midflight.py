@@ -96,60 +96,7 @@ class TestLLMFailureDuringDefaultsGeneration:
         assert rule_id not in ids, "half-built draft must stay hidden until finalized"
 
 
-class TestCentralServerDownDuringAuth:
-    """The shared identity server is unreachable while a user registers/logs in.
-    The route must surface an error AND leave no inconsistent local mirror."""
-
-    def test_register_when_central_down_errors_and_writes_no_local_user(self, client, monkeypatch):
-        from services import central_server
-        from services.central_server import CentralServerError
-
-        email = f"{_uniq('down')}@test.com"
-
-        def fail(*_a, **_k):
-            raise CentralServerError("central unreachable")
-
-        monkeypatch.setattr(central_server, "register", fail)
-        res = client.post("/user/register", json={
-            "username": _uniq("u"), "email": email, "password": "Passw0rd!",
-        })
-        assert res.status_code != 200
-        # The local mirror only happens AFTER a successful central register.
-        assert not execute_query_dict("SELECT 1 FROM users WHERE email=%s", (email,))
-
-    def test_login_when_central_down_errors_with_no_token(self, client, monkeypatch):
-        from services import central_server
-        from services.central_server import CentralServerError
-
-        def fail(*_a, **_k):
-            raise CentralServerError("central unreachable")
-
-        monkeypatch.setattr(central_server, "login", fail)
-        res = client.post("/user/login", json={"email": "whoever@test.com", "password": "x"})
-        assert res.status_code != 200
-        assert "token" not in res.json()
-
-    def test_raw_network_error_leaves_no_partial_user(self, client, monkeypatch):
-        """Even an UNHANDLED transport error type (the route only catches
-        CentralServerError) must not leak a partially-created local user.
-
-        The TestClient re-raises an unhandled exception, whereas a real uvicorn
-        server maps it to a 500 — we tolerate both. The invariant under test is
-        purely that the local mirror was never written, because the local
-        sync only runs AFTER a successful central register."""
-        from services import central_server
-
-        email = f"{_uniq('netdrop')}@test.com"
-
-        def conn_err(*_a, **_k):
-            raise ConnectionError("connection reset by peer")
-
-        monkeypatch.setattr(central_server, "register", conn_err)
-        try:
-            res = client.post("/user/register", json={
-                "username": _uniq("u"), "email": email, "password": "Passw0rd!",
-            })
-            assert res.status_code >= 400  # real-server path: mapped to 5xx
-        except ConnectionError:
-            pass  # TestClient path: unhandled exception re-raised
-        assert not execute_query_dict("SELECT 1 FROM users WHERE email=%s", (email,))
+# NOTE — TestCentralServerDownDuringAuth was removed with login. It asserted that
+# a central-server outage during register/login failed cleanly and wrote no
+# partial local user. There is no register/login, and the backend no longer calls
+# central for identity at all — only to publish.

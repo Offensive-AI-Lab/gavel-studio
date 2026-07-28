@@ -39,10 +39,10 @@ class TestRealtimeGating:
             assert "groups" in data
             assert isinstance(data["groups"], list)
 
-    def test_sample_groups_no_auth(self, client, test_classifier):
+    def test_sample_groups_without_auth_is_allowed(self, client, test_classifier):
         cid = test_classifier["classifier_id"]
         res = client.get(f"/realtime/{cid}/sample-groups")
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_sample_group_not_found_classifier(self, client, auth_headers):
         res = client.get(
@@ -97,13 +97,13 @@ class TestRealtimeAnalyzeValidation:
         res = client.post(f"/realtime/{cid}/analyze", json={}, headers=auth_headers)
         assert res.status_code == 422
 
-    def test_analyze_no_auth(self, client, test_classifier):
+    def test_analyze_without_auth_is_allowed(self, client, test_classifier):
         cid = test_classifier["classifier_id"]
         res = client.post(
             f"/realtime/{cid}/analyze",
             json={"user_message": "hi"},
         )
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_analyze_classifier_not_found(self, client, auth_headers):
         """Gate runs before model load: nonexistent classifier -> 404."""
@@ -154,120 +154,21 @@ class TestRealtimeAnalyzeValidation:
         )
         assert res.status_code == 400
 
-    def test_analyze_stored_no_auth(self, client, test_classifier):
+    def test_analyze_stored_without_auth_is_allowed(self, client, test_classifier):
         cid = test_classifier["classifier_id"]
         res = client.post(
             f"/realtime/{cid}/analyze-stored",
             json={"messages": [{"role": "user", "content": "hi"}]},
         )
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
 
 # ===========================================================================
 # Ratings — proxied to the central server, but several paths are decided
 # LOCALLY before the HTTP hop.
 # ===========================================================================
-class TestRatingsValidation:
-    def test_rate_requires_auth(self, client):
-        res = client.post(
-            "/ratings/",
-            json={"asset_type": "rule", "asset_public_id": "abc", "score": 5},
-        )
-        assert res.status_code in (401, 403)
-
-    def test_rate_invalid_asset_type(self, client, auth_headers):
-        """asset_type is Literal['rule','ce'] -> 422 for anything else."""
-        res = client.post(
-            "/ratings/",
-            json={"asset_type": "banana", "asset_public_id": "abc", "score": 5},
-            headers=auth_headers,
-        )
-        assert res.status_code == 422
-
-    def test_rate_score_out_of_range_high(self, client, auth_headers):
-        """score is constrained 1..5 -> 422 when 6."""
-        res = client.post(
-            "/ratings/",
-            json={"asset_type": "rule", "asset_public_id": "abc", "score": 6},
-            headers=auth_headers,
-        )
-        assert res.status_code == 422
-
-    def test_rate_score_out_of_range_low(self, client, auth_headers):
-        res = client.post(
-            "/ratings/",
-            json={"asset_type": "rule", "asset_public_id": "abc", "score": 0},
-            headers=auth_headers,
-        )
-        assert res.status_code == 422
-
-    def test_rate_empty_public_id(self, client, auth_headers):
-        """asset_public_id has min_length=1 -> 422 when empty."""
-        res = client.post(
-            "/ratings/",
-            json={"asset_type": "rule", "asset_public_id": "", "score": 3},
-            headers=auth_headers,
-        )
-        assert res.status_code == 422
-
-    def test_rate_missing_fields(self, client, auth_headers):
-        res = client.post("/ratings/", json={"asset_type": "rule"}, headers=auth_headers)
-        assert res.status_code == 422
-
-    def test_rate_unknown_artifact_returns_404(self, client, auth_headers):
-        """Local owner lookup runs BEFORE the central hop: a public_id that maps
-        to no local rule/CE -> 404, deterministically and without any network
-        call to the central server."""
-        res = client.post(
-            "/ratings/",
-            json={
-                "asset_type": "rule",
-                "asset_public_id": f"nonexistent_{int(time.time())}",
-                "score": 4,
-            },
-            headers=auth_headers,
-        )
-        assert res.status_code == 404
 
 
-class TestRatingsAuthBoundaries:
-    """GET/DELETE rating endpoints use a separate auto_error=False bearer that
-    raises 401 when the token is missing."""
-
-    def test_get_rating_no_token(self, client):
-        res = client.get("/ratings/rule/some-id")
-        # The dedicated _get_token dependency raises 401 for a missing token.
-        assert res.status_code in (401, 403)
-
-    def test_delete_rating_no_token(self, client):
-        res = client.delete("/ratings/rule/some-id")
-        assert res.status_code in (401, 403)
-
-    def test_get_rating_invalid_asset_type(self, client, auth_headers):
-        """asset_type path param is Literal['rule','ce'] -> 422 for others."""
-        res = client.get("/ratings/banana/some-id", headers=auth_headers)
-        assert res.status_code == 422
-
-    def test_delete_rating_invalid_asset_type(self, client, auth_headers):
-        res = client.delete("/ratings/banana/some-id", headers=auth_headers)
-        assert res.status_code == 422
-
-    def test_get_rating_central_backed(self, client, auth_headers):
-        """With a valid token + valid asset_type, the request is proxied to the
-        central server. Depending on whether it's reachable/configured the
-        outcome is a 200 summary or an upstream error code surfaced verbatim."""
-        res = client.get("/ratings/ce/some-public-id", headers=auth_headers)
-        assert res.status_code in (200, 400, 401, 404, 500, 502, 503)
-        if res.status_code == 200:
-            data = res.json()
-            assert data["asset_type"] == "ce"
-            assert data["asset_public_id"] == "some-public-id"
-            assert "rating_count" in data
-
-
-# ===========================================================================
-# Pipeline runs — full wizard-state CRUD, no ML.
-# ===========================================================================
 class TestPipelineRunsCrud:
     def test_create_and_get_run(self, client, auth_headers):
         res = client.post("/pipeline-runs", json={"pipeline_type": "rule"}, headers=auth_headers)
@@ -287,7 +188,7 @@ class TestPipelineRunsCrud:
 
     def test_create_run_requires_auth(self, client):
         res = client.post("/pipeline-runs", json={"pipeline_type": "rule"})
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_create_test_eval_run_without_classifier_is_400(self, client, auth_headers):
         """test_eval runs require a classifier_id (ValueError -> 400)."""
@@ -310,9 +211,9 @@ class TestPipelineRunsCrud:
         res = client.get("/pipeline-runs/999999", headers=auth_headers)
         assert res.status_code == 404
 
-    def test_get_run_no_auth(self, client):
+    def test_get_run_without_auth_is_allowed(self, client):
         res = client.get("/pipeline-runs/1")
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_list_active_runs_shape(self, client, auth_headers):
         res = client.get("/pipeline-runs/active", headers=auth_headers)
@@ -329,9 +230,9 @@ class TestPipelineRunsCrud:
         )
         assert res.status_code == 400
 
-    def test_list_active_runs_no_auth(self, client):
+    def test_list_active_runs_without_auth_is_allowed(self, client):
         res = client.get("/pipeline-runs/active")
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
 
 class TestPipelineRunsStepUpdates:
@@ -425,20 +326,9 @@ class TestPipelineRunsStepUpdates:
         assert res.json()["run_id"] == rid
 
 
-class TestPipelineRunsOwnership:
-    """A run owned by user A must be invisible (404) to user B."""
-
-    def test_other_user_cannot_see_run(self, client, auth_headers):
-        from utils.auth import create_access_token
-
-        run = client.post(
-            "/pipeline-runs", json={"pipeline_type": "rule"}, headers=auth_headers
-        ).json()
-        rid = run["run_id"]
-
-        other_headers = {"Authorization": f"Bearer {create_access_token({'sub': '987654'})}"}
-        res = client.get(f"/pipeline-runs/{rid}", headers=other_headers)
-        assert res.status_code == 404
+# (TestPipelineRunsOwnership removed with login. It minted a token for a second
+# user to prove a run owned by A is 404 for B. There is exactly one identity
+# now, so a "second user" cannot be constructed and the scenario cannot occur.)
 
 
 # ===========================================================================
@@ -482,3 +372,10 @@ class TestDashboard:
         """user_id path param is typed int -> 422 for a non-numeric value."""
         res = client.get("/dashboard/not-a-number")
         assert res.status_code == 422
+
+
+# NOTE — TestRatingsValidation / TestRatingsAuthBoundaries were removed with the
+# ratings feature. A rating is one row per (user, asset) with a self-rating
+# guard, so it needs distinct accounts; with a single local identity it has no
+# meaning. The /ratings router, its central tables and the StarRating widget are
+# all gone.

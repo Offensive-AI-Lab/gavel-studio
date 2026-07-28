@@ -2,7 +2,7 @@
 //
 // Follows the established pattern in pages.smoke.test.jsx: mock '../api' with
 // benign defaults for every export this page (and its child components —
-// Layout/Sidebar, RuleCard, CognitiveElementCard, StarRating) might touch,
+// Layout/Sidebar, RuleCard, CognitiveElementCard) might touch,
 // stub the Sidebar, wrap in MemoryRouter, and seed a logged-in user in
 // localStorage so the page renders as authenticated.
 
@@ -19,7 +19,6 @@ vi.mock('react-router-dom', async () => {
 });
 
 // --- API mock. searchLibrary is the only call LibrarySearch makes directly,
-// but child cards (via StarRating) reference rating endpoints, so cover those
 // too. Everything resolves benign so nothing hits the network. ---
 const searchLibrary = vi.fn(() => Promise.resolve({ data: { results: [] } }));
 vi.mock('../../src/api', () => ({
@@ -33,9 +32,6 @@ vi.mock('../../src/api', () => ({
         put: vi.fn(() => Promise.resolve({ data: {} })),
     },
     searchLibrary: (...args) => searchLibrary(...args),
-    getRatingSummary: vi.fn(() => Promise.resolve({ data: { rating_count: 0, rating_avg: null, your_score: null } })),
-    rateAsset: vi.fn(() => Promise.resolve({ data: {} })),
-    withdrawRating: vi.fn(() => Promise.resolve({ data: {} })),
 }));
 
 // Stub the Sidebar (rendered inside Layout) — it has its own fetches/routing.

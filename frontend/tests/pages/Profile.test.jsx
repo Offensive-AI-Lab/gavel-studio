@@ -118,8 +118,8 @@ const baseProfile = {
     member_since: '2023-01-15T00:00:00Z',
     contribution_count_rules: 3,
     contribution_count_ces: 2,
-    avg_rating_received: 4.25,
-    total_rating_count: 8,
+    avg_rating_received: null,
+    total_rating_count: 0,
 };
 
 const ruleRow = (id, name) => ({
@@ -131,7 +131,6 @@ const ceRow = (id, name) => ({
 });
 
 const setUser = (user) => {
-    sessionStorage.setItem('token', 'fake-token');
     sessionStorage.setItem('user', JSON.stringify(user));
 };
 
@@ -255,26 +254,17 @@ describe('Profile — not found', () => {
 });
 
 describe('Profile — header stats', () => {
-    it('renders the average rating and ratings count (plural)', async () => {
+    it('renders the contribution counts', async () => {
         renderProfile();
-        expect(await screen.findByText('4.3')).toBeInTheDocument(); // 4.25 -> toFixed(1)
-        expect(screen.getByText(/\(8 ratings\)/)).toBeInTheDocument();
+        expect(await screen.findByText('3')).toBeInTheDocument();   // rules
+        expect(screen.getByText('2')).toBeInTheDocument();          // CEs
     });
 
-    it('renders singular "rating" when total_rating_count is 1', async () => {
-        api.getUserProfile.mockResolvedValue({
-            data: { ...baseProfile, total_rating_count: 1, avg_rating_received: 5 },
-        });
+    it('shows no rating stats (ratings were removed with accounts)', async () => {
         renderProfile();
-        expect(await screen.findByText(/\(1 rating\)/)).toBeInTheDocument();
-    });
-
-    it('shows "No ratings yet" when avg_rating_received is null', async () => {
-        api.getUserProfile.mockResolvedValue({
-            data: { ...baseProfile, avg_rating_received: null },
-        });
-        renderProfile();
-        expect(await screen.findByText(/No ratings yet/i)).toBeInTheDocument();
+        await screen.findByText('3');
+        expect(screen.queryByText(/ratings?\)/)).not.toBeInTheDocument();
+        expect(screen.queryByText(/No ratings yet/i)).not.toBeInTheDocument();
     });
 
     it('renders the Team badge when is_team is true', async () => {
@@ -722,15 +712,8 @@ describe('Profile — bookmarks (visitor)', () => {
 });
 
 describe('Profile — refresh listeners', () => {
-    it('re-fetches the profile silently on gavel:ratingChanged', async () => {
-        renderProfile('alice');
-        await screen.findByText('Alice A');
-        const callsBefore = api.getUserProfile.mock.calls.length;
-        act(() => {
-            window.dispatchEvent(new Event('gavel:ratingChanged'));
-        });
-        await waitFor(() => expect(api.getUserProfile.mock.calls.length).toBeGreaterThan(callsBefore));
-    });
+    // The 'gavel:ratingChanged' listener was removed with ratings; the
+    // library-refresh path below is the remaining silent-refresh trigger.
 
     it('library-refresh callback re-fetches profile and bumps contributions', async () => {
         renderProfile('alice');

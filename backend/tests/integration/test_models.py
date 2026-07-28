@@ -68,13 +68,13 @@ class TestModelCreation:
         }, headers=auth_headers)
         assert res.status_code in (400, 422)
 
-    def test_create_model_no_auth(self, client, test_user):
+    def test_create_model_without_auth_is_allowed(self, client, test_user):
         res = client.post("/models/create", json={
             "user_id": test_user["user_id"],
             "name": "NoAuth",
             "storage_path": "HuggingFaceTB/SmolLM2-360M-Instruct",
         })
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
 
 class TestModelRetrieval:
@@ -101,9 +101,9 @@ class TestModelRetrieval:
 class TestModelDeletion:
     """Model deletion with cascade."""
 
-    def test_delete_model_no_auth(self, client):
+    def test_delete_model_without_auth_is_allowed(self, client):
         res = client.delete("/models/99999")
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
 
 class TestModelUploadValidation:
@@ -138,13 +138,13 @@ class TestModelUploadValidation:
         res = self._upload(client, auth_headers, test_user, "model.zip", b"\x00" * 64)
         assert res.status_code == 400
 
-    def test_upload_no_auth(self, client, test_user):
+    def test_upload_without_auth_is_allowed(self, client, test_user):
         res = client.post(
             "/models/upload",
             data={"user_id": str(test_user["user_id"]), "name": "NoAuth"},
             files={"file": ("model.zip", io.BytesIO(make_model_zip()), "application/zip")},
         )
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
 
 class TestModelZipContent:

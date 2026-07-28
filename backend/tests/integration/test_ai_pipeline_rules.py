@@ -141,7 +141,7 @@ class TestCreateRuleFromBookmarkedCEs:
             "/ai/rules/from-bookmarked-ce",
             json={"name": "x", "ce_links": [{"ce_id": 1}, {"ce_id": 2}]},
         )
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +159,7 @@ class TestFinalizeDraftRule:
 
     def test_finalize_requires_auth(self, client):
         res = client.post("/ai/rules/1/finalize", json={"ce_ids": []})
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_finalize_empty_body_ok_schema(self, client, auth_headers):
         """ce_ids defaults to [] — an empty body is schema-valid, so for a
@@ -249,7 +249,7 @@ class TestDiscardUnreadyRule:
 
     def test_discard_requires_auth(self, client):
         res = client.post("/ai/rules/1/discard-unready")
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +271,7 @@ class TestDeriveScenario:
 
     def test_derive_scenario_requires_auth(self, client):
         res = client.post("/ai/derive-scenario", json={"rule_id": 1})
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +299,7 @@ class TestGenerateDefaults:
             "/ai/rules/1/generate-defaults",
             json={"scenario_instructions": "x"},
         )
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +308,7 @@ class TestGenerateDefaults:
 class TestDefaultsStatus:
     def test_status_requires_auth(self, client):
         res = client.get("/ai/rules/1/defaults/status")
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_status_for_unknown_rule_shape(self, client, auth_headers):
         """status endpoint returns a state dict even for an unknown rule
@@ -332,7 +332,7 @@ class TestTestConfigGeneration:
             "/ai/test-config/generate",
             json={"description": "some misuse scenario"},
         )
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_positive_config_missing_description_422(self, client, auth_headers):
         res = client.post(
@@ -345,7 +345,7 @@ class TestTestConfigGeneration:
             "/ai/test-config/negative/generate",
             json={"positive_config": {}},
         )
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_negative_config_missing_positive_config_422(self, client, auth_headers):
         res = client.post(

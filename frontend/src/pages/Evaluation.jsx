@@ -243,13 +243,13 @@ export default function Evaluation() {
     const modelName = guardrail?.model_name || 'Model';
 
     if (loading) return (
-        <Layout onLogout={() => { sessionStorage.clear(); navigate('/login'); }}>
+        <Layout>
             <div style={{ padding: 40, textAlign: 'center', color: '#64748b' }}>Loading...</div>
         </Layout>
     );
 
     return (
-        <Layout onLogout={() => { sessionStorage.clear(); navigate('/login'); }} currentModel={modelName}>
+        <Layout currentModel={modelName}>
             <header className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
                 <div>
                     <Breadcrumb items={[

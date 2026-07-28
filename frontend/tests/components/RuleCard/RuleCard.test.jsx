@@ -3,16 +3,15 @@
 // RuleCard is a presentational card with a lot of conditional branches:
 //   * header (status pill draft/public, category pills, author link,
 //     bookmark / publish / rule-page / delete buttons, chevron)
-//   * expanded body (StarRating, boolean-logic predicate, edit-predicate
+//   * expanded body (boolean-logic predicate, edit-predicate
 //     mode with per-CE role selects + fallback inputs, elements & roles
 //     list with role badges, remove-CE + add-CE affordances, role help).
 //
 // Every interactive handler stops propagation so a click on a button does
 // NOT bubble up to the header's onToggle — we assert that explicitly.
 //
-// We mock ../../api (used transitively by StarRating) and sweetalert2 (used
-// by the role-help alert dialog) so nothing hits the network or pops a real
-// modal.
+// We mock ../../api (RuleCard reads CE bookmarks) and sweetalert2 (used by the
+// role-help alert dialog) so nothing hits the network or pops a real modal.
 
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -26,14 +25,12 @@ vi.mock('react-router-dom', async () => {
     return { ...actual, useNavigate: () => navigateSpy };
 });
 
-// StarRating fetches its summary from ../../api on mount. Give it benign
-// resolved data so the real widget renders without network.
+// RuleCard imports the CE-bookmark helpers; keep them benign so mounting the
+// card never reaches the network.
 vi.mock('../../../src/api', () => ({
-    getRatingSummary: vi.fn(() => Promise.resolve({
-        data: { asset_type: 'rule', asset_public_id: 'pub', rating_count: 0, rating_avg: null, your_score: null },
-    })),
-    rateAsset: vi.fn(() => Promise.resolve({ data: {} })),
-    withdrawRating: vi.fn(() => Promise.resolve({ data: {} })),
+    getCEBookmarks: vi.fn(() => Promise.resolve({ data: { bookmarks: [] } })),
+    addCEBookmark: vi.fn(() => Promise.resolve({ data: {} })),
+    removeCEBookmark: vi.fn(() => Promise.resolve({ data: {} })),
 }));
 
 // showAlertDialog -> Swal.fire. Mock so the role-help button doesn't pop a modal.
@@ -333,17 +330,7 @@ describe('RuleCard — expanded body, read view', () => {
         expect(screen.queryByText('+ Add CE')).not.toBeInTheDocument();
     });
 
-    it('does not render StarRating without a public_id', () => {
-        const { container } = renderCard({ isExpanded: true });
-        expect(container.querySelector('.star-rating')).not.toBeInTheDocument();
-    });
 
-    it('renders StarRating when the rule has a public_id', async () => {
-        const rule = { ...baseRule(), public_id: 'pub-xyz' };
-        const { container } = render(<MemoryRouter><RuleCard rule={rule} isExpanded onToggle={() => {}} /></MemoryRouter>);
-        expect(await screen.findByText(/Rate this/)).toBeInTheDocument();
-        expect(container.querySelector('.star-rating')).toBeInTheDocument();
-    });
 });
 
 describe('RuleCard — role help', () => {

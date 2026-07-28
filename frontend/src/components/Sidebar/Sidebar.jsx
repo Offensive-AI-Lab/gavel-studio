@@ -75,11 +75,6 @@ const Sidebar = () => {
         return next;
     });
 
-    const handleLogout = () => {
-        sessionStorage.removeItem('token'); sessionStorage.removeItem('user'); sessionStorage.removeItem('models');
-        navigate('/login');
-    };
-
     const isActive = (path) => location.pathname === path;
     const startsWith = (p) => location.pathname.startsWith(p);
     // Recents match the FULL url (path + query). Without the query, every CE
@@ -205,10 +200,6 @@ const Sidebar = () => {
                         </div>
                     </div>
                 )}
-                <div className="nav-item logout-item" onClick={handleLogout}>
-                    <FiLogOut className="nav-icon" />
-                    <span>Logout</span>
-                </div>
             </div>
         </aside>
     );

@@ -113,15 +113,17 @@ describe('Community — initial render & layout', () => {
 });
 
 describe('Community — search mode with results', () => {
-    it('renders an artist card with display name, handle, contributions and rating', async () => {
+    it('renders an artist card with display name, handle and contributions', async () => {
+        // Ratings were removed with accounts, so the card shows contribution
+        // volume only — no average, no rating count.
         searchArtists.mockResolvedValue({ data: { items: [makeArtist()], total: 1 } });
         renderAt();
         expect(await screen.findByText('Alice A')).toBeInTheDocument();
         expect(screen.getByText('@alice')).toBeInTheDocument();
         expect(screen.getByText('5')).toBeInTheDocument();
         expect(screen.getByText('contributions')).toBeInTheDocument();
-        expect(screen.getByText('4.3')).toBeInTheDocument();
-        expect(screen.getByText('(8)')).toBeInTheDocument();
+        expect(screen.queryByText('4.3')).not.toBeInTheDocument();
+        expect(screen.queryByText(/No ratings yet/i)).not.toBeInTheDocument();
     });
 
     it('links each card to the artist profile', async () => {
@@ -138,22 +140,6 @@ describe('Community — search mode with results', () => {
         renderAt();
         await waitFor(() => expect(screen.getByText('@alice')).toBeInTheDocument());
         expect(screen.getAllByText('A').length).toBeGreaterThanOrEqual(1);
-    });
-
-    it('shows "No ratings yet" when avg_rating_received is null', async () => {
-        searchArtists.mockResolvedValue({
-            data: { items: [makeArtist({ avg_rating_received: null })], total: 1 },
-        });
-        renderAt();
-        expect(await screen.findByText(/No ratings yet/i)).toBeInTheDocument();
-    });
-
-    it('shows "No ratings yet" when avg_rating_received is undefined', async () => {
-        searchArtists.mockResolvedValue({
-            data: { items: [makeArtist({ avg_rating_received: undefined })], total: 1 },
-        });
-        renderAt();
-        expect(await screen.findByText(/No ratings yet/i)).toBeInTheDocument();
     });
 
     it('renders the bio when present', async () => {
@@ -272,8 +258,10 @@ describe('Community — leaderboard mode', () => {
         fireEvent.click(screen.getByRole('button', { name: /Leaderboard/i }));
         await waitFor(() => expect(getLeaderboard).toHaveBeenCalledWith('avg_rating', 1, 12, 0));
         expect(screen.queryByPlaceholderText(/Search by username/i)).not.toBeInTheDocument();
-        expect(screen.getByRole('button', { name: /Highest rated/i })).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: /Most contributions/i })).toBeInTheDocument();
+        // The "Highest rated" / "Most contributions" / "Min ratings" controls
+        // went away with ratings — the leaderboard has one ranking now.
+        expect(screen.queryByRole('button', { name: /Highest rated/i })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /Min ratings/i })).not.toBeInTheDocument();
         expect(lastLocation.search).toContain('mode=leaderboard');
     });
 
@@ -283,21 +271,7 @@ describe('Community — leaderboard mode', () => {
         expect(await screen.findByText(/No leaderboard data yet/i)).toBeInTheDocument();
     });
 
-    it('changes ordering to count via the "Most contributions" pill', async () => {
-        renderAt('/community?mode=leaderboard');
-        await waitFor(() => expect(getLeaderboard).toHaveBeenCalledWith('avg_rating', 1, 12, 0));
-        fireEvent.click(screen.getByRole('button', { name: /Most contributions/i }));
-        await waitFor(() => expect(getLeaderboard).toHaveBeenCalledWith('count', 1, 12, 0));
-        expect(lastLocation.search).toContain('by=count');
-    });
 
-    it('changes ordering back to avg_rating via the "Highest rated" pill', async () => {
-        renderAt('/community?mode=leaderboard&by=count');
-        await waitFor(() => expect(getLeaderboard).toHaveBeenCalledWith('count', 1, 12, 0));
-        fireEvent.click(screen.getByRole('button', { name: /Highest rated/i }));
-        await waitFor(() => expect(getLeaderboard).toHaveBeenCalledWith('avg_rating', 1, 12, 0));
-        expect(lastLocation.search).toContain('by=avg_rating');
-    });
 
     it('renders leaderboard artist cards', async () => {
         getLeaderboard.mockResolvedValue({
@@ -307,17 +281,12 @@ describe('Community — leaderboard mode', () => {
         expect(await screen.findByText('Champ')).toBeInTheDocument();
     });
 
-    it('applies the "Min ratings" filter and forwards it to getLeaderboard', async () => {
-        renderAt('/community?mode=leaderboard');
-        await waitFor(() => expect(getLeaderboard).toHaveBeenCalledWith('avg_rating', 1, 12, 0));
-        fireEvent.click(screen.getByRole('button', { name: /^3\+$/ }));
-        await waitFor(() => expect(getLeaderboard).toHaveBeenCalledWith('avg_rating', 1, 12, 3));
-        expect(lastLocation.search).toContain('min=3');
-    });
 
     it('switching back to search from leaderboard restores the input', async () => {
         renderAt('/community?mode=leaderboard');
-        await screen.findByRole('button', { name: /Highest rated/i });
+        // Anchor on the leaderboard's caption — the "Highest rated" pill this
+        // used to wait for went away with the rating sort.
+        await screen.findByText(/Contributors in your synced library/i);
         fireEvent.click(screen.getByRole('button', { name: /^Search/i }));
         await waitFor(() =>
             expect(screen.getByPlaceholderText(/Search by username/i)).toBeInTheDocument());

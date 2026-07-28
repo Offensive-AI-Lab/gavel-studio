@@ -29,7 +29,7 @@ vi.mock('../../src/pages/BuildRuleFromCEsModal', () => ({
 }));
 
 // --- API mock. Cover every export BookmarksRules + Layout/Sidebar + RuleCard
-// (StarRating) might call so nothing hits the network. Per-test overrides use
+// might call so nothing hits the network. Per-test overrides use
 // mockResolvedValueOnce / mockImplementation on these spies.
 vi.mock('../../src/api', () => {
     const empty = (extra = {}) => Promise.resolve({ data: extra });
@@ -46,10 +46,6 @@ vi.mock('../../src/api', () => {
         // keep them benign just in case).
         getUserModels: vi.fn(() => empty({ models: [] })),
         getClassifiers: vi.fn(() => empty({ classifiers: [] })),
-        // StarRating (RuleCard expanded + public_id) fetches its summary.
-        getRatingSummary: vi.fn(() => empty({ rating_count: 0, rating_avg: null, your_score: null })),
-        rateAsset: vi.fn(() => empty()),
-        withdrawRating: vi.fn(() => empty()),
     };
 });
 
@@ -83,7 +79,6 @@ const renderPage = () => render(
     <MemoryRouter initialEntries={['/bookmarks/rules']}>
         <Routes>
             <Route path="/bookmarks/rules" element={<BookmarksRules />} />
-            <Route path="/login" element={<div data-testid="login-page" />} />
         </Routes>
     </MemoryRouter>,
 );
@@ -108,18 +103,9 @@ beforeEach(() => {
     api.getPublicRules.mockResolvedValue({ data: { rules: [] } });
     api.searchBookmarks.mockResolvedValue({ data: { results: [], total_results: 0 } });
     api.removeRuleBookmark.mockResolvedValue({ data: {} });
-    api.getRatingSummary.mockResolvedValue({ data: { rating_count: 0, rating_avg: null, your_score: null } });
 });
 
-describe('BookmarksRules — auth + mount', () => {
-    it('redirects to /login when no user in localStorage', async () => {
-        sessionStorage.removeItem('user');
-        renderPage();
-        await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/login'));
-        // Should not have fetched bookmarks for a logged-out user.
-        expect(api.getRuleBookmarks).not.toHaveBeenCalled();
-    });
-
+describe('BookmarksRules — mount', () => {
     it('fetches bookmarks for the logged-in user on mount', async () => {
         renderPage();
         await waitFor(() => expect(api.getRuleBookmarks).toHaveBeenCalledWith(7));

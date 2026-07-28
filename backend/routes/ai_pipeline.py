@@ -580,7 +580,7 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
 
             hf_token = _resolve_token()
             if hf_token:
-                _sha, _manifest = _fetch_head_sha_and_manifest(hf_token)
+                _sha, _manifest = _fetch_head_sha_and_manifest()
                 rule_names_idx = _manifest.get("rule_names", {}) or {}
                 ce_names_idx = _manifest.get("ce_names", {}) or {}
 

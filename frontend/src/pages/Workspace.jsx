@@ -23,7 +23,6 @@ const Workspace = () => {
     const [stats, setStats] = useState(null);
     const [guardrailSummary, setGuardrailSummary] = useState([]);
     const [recentActivity, setRecentActivity] = useState([]);
-    const [user, setUser] = useState(null);
 
     // Pulled out of the mount-effect so the library-refresh hook can call
     // it on `gavel:libraryChanged`. Reads `user` from localStorage each
@@ -45,8 +44,6 @@ const Workspace = () => {
 
     useEffect(() => {
         const storedUser = JSON.parse(sessionStorage.getItem('user') || 'null');
-        if (!storedUser) { navigate('/login'); return; }
-        setUser(storedUser);
         refresh();
 
         // First-login auto-fire of the onboarding modal. Backed by the
@@ -101,16 +98,15 @@ const Workspace = () => {
     };
     useTutorialContent(pageHelp);
 
-    // Greeting that adapts to the time of day — small touch, makes the
-    // landing feel personal rather than templated.
+    // Greeting that adapts to the time of day. No name is appended: there is no
+    // login, so the only name available is the fixed local user's — addressing
+    // the single operator by it reads as odd rather than personal.
     const greeting = (() => {
         const h = new Date().getHours();
         if (h < 12) return 'Good morning';
         if (h < 18) return 'Good afternoon';
         return 'Good evening';
     })();
-
-    const displayName = user?.username || 'there';
 
     return (
         <div style={pageStyle}>
@@ -121,7 +117,7 @@ const Workspace = () => {
                         <div style={kickerStyle}>
                             <FiShield size={14} /> GAVEL Cloud Platform
                         </div>
-                        <h1 style={heroTitleStyle}>{greeting}, {displayName}.</h1>
+                        <h1 style={heroTitleStyle}>{greeting}.</h1>
                         <p style={heroSubtitleStyle}>
                             Pick where you want to work today. You can switch anytime.
                         </p>

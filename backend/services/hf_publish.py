@@ -123,9 +123,8 @@ def _resolve_username(publisher_user_id: Optional[int]) -> Optional[str]:
     """Look up the publishing user's canonical (lowercase) username so it
     can be stamped on the HF artifact + local row.
 
-    Reads from the LOCAL users mirror — populated on login/register by
-    sync_user_to_local(). The user is guaranteed to be in the mirror
-    because they had to be authenticated to reach the publish endpoint.
+    Reads from the LOCAL users table, where the single local user is seeded
+    at boot by DButils.ensure_local_user().
 
     Returns None if no user_id was provided (back-compat path for internal
     callers that don't have user context). Raises if a user_id was given
@@ -417,7 +416,7 @@ def _build_rule_payload(
 # --- HF I/O ---
 
 
-def _fetch_head_sha_and_manifest(auth_token: str) -> Tuple[str, dict]:
+def _fetch_head_sha_and_manifest() -> Tuple[str, dict]:
     """Return (HEAD commit SHA, parsed manifest).
 
     HEAD SHA is fetched from the central server (which holds the HF
@@ -428,7 +427,7 @@ def _fetch_head_sha_and_manifest(auth_token: str) -> Tuple[str, dict]:
     from services import central_server
     from huggingface_hub import hf_hub_download
 
-    head_sha = central_server.hf_head_sha(auth_token)
+    head_sha = central_server.hf_head_sha()
     if not head_sha:
         raise RuntimeError("Central server returned no HEAD SHA")
 
@@ -441,7 +440,7 @@ def _fetch_head_sha_and_manifest(auth_token: str) -> Tuple[str, dict]:
     return head_sha, manifest
 
 
-def _push_atomic(auth_token: str, operations: list, parent_sha: str, message: str):
+def _push_atomic(operations: list, parent_sha: str, message: str):
     """Forward a batch of file ops to the central server's /hf/commit.
 
     `operations` is a list of plain dicts `{"path": str, "content": bytes}`.
@@ -458,7 +457,6 @@ def _push_atomic(auth_token: str, operations: list, parent_sha: str, message: st
 
     try:
         resp = central_server.hf_commit(
-            auth_token,
             operations=operations,
             commit_message=message,
             parent_commit=parent_sha,
@@ -664,8 +662,7 @@ def _build_rule_set_payload(
 # --- publish_ce ---
 
 
-def publish_ce(ce_id: int, publisher_user_id: Optional[int] = None,
-               auth_token: Optional[str] = None) -> PublishResult:
+def publish_ce(ce_id: int, publisher_user_id: Optional[int] = None) -> PublishResult:
     """Push a single CE + its excitation in one atomic HF commit.
 
     Pre: a local CE row with is_local_draft=true and a populated
@@ -680,9 +677,6 @@ def publish_ce(ce_id: int, publisher_user_id: Optional[int] = None,
     context — in that case the row's existing created_by_username (if
     any) is preserved and used.
     """
-    if not auth_token:
-        return PublishResult(PublishStatus.ERROR, error="Auth token required for publish (central server)")
-
     publisher_username = _resolve_username(publisher_user_id)
 
     # Step 1 — sync first, unless the local manifest was refreshed
@@ -738,7 +732,7 @@ def publish_ce(ce_id: int, publisher_user_id: Optional[int] = None,
     # Step 3 — fetch manifest first (we'll check the registry-side name
     # index before building anything).
     try:
-        head_sha, manifest = _fetch_head_sha_and_manifest(auth_token)
+        head_sha, manifest = _fetch_head_sha_and_manifest()
     except Exception as e:
         return PublishResult(PublishStatus.ERROR, error=f"Could not read registry HEAD: {e}")
 
@@ -804,7 +798,7 @@ def publish_ce(ce_id: int, publisher_user_id: Optional[int] = None,
 
     # Step 4 — race-checked push via central server.
     try:
-        commit_resp = _push_atomic(auth_token, operations, head_sha, f"Publish CE: {ce['name']}")
+        commit_resp = _push_atomic(operations, head_sha, f"Publish CE: {ce['name']}")
     except Exception as e:
         # Push failed. Clear the stamp so the row goes back to a normal
         # draft state — the next session won't try to recover it.
@@ -857,13 +851,6 @@ def publish_ce(ce_id: int, publisher_user_id: Optional[int] = None,
     )
     _record_pushed_manifest_hash(commit_resp, manifest)
 
-    # Step 6 — bump the central server's contribution counter so the
-    # leaderboard/profile pages reflect this publish. Non-fatal if it fails.
-    try:
-        from services import central_server
-        central_server.record_publish_attribution(auth_token, "ce", published_at)
-    except Exception as attr_err:
-        logger.warning(f"Publish attribution failed (non-fatal): {attr_err}")
 
     return PublishResult(PublishStatus.SUCCESS, public_id=new_public_id, name=ce["name"])
 
@@ -871,8 +858,7 @@ def publish_ce(ce_id: int, publisher_user_id: Optional[int] = None,
 # --- publish_rule ---
 
 
-def publish_rule(rule_id: int, publisher_user_id: Optional[int] = None,
-                 auth_token: Optional[str] = None) -> PublishResult:
+def publish_rule(rule_id: int, publisher_user_id: Optional[int] = None) -> PublishResult:
     """Push a rule and any of its draft CE dependencies in a single atomic
     commit. If the rule references CEs that are already published, those
     are reused (their public_ids land in ce_dependencies). Drafts get
@@ -893,9 +879,6 @@ def publish_rule(rule_id: int, publisher_user_id: Optional[int] = None,
     alongside it. None is allowed for legacy / bootstrap callers — the
     rows keep whatever creator they already had.
     """
-    if not auth_token:
-        return PublishResult(PublishStatus.ERROR, error="Auth token required for publish (central server)")
-
     publisher_username = _resolve_username(publisher_user_id)
 
     # Skip the upfront sync when the local cache is fresh (see
@@ -994,7 +977,7 @@ def publish_rule(rule_id: int, publisher_user_id: Optional[int] = None,
     # Fetch HEAD's manifest once. Used for both the registry name-index
     # check below and for building the updated manifest at push time.
     try:
-        head_sha, manifest = _fetch_head_sha_and_manifest(auth_token)
+        head_sha, manifest = _fetch_head_sha_and_manifest()
     except Exception as e:
         return PublishResult(PublishStatus.ERROR, error=f"Could not read registry HEAD: {e}")
 
@@ -1204,7 +1187,7 @@ def publish_rule(rule_id: int, publisher_user_id: Optional[int] = None,
     # Step 5 — race-checked push.
     try:
         commit_resp = _push_atomic(
-            auth_token, operations, head_sha,
+            operations, head_sha,
             f"Publish rule: {rule['name']} (+{len(draft_ces)} CE{'s' if len(draft_ces) != 1 else ''})",
         )
     except Exception as e:
@@ -1286,15 +1269,6 @@ def publish_rule(rule_id: int, publisher_user_id: Optional[int] = None,
         )
     _record_pushed_manifest_hash(commit_resp, manifest)
 
-    # Bump contribution counters on the central server — one for the rule
-    # and one for each draft CE published alongside it.
-    try:
-        from services import central_server
-        central_server.record_publish_attribution(auth_token, "rule", published_at)
-        for _ in draft_ces:
-            central_server.record_publish_attribution(auth_token, "ce", published_at)
-    except Exception as attr_err:
-        logger.warning(f"Publish attribution failed (non-fatal): {attr_err}")
 
     return PublishResult(PublishStatus.SUCCESS, public_id=new_rule_public_id, name=rule["name"])
 
@@ -1302,8 +1276,7 @@ def publish_rule(rule_id: int, publisher_user_id: Optional[int] = None,
 # --- publish_rule_set ---
 
 
-def publish_rule_set(classifier_id: int, publisher_user_id: Optional[int] = None,
-                     auth_token: Optional[str] = None) -> PublishResult:
+def publish_rule_set(classifier_id: int, publisher_user_id: Optional[int] = None) -> PublishResult:
     """Publish a private rule set (a model-less guardrail / `classifiers` row)
     to the public registry as a model-agnostic, shareable rule collection.
 
@@ -1325,9 +1298,6 @@ def publish_rule_set(classifier_id: int, publisher_user_id: Optional[int] = None
     `classifiers` row, which we never touch): SUCCESS / CONFLICT (name taken) /
     RACE (HEAD moved) / ERROR.
     """
-    if not auth_token:
-        return PublishResult(PublishStatus.ERROR, error="Auth token required for publish (central server)")
-
     publisher_username = _resolve_username(publisher_user_id)
 
     # Step 1 — sync first unless the local cache is fresh (the race-checked
@@ -1394,7 +1364,7 @@ def publish_rule_set(classifier_id: int, publisher_user_id: Optional[int] = None
 
     # Step 3 — fetch HEAD + manifest; registry-side name-index check.
     try:
-        head_sha, manifest = _fetch_head_sha_and_manifest(auth_token)
+        head_sha, manifest = _fetch_head_sha_and_manifest()
     except Exception as e:
         return PublishResult(PublishStatus.ERROR, error=f"Could not read registry HEAD: {e}")
 
@@ -1465,7 +1435,7 @@ def publish_rule_set(classifier_id: int, publisher_user_id: Optional[int] = None
     # Step 5 — race-checked push.
     try:
         commit_resp = _push_atomic(
-            auth_token, operations, head_sha,
+            operations, head_sha,
             f"Publish rule set: {name} ({len(member_public_ids)} rule{'s' if len(member_public_ids) != 1 else ''})",
         )
     except Exception as e:
@@ -1506,11 +1476,5 @@ def publish_rule_set(classifier_id: int, publisher_user_id: Optional[int] = None
         (new_public_id, published_at, rule_set_id),
     )
     _record_pushed_manifest_hash(commit_resp, manifest)
-
-    # Attribution (contribution counters) for rule sets is deferred — the
-    # central server has no rule_set contribution counter yet, and ratings
-    # (asset_type='rule_set') flow through the generic asset_ratings_summary
-    # without it. Add a counter + a record_publish_attribution('rule_set')
-    # call here when surfacing rule sets on the profile contributions page.
 
     return PublishResult(PublishStatus.SUCCESS, public_id=new_public_id, name=name)

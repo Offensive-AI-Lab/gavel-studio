@@ -1,7 +1,6 @@
 // Behavior tests for the Workspace (hub) landing page.
 //
 // Workspace:
-//   * redirects to /login when there's no stored user
 //   * fetches dashboard data for the stored user on mount (refresh())
 //   * conditionally renders the stats grid, classifier overview table, and
 //     recent-activity list only when each has data
@@ -89,27 +88,19 @@ afterEach(() => {
 });
 
 describe('Workspace — mount & auth', () => {
-    it('redirects to /login when no stored user', async () => {
-        sessionStorage.removeItem('user');
-        renderPage();
-        await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/login'));
-        expect(getDashboardData).not.toHaveBeenCalled();
-    });
 
     it('fetches dashboard data for the stored user id on mount', async () => {
         renderPage();
         await waitFor(() => expect(getDashboardData).toHaveBeenCalledWith(7));
     });
 
-    it('greets the user by username', async () => {
+    it('renders a time-of-day greeting with no name appended', async () => {
+        // With login removed the only available name is the fixed local user's,
+        // so the hero greets the time of day and nothing else.
         renderPage();
-        expect(await screen.findByText(/Sean\./)).toBeInTheDocument();
-    });
-
-    it('falls back to "there" when the user has no username', async () => {
-        setUser({ username: undefined });
-        renderPage();
-        expect(await screen.findByText(/there\./)).toBeInTheDocument();
+        expect(
+            await screen.findByText(/^Good (morning|afternoon|evening)\.$/)
+        ).toBeInTheDocument();
     });
 });
 
@@ -120,7 +111,7 @@ describe('Workspace — tutorial auto-fire', () => {
         expect(mockShowWelcome).not.toHaveBeenCalled();
     });
 
-    it('fires the welcome modal on first login (tutorial_seen falsy)', async () => {
+    it('fires the welcome modal on first run (tutorial_seen falsy)', async () => {
         setUser({ tutorial_seen: false });
         renderPage();
         await waitFor(() => expect(mockShowWelcome).toHaveBeenCalled());
@@ -200,7 +191,9 @@ describe('Workspace — conditional sections', () => {
         getDashboardData.mockRejectedValue(new Error('down'));
         renderPage();
         // Hero still renders; no stats sections appear.
-        expect(await screen.findByText(/Sean\./)).toBeInTheDocument();
+        expect(
+            await screen.findByText(/^Good (morning|afternoon|evening)\.$/)
+        ).toBeInTheDocument();
         expect(screen.queryByText('Your statistics')).not.toBeInTheDocument();
     });
 });

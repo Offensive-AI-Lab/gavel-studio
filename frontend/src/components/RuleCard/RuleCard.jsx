@@ -2,7 +2,6 @@ import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { showAlertDialog } from '../ConfirmDialog/confirmDialog';
 import { FiPenTool, FiTrash2, FiChevronDown, FiChevronUp, FiCpu, FiPlus, FiMinus, FiInfo, FiTag, FiUpload, FiFileText, FiBookmark, FiEdit2 } from 'react-icons/fi';
-import StarRating from '../StarRating/StarRating';
 import GlassModal from '../GlassModal/GlassModal';
 import RoleLogicGuide from '../RoleLogicGuide/RoleLogicGuide';
 import BuildRuleFromCEsModal from '../../pages/BuildRuleFromCEsModal';
@@ -297,19 +296,6 @@ const RuleCard = ({
             {/* EXPANDED CONTENT */}
             {isExpanded && (
                 <div className="rule-content">
-                    {/* Rating widget — only on published rules. Same
-                      * pattern as CognitiveElementCard. Drafts have no
-                      * public_id so StarRating renders nothing. */}
-                    {rule.public_id && (
-                        <div style={{ marginBottom: '16px' }}>
-                            <StarRating
-                                asset_type="rule"
-                                asset_public_id={rule.public_id}
-                                author_username={rule.created_by_username}
-                                compact={false}
-                            />
-                        </div>
-                    )}
                     {description && (
                         <div style={{ marginBottom: '16px' }}>
                             <div className="content-label" style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>

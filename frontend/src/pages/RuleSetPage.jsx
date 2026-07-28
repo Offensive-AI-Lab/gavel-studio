@@ -11,7 +11,6 @@ import {
     getRuleSetDetail, getRuleSetBookmarks, addRuleSetBookmark, removeRuleSetBookmark,
 } from '../api';
 import Breadcrumb from '../components/Breadcrumb/Breadcrumb';
-import StarRating from '../components/StarRating/StarRating';
 import { roleLabel } from '../utils/roleLabels';
 import { showAlertDialog } from '../components/ConfirmDialog/confirmDialog';
 import { useTutorialContent } from '../contexts/TutorialContext';
@@ -172,11 +171,6 @@ export default function RuleSetPage() {
                         {isBookmarked ? 'Remove bookmark' : 'Bookmark'}
                     </button>
                 </div>
-                {detail.public_id && (
-                    <div style={{ marginTop: 14 }}>
-                        <StarRating asset_type="rule_set" asset_public_id={detail.public_id} author_username={author} />
-                    </div>
-                )}
             </div>
 
             <div style={card}>

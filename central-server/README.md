@@ -1,12 +1,22 @@
 # GAVEL Central Server
 
-The one shared server every GAVEL backend connects to for **login, ratings,
-bookmarks, and publishing to HuggingFace**. You deploy it **once**; everyone
-points their backend at it.
+The shared server a GAVEL backend connects to in order to **publish to
+HuggingFace**. Deploy it once; point backends at it with `CENTRAL_SERVER_URL`.
 
-It holds the user accounts, the token-signing key, and the HuggingFace write
-token. Models and training data never touch it — those stay on each user's own
-machine.
+That is its whole job. It holds the HuggingFace **write** token — the one
+credential that must not sit on every user's machine — and it runs the registry
+control plane that pushes "new version available" notifications. Models,
+training data and rule sets never touch it; those stay local.
+
+> **It is completely unauthenticated.** GAVEL Studio has no login, so this
+> server has no users, no passwords, no tokens and no ratings/bookmarks. Anyone
+> who can reach it can publish with its HF token. Run it on your own machine or
+> a private network — do **not** expose it to the internet with a real
+> `HF_TOKEN` configured.
+>
+> `CENTRAL_SERVER_URL` is optional on the backend: leave it blank and everything
+> works except publishing. Reading the public library (sync / Browse / Fork) is
+> anonymous and needs no server at all.
 
 ---
 
@@ -24,23 +34,19 @@ git clone https://github.com/OfekAvi/gavel-cloud-platform.git
 cd gavel-cloud-platform/central-server
 ```
 
-**2. Configure.** Copy the env file, then open `.env` and set two values:
+**2. Configure.** Copy the env file, then open `.env` and set one value:
 
 ```bash
 cp .env.example .env
 ```
 
 ```bash
-# a signing secret — generate one with:
-#   python -c "import secrets; print(secrets.token_urlsafe(48))"
-JWT_SECRET_KEY=...
-
 # a HuggingFace WRITE token (huggingface.co → Settings → Access Tokens):
 HF_TOKEN=hf_...
 ```
 
-Both are required — the server signs logins with `JWT_SECRET_KEY` and uses
-`HF_TOKEN` for all HuggingFace library access (publishing and sync).
+That's the only required value — it's what the server exists to hold. Without
+it `/hf/*` returns 503, which just means publishing is disabled.
 
 > **Want instant library updates?** Also set `REGISTRY_WEBHOOK_SECRET` and add
 > an HF webhook — see [Real-time updates](#real-time-updates-instant-updates-available)
@@ -83,14 +89,16 @@ a code change: `docker compose up -d --build`.
 
 ## Point the backends at it
 
-In every user's `backend/.env`, set the URL — nothing else:
+In a user's `backend/.env`, set the URL — nothing else:
 
 ```bash
 CENTRAL_SERVER_URL=https://your-central-server     # or http://localhost:8001 to test locally
 ```
 
-The backend has **no** signing secret; it verifies logins by calling this
-server. To move the central server later, change just this one URL.
+The backend never authenticates to this server — there is nothing to
+authenticate with. It simply posts file operations when publishing. To move the
+central server later, change just this one URL. Leave the value blank to disable
+publishing entirely; everything else keeps working.
 
 ---
 
@@ -148,7 +156,6 @@ then on every publish flips users' badges **instantly**.
 
 | Variable | Required? | What it's for |
 |---|---|---|
-| `JWT_SECRET_KEY` | **yes** | Signs login tokens. Any long random string; keep it secret. |
 | `HF_TOKEN` | **yes** | HuggingFace **write** token. Used for all HF library access — publishing AND the sync check (`/hf/*` returns 503 without it). |
 | `ALLOWED_ORIGINS` | optional | Comma-separated browser origins allowed to call it (CORS). |
 | `REGISTRY_WEBHOOK_SECRET` | optional | Shared secret for the HF webhook (see [Real-time updates](#real-time-updates-instant-updates-available)). Set it for **instant** updates; without it, the safety poll still keeps everyone converged within a few minutes. |
@@ -168,7 +175,7 @@ then on every publish flips users' badges **instantly**.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env          # set DATABASE_URL + JWT_SECRET_KEY + HF_TOKEN
+cp .env.example .env          # set DATABASE_URL + HF_TOKEN
 python _create_db.py          # one-time: creates the DB named in DATABASE_URL
 uvicorn app.main:app --host 0.0.0.0 --port 8001
 ```
@@ -180,5 +187,4 @@ unless you truly can't use Docker, use the Docker steps above instead.)
 
 **Render** (managed hosting): `render.yaml` provisions the web service + a
 Postgres automatically. New → Blueprint → connect this repo, then set
-`JWT_SECRET_KEY` and `HF_TOKEN` (and optionally `ALLOWED_ORIGINS`) in the
-service's Environment tab.
+`HF_TOKEN` (and optionally `ALLOWED_ORIGINS`) in the service's Environment tab.

@@ -102,12 +102,12 @@ class TestGenerateDefaultsValidation:
         )
         assert res.status_code == 422
 
-    def test_no_auth_401_or_403(self, client):
+    def test_no_auth_is_allowed(self, client):
         res = client.post(
             "/ai/rules/123456/generate-defaults",
             json={"scenario_instructions": "some scenario"},
         )
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_non_integer_rule_id_422(self, client, auth_headers):
         # Path param is typed int; a non-numeric segment -> 422.
@@ -189,9 +189,9 @@ class TestDefaultsStatus:
         assert res.status_code == 200
         assert res.json()["state"] == "generating"
 
-    def test_status_no_auth_401_or_403(self, client):
+    def test_status_no_auth_is_allowed(self, client):
         res = client.get("/ai/rules/1/defaults/status")
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
 
 # ---------------------------------------------------------------------------
@@ -205,9 +205,9 @@ class TestTestSetGenerateValidation:
         res = client.post("/ai/test-set/generate", json={"target_count": 5}, headers=auth_headers)
         assert res.status_code == 422
 
-    def test_no_auth_401_or_403(self, client):
+    def test_no_auth_is_allowed(self, client):
         res = client.post("/ai/test-set/generate", json={"config": {}})
-        assert res.status_code in (401, 403)
+        assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_reserved_default_name_rejected_400(self, client, auth_headers):
         # "Test Set" is reserved for the rule's public default; a custom set may

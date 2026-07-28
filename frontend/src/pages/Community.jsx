@@ -4,15 +4,15 @@
 //   * Browse — search artists by username / display name; empty query
 //     shows the recently-active list.
 //   * Leaderboard — top contributors. Two sub-orderings: by average
-//     rating (>= 3 ratings to qualify) and by total contributions.
+//     total contributions.
 //
 // The artist gate is enforced server-side, so this page never shows
 // zero-contribution users. Every card links to /profile/<username>.
 
 import { useEffect, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
-    FiUsers, FiSearch, FiStar, FiAward, FiArrowLeft, FiHome,
+    FiUsers, FiSearch, FiAward, FiArrowLeft, FiHome,
 } from 'react-icons/fi';
 import Layout from '../components/Layout/Layout';
 import CommunityTabs from '../components/CommunityTabs/CommunityTabs';
@@ -23,14 +23,16 @@ import { useTutorialContent } from '../contexts/TutorialContext';
 const PAGE_SIZE = 12;
 
 const Community = () => {
-    const navigate = useNavigate();
     const [searchParams, setSearchParams] = useSearchParams();
 
     // URL-driven state so the back button works and a "share this view"
     // link is just the current URL. mode/orderBy live in the query string.
     const mode = searchParams.get('mode') || 'search';   // 'search' | 'leaderboard'
-    const orderBy = searchParams.get('by') || 'avg_rating';  // for leaderboard
-    const minRatings = parseInt(searchParams.get('min') || '0', 10) || 0;  // leaderboard rating floor
+    // Kept so old /community/people?by=…&min=… links still resolve. The
+    // backend accepts both for shape compatibility but ignores them: with
+    // ratings gone there is only one ranking (contribution volume).
+    const orderBy = searchParams.get('by') || 'avg_rating';
+    const minRatings = parseInt(searchParams.get('min') || '0', 10) || 0;
     const urlQuery = searchParams.get('q') || '';
 
     const [query, setQuery] = useState(urlQuery);
@@ -46,7 +48,7 @@ const Community = () => {
                 heading: 'Two views',
                 bullets: [
                     'Search — find an artist by username or display name. Empty query shows recently-active artists.',
-                    'Leaderboard — top contributors by average rating or by raw contribution count. Use the "Min ratings" filter to require a contributor to have at least N ratings before they show.',
+                    'Leaderboard — top contributors by how much they have published into the library.',
                 ],
             },
             {
@@ -101,29 +103,6 @@ const Community = () => {
         setPage(1);
     };
 
-    const setOrderBy = (newBy) => {
-        const next = new URLSearchParams(searchParams);
-        next.set('by', newBy);
-        setSearchParams(next);
-        setPage(1);
-    };
-
-    const setMinRatings = (newMin) => {
-        const next = new URLSearchParams(searchParams);
-        if (newMin > 0) next.set('min', String(newMin));
-        else next.delete('min');
-        setSearchParams(next);
-        setPage(1);
-    };
-
-    // "Minimum ratings" filter options for the leaderboard.
-    const MIN_RATING_OPTIONS = [
-        { value: 0, label: 'Any' },
-        { value: 3, label: '3+' },
-        { value: 5, label: '5+' },
-        { value: 10, label: '10+' },
-    ];
-
     return (
         <Layout>
             <CommunityTabs active="people" />
@@ -165,26 +144,8 @@ const Community = () => {
                     </div>
                 </div>
             ) : (
-                <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px 18px', marginBottom: '16px' }}>
-                    <div style={{ display: 'flex', gap: '8px' }}>
-                        <button onClick={() => setOrderBy('avg_rating')} style={smallPillStyle(orderBy === 'avg_rating')}>
-                            Highest rated
-                        </button>
-                        <button onClick={() => setOrderBy('count')} style={smallPillStyle(orderBy === 'count')}>
-                            Most contributions
-                        </button>
-                    </div>
-                    {/* "Minimum ratings" filter — only show contributors with at least N ratings. */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', color: '#94a3b8', fontSize: '0.82rem', fontWeight: 600 }}>
-                            <FiStar style={{ color: '#fcd34d' }} /> Min ratings
-                        </span>
-                        {MIN_RATING_OPTIONS.map((opt) => (
-                            <button key={opt.value} onClick={() => setMinRatings(opt.value)} style={smallPillStyle(minRatings === opt.value)}>
-                                {opt.label}
-                            </button>
-                        ))}
-                    </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px 18px', marginBottom: '16px', color: '#94a3b8', fontSize: '0.85rem' }}>
+                    Contributors in your synced library, most published first.
                 </div>
             )}
 
@@ -266,15 +227,6 @@ const ArtistCard = ({ artist }) => {
                 paddingTop: '12px', borderTop: '1px solid rgba(148, 163, 184, 0.14)',
             }}>
                 <span><strong style={{ color: '#e2e8f0' }}>{total}</strong> contributions</span>
-                {artist.avg_rating_received !== null && artist.avg_rating_received !== undefined ? (
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                        <FiStar style={{ color: '#fcd34d' }} />
-                        <strong style={{ color: '#e2e8f0' }}>{artist.avg_rating_received.toFixed(1)}</strong>
-                        <span style={{ color: '#94a3b8' }}>({artist.total_rating_count})</span>
-                    </span>
-                ) : (
-                    <span style={{ color: '#64748b', fontSize: '0.78rem' }}>No ratings yet</span>
-                )}
             </div>
         </Link>
     );
@@ -319,11 +271,6 @@ const tabBtnStyle = (active) => ({
         : '0 2px 6px rgba(2, 6, 23, 0.30)',
 });
 
-const smallPillStyle = (active) => ({
-    ...tabBtnStyle(active),
-    padding: '6px 14px',
-    fontSize: '0.82rem',
-});
 
 const inputWrapStyle = {
     display: 'flex', alignItems: 'center', gap: '10px',

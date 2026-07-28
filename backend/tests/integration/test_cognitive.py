@@ -50,12 +50,14 @@ class TestCECreation:
 class TestCEBookmarks:
     """CE bookmark operations."""
 
-    def test_bookmark_draft_ce_rejected(self, client, auth_headers, test_user):
-        """A freshly-created LOCAL CE has no public_id, so it cannot be
-        bookmarked: bookmarks live on the central server and are keyed by the
-        HF public_id. The route must surface this as a 400 (BookmarkLookupError)
-        rather than a 500 or a silent success. This is the real post-migration
-        boundary — the asset has to be published before it can be bookmarked."""
+    def test_bookmark_draft_ce_is_allowed(self, client, auth_headers, test_user):
+        """A freshly-created LOCAL draft CE CAN be bookmarked.
+
+        This inverted when bookmarks moved back into the local database. They
+        used to live on the central server keyed by the HuggingFace public_id,
+        so an unpublished draft (no public_id) was rejected with a 400. Local
+        bookmarks are keyed by the local SERIAL id, so a draft is bookmarkable
+        like anything else — which is what a single-user workspace wants."""
         ce_res = client.post("/cognitive/create", json={
             "user_id": test_user["user_id"],
             "name": f"bm_ce_{int(time.time()) % 100000}",
@@ -69,8 +71,13 @@ class TestCEBookmarks:
             "user_id": test_user["user_id"],
             "ce_id": ce_id,
         }, headers=auth_headers)
-        assert res.status_code == 400
-        assert "draft" in res.json().get("detail", "").lower()
+        assert res.status_code == 200
+        assert res.json()["status"] == "bookmarked"
+
+        # ...and it comes back in the listing.
+        listed = client.get(f"/cognitive/bookmarks/{test_user['user_id']}", headers=auth_headers)
+        assert listed.status_code == 200
+        assert any(b["ce_id"] == ce_id for b in listed.json()["bookmarks"])
 
     def test_bookmark_nonexistent_ce_rejected(self, client, auth_headers, test_user):
         """Bookmarking a CE id that doesn't exist locally is a 400, not a 500."""

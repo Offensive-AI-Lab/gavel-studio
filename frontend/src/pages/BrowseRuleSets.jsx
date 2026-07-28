@@ -33,10 +33,6 @@ const BrowseRuleSets = () => {
     const user = JSON.parse(sessionStorage.getItem('user'));
 
     useEffect(() => {
-        if (!sessionStorage.getItem('user')) {
-            navigate('/login');
-            return;
-        }
         fetchRuleSets();
         fetchCategories();
         fetchBookmarks();
@@ -129,11 +125,6 @@ const BrowseRuleSets = () => {
         ],
     });
 
-    const handleLogout = () => {
-        sessionStorage.clear();
-        navigate('/login');
-    };
-
     // Client-side search + category filter (rule sets are a small set; no
     // server-side hybrid search is wired for this asset type in v1).
     const q = searchQuery.trim().toLowerCase();
@@ -151,7 +142,7 @@ const BrowseRuleSets = () => {
     const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
     return (
-        <Layout onLogout={handleLogout}>
+        <Layout>
             <header className="page-header">
                 <div>
                     <CommunityTabs active="rule-sets" />

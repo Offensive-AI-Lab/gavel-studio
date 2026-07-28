@@ -8,11 +8,8 @@ const api = axios.create({
     headers: { 'Content-Type': 'application/json' },
 });
 
-api.interceptors.request.use((config) => {
-    const token = sessionStorage.getItem('token');
-    if (token) config.headers.Authorization = `Bearer ${token}`;
-    return config;
-});
+// No auth header: there is no login. The backend attributes every request to
+// the single local user (backend/utils/auth.py: LOCAL_USER_ID).
 
 
 // ---------------------------------------------------------------------------
@@ -50,20 +47,18 @@ const withNotify = async (promise) => {
 // even though the backend is just busy loading weights.
 export const getBackendHealth = async () => api.get('/health', { timeout: 30000 });
 
-// --- Auth ---
-export const registerUser = async (data) => api.post('/user/register', data);
-export const loginUser = async (data) => api.post('/user/login', data);
-
-// Flip the per-user `tutorial_seen` flag to TRUE so the first-login
-// onboarding modal doesn't re-fire on the next /workspace mount. The
-// caller is responsible for updating the cached localStorage user
-// object in lockstep — see Tutorial.jsx for that bit.
+// --- Onboarding ---
+// Flip the `tutorial_seen` flag to TRUE so the first-run onboarding modal
+// doesn't re-fire on the next /workspace mount. The caller updates the cached
+// sessionStorage user object in lockstep — see Tutorial.jsx.
 export const markTutorialSeen = async () => api.put('/user/tutorial-seen');
 
-// --- Public profile lookups (Phase 2) ---
-// Anyone can hit /user/profile/* — no auth required. The Profile page
-// uses these to render contributor cards, the "by [username]" link on
-// rule/CE cards uses getUserProfile to verify the link target exists.
+// --- Contributor profiles ---
+// Assembled by the backend from the LOCALLY-SYNCED library: any author stamped
+// on a synced rule/CE has a profile, even though they never logged in here
+// (nobody can — there is no login). The Profile page renders these; the
+// "by [username]" link on rule/CE cards uses getUserProfile to check the
+// target exists.
 export const getUserProfile = async (username) =>
     api.get(`/user/profile/${encodeURIComponent(username)}`);
 
@@ -77,45 +72,13 @@ export const getUserContributions = async (username, type = 'rule', page = 1, pa
 export const updateMyProfile = async ({ display_name, bio }) =>
     withNotify(api.patch('/user/me', { display_name, bio }));
 
-// --- Ratings (Phase 3) ---
-// All three endpoints return the same RatingSummary shape:
-//   { asset_type, asset_public_id, rating_count, rating_avg, your_score }
-// rating_avg is null when count == 0. your_score is null when the user
-// hasn't rated this artifact (or isn't logged in — but the auth
-// dependency makes that path 401 anyway).
-//
-// rateAsset upserts: re-calling with a new score updates the existing
-// rating in place. withdrawRating returns the post-delete summary so
-// the UI can update star + count + avg in one shot.
-
-export const getRatingSummary = async (assetType, assetPublicId) =>
-    api.get(`/ratings/${assetType}/${encodeURIComponent(assetPublicId)}`);
-
-// NOT wrapped in withNotify — rating doesn't change the library
-// (rules/CEs stay the same), so triggering a library refresh would
-// just cause the card to collapse for no reason. The StarRating
-// widget updates its own state from the response directly.
-export const rateAsset = async (assetType, assetPublicId, score) =>
-    api.post('/ratings/', {
-        asset_type: assetType,
-        asset_public_id: assetPublicId,
-        score,
-    });
-
-export const withdrawRating = async (assetType, assetPublicId) =>
-    api.delete(`/ratings/${assetType}/${encodeURIComponent(assetPublicId)}`);
-
-// --- Discovery (Phase 4) ---
-// Both endpoints return the same ArtistListResponse shape:
+// --- Contributor discovery ---
+// Both return the same ArtistListResponse shape:
 //   { page, page_size, total, items: [ArtistSummary, ...] }
-// Search matches username (case-insensitive) + display_name; empty q
-// returns recently-active artists. Leaderboard orders by avg_rating or by
-// raw contribution count. `minRatings` is the caller-controlled "minimum
-// ratings" filter (0 = no extra floor; the rating sort always needs >= 1).
-//
-// Both endpoints only surface contributors whose work is in the LOCAL synced
-// library — a user shows up only after Sync pulls their published items in,
-// never as a pre-sync "0 contributions" ghost.
+// Both list only contributors whose published work is in the LOCAL synced
+// library, so someone appears once Sync pulls their items in. Ratings were
+// removed with accounts, so the leaderboard ranks by contribution volume and
+// `by` / `minRatings` are accepted but no longer change the order.
 
 export const searchArtists = async (q = '', page = 1, pageSize = 20) =>
     api.get('/user/search', { params: { q, page, page_size: pageSize } });
@@ -660,16 +623,15 @@ export const sessionAnalyzeStored = (classifierId, messages) =>
 export const sessionAnalyzeLive = (classifierId, { system_prompt, user_message, history, max_new_tokens }) =>
     api.post(`/realtime/${classifierId}/session/analyze`, { system_prompt, user_message, history, max_new_tokens });
 // Best-effort session teardown on tab close / refresh: a keepalive fetch survives
-// page unload where a normal request may be cancelled, and (unlike sendBeacon) can
-// still carry the auth header. If it doesn't make it, the backend's stale-session
-// sweep + the job's idle timeout reclaim the GPU anyway.
+// page unload where a normal request may be cancelled. If it doesn't make it, the
+// backend's stale-session sweep + the job's idle timeout reclaim the GPU anyway.
 export function endRealtimeSessionUnload(classifierId) {
     try {
-        const token = sessionStorage.getItem('token');
-        const headers = { 'Content-Type': 'application/json' };
-        if (token) headers.Authorization = `Bearer ${token}`;
         fetch(`${API_URL}/realtime/${classifierId}/session/end`, {
-            method: 'POST', headers, body: '{}', keepalive: true,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}',
+            keepalive: true,
         }).catch(() => {});
     } catch { /* unload best-effort */ }
 }

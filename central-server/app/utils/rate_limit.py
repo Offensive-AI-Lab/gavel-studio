@@ -1,9 +1,9 @@
 """Lightweight in-process per-IP rate limiter (no external dependency).
 
 The central server runs as a single process, so an in-memory sliding-window
-counter is enough to blunt floods — a burst of logins that would otherwise pile
-up expensive argon2 hashes, or a storm of HF publishes that would tie up the
-threadpool. Per client IP, per scope. Thread-safe and memory-bounded.
+counter is enough to blunt floods — specifically a storm of HF publishes that
+would tie up the threadpool. Per client IP, per scope. Thread-safe and
+memory-bounded.
 """
 import os
 import threading
@@ -108,23 +108,3 @@ def rate_limit(scope: str, limit: int, window_seconds: float):
             )
     return _dep
 
-
-# --- Per-ACCOUNT login throttle (in addition to per-IP) --------------------
-# Credential-stuffing attacks rotate IPs against one account, so a per-IP limit
-# alone doesn't stop them. Track FAILED logins per email and lock that account
-# out briefly once they pile up — independent of source IP.
-
-def account_login_guard(email: str, max_failures: int = 5, window_seconds: float = 60.0) -> None:
-    """Raise 429 if there have already been too many recent FAILED logins for
-    this account. Call before verifying the password."""
-    if _limiter.count(f"login-fail:{email.strip().lower()}", window_seconds) >= max_failures:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many failed login attempts for this account. Please try again shortly.",
-            headers={"Retry-After": str(int(window_seconds))},
-        )
-
-
-def record_login_failure(email: str) -> None:
-    """Record one failed login attempt for an account."""
-    _limiter.add(f"login-fail:{email.strip().lower()}")

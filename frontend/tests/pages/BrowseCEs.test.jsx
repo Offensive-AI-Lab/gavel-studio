@@ -37,12 +37,6 @@ vi.mock('../../src/api', () => {
         getCEBookmarks: vi.fn(() => empty({ bookmarks: [] })),
         getAllCategories: vi.fn(() => empty([])),
         searchLibrary: vi.fn(() => empty({ results: [], total_results: 0 })),
-        // StarRating (rendered inside an expanded public CE card) fetches this.
-        getRatingSummary: vi.fn(() => empty({
-            asset_type: 'ce', asset_public_id: 'pub', rating_count: 0, rating_avg: null, your_score: null,
-        })),
-        rateAsset: vi.fn(() => empty({})),
-        withdrawRating: vi.fn(() => empty({})),
     };
 });
 
@@ -90,7 +84,6 @@ const renderPage = (initialEntries = ['/browse/ces']) =>
             <MemoryRouter initialEntries={initialEntries}>
                 <Routes>
                     <Route path="/browse/ces" element={<BrowseCEs />} />
-                    <Route path="/login" element={<div data-testid="login-page" />} />
                 </Routes>
             </MemoryRouter>
         </TutorialProvider>,
@@ -137,15 +130,7 @@ afterEach(() => {
     localStorage.clear();
 });
 
-describe('BrowseCEs — mount, auth & header', () => {
-    it('redirects to /login when there is no stored user', async () => {
-        sessionStorage.removeItem('user');
-        renderPage();
-        await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/login'));
-        // Fetches are skipped when unauthenticated.
-        expect(api.getCognitiveElements).not.toHaveBeenCalled();
-    });
-
+describe('BrowseCEs — mount & header', () => {
     it('fetches CEs, categories and bookmarks for the stored user on mount', async () => {
         renderPage();
         await waitFor(() => expect(api.getCognitiveElements).toHaveBeenCalledWith(7));

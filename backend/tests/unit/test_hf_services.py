@@ -818,18 +818,13 @@ class TestRecoverPendingPublishes:
 class TestPublishRuleSetGate:
     """publish_rule_set's pre-flight guards — no network, all seams mocked."""
 
-    def test_no_auth_token_errors(self):
-        r = hf_publish.publish_rule_set(1, publisher_user_id=1, auth_token=None)
-        assert r.status == hf_publish.PublishStatus.ERROR
-        assert "Auth token" in (r.error or "")
-
     def test_empty_set_errors(self, monkeypatch):
         monkeypatch.setattr(hf_publish, "_sync_is_fresh", lambda *a, **k: True)
         monkeypatch.setattr(hf_publish, "_resolve_username", lambda uid: "sht")
         monkeypatch.setattr(hf_publish, "_load_classifier_row",
                             lambda cid: {"classifier_id": cid, "name": "Empty"})
         monkeypatch.setattr(hf_publish, "_rule_set_members", lambda cid: [])
-        r = hf_publish.publish_rule_set(5, publisher_user_id=1, auth_token="tok")
+        r = hf_publish.publish_rule_set(5, publisher_user_id=1)
         assert r.status == hf_publish.PublishStatus.ERROR
         assert "no rules" in (r.error or "").lower()
 
@@ -846,7 +841,7 @@ class TestPublishRuleSetGate:
             {"setup_id": 2, "rule_id": None, "display_name": "manual_rule",
              "public_id": None, "is_local_draft": None, "categories": None},
         ])
-        r = hf_publish.publish_rule_set(1, publisher_user_id=1, auth_token="tok")
+        r = hf_publish.publish_rule_set(1, publisher_user_id=1)
         assert r.status == hf_publish.PublishStatus.ERROR
         assert "published first" in (r.error or "")
         assert "manual_rule" in (r.error or "")

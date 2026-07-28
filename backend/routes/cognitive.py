@@ -1,18 +1,9 @@
 import json
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, field_validator
 from typing import List
 from utils.auth import get_current_user
 from utils.PostgreSQL import execute_query_dict
-
-_bookmark_bearer = HTTPBearer(auto_error=False)
-
-
-def _bookmark_token(creds: HTTPAuthorizationCredentials = Depends(_bookmark_bearer)) -> str:
-    if not creds:
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    return creds.credentials
 from sql_scripts.definition_scripts import (
     get_user_ces,
     create_ce,
@@ -97,20 +88,20 @@ def create_new_ce(req: CreateCERequest, _: int = Depends(get_current_user)):
 
 
 @router.get("/bookmarks/{user_id}")
-def get_ce_bookmarks(user_id: int, token: str = Depends(_bookmark_token)):
-    """List CE bookmarks for the authenticated user (user_id in path is
-    ignored — the token is authoritative)."""
+def get_ce_bookmarks(user_id: int):
+    """List CE bookmarks (user_id in the path is ignored — there is one
+    local user)."""
     try:
-        return {"bookmarks": BookmarkService.list(_BOOKMARK_ASSET, token)}
+        return {"bookmarks": BookmarkService.list(_BOOKMARK_ASSET)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/bookmark")
-def add_ce_bookmark_endpoint(req: CEBookmarkRequest, token: str = Depends(_bookmark_token)):
+def add_ce_bookmark_endpoint(req: CEBookmarkRequest):
     from services.bookmarks import BookmarkLookupError
     try:
-        BookmarkService.add(_BOOKMARK_ASSET, token, req.ce_id)
+        BookmarkService.add(_BOOKMARK_ASSET, req.ce_id)
         return {"status": "bookmarked"}
     except BookmarkLookupError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -119,9 +110,9 @@ def add_ce_bookmark_endpoint(req: CEBookmarkRequest, token: str = Depends(_bookm
 
 
 @router.delete("/bookmark/{user_id}/{ce_id}")
-def remove_ce_bookmark_endpoint(user_id: int, ce_id: int, token: str = Depends(_bookmark_token)):
+def remove_ce_bookmark_endpoint(user_id: int, ce_id: int):
     try:
-        BookmarkService.remove(_BOOKMARK_ASSET, token, ce_id)
+        BookmarkService.remove(_BOOKMARK_ASSET, ce_id)
         return {"status": "removed"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -43,7 +43,7 @@ class TestConstants:
     def test_schema_version_current_value(self):
         # Locks the constant: bumping the schema must update this test too,
         # mirroring the file's own version log.
-        assert db.SCHEMA_VERSION == 19
+        assert db.SCHEMA_VERSION == 20
 
     def test_default_categories_shape(self):
         assert isinstance(db.DEFAULT_CATEGORIES, list)

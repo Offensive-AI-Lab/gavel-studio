@@ -97,43 +97,10 @@ class TestSlidingWindow:
 
 
 # ---------------------------------------------------------------------------
-# Per-account login throttle
-# ---------------------------------------------------------------------------
-
-
-class TestAccountLoginGuard:
-    def test_does_not_raise_below_threshold(self, clock):
-        for _ in range(4):
-            rl.record_login_failure("victim@example.com")
-        # 4 < 5, still allowed.
-        rl.account_login_guard("victim@example.com", max_failures=5, window_seconds=60)
-
-    def test_raises_429_at_threshold(self, clock):
-        for _ in range(5):
-            rl.record_login_failure("victim@example.com")
-        with pytest.raises(HTTPException) as ei:
-            rl.account_login_guard("victim@example.com", max_failures=5, window_seconds=60)
-        assert ei.value.status_code == 429
-        assert "Retry-After" in ei.value.headers
-
-    def test_email_is_normalised(self, clock):
-        # Case and surrounding whitespace must not let an attacker dodge the
-        # per-account counter by varying the email's presentation.
-        for _ in range(5):
-            rl.record_login_failure("Victim@Example.com")
-        with pytest.raises(HTTPException):
-            rl.account_login_guard("  victim@example.com  ", max_failures=5, window_seconds=60)
-
-    def test_failures_age_out_of_the_window(self, clock):
-        for _ in range(5):
-            rl.record_login_failure("victim@example.com")
-        clock.advance(61)
-        # The old failures have expired; the account is no longer locked.
-        rl.account_login_guard("victim@example.com", max_failures=5, window_seconds=60)
-
-
-# ---------------------------------------------------------------------------
 # rate_limit() FastAPI dependency
+#
+# The per-account login throttle that used to be tested here is gone along with
+# login itself. The only rate limit left guards /hf/commit (per IP).
 # ---------------------------------------------------------------------------
 
 

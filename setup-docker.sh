@@ -13,10 +13,11 @@
 #     central server URL), explaining what each unlocks,
 #   * offers to run `docker compose --env-file backend/.env up --build`.
 #
-# Connects to a REMOTE central server (set CENTRAL_SERVER_URL). This stack runs
+# Optionally connects to a central server for PUBLISHING (CENTRAL_SERVER_URL);
+# there is no login. This stack runs
 # only backend + frontend + postgres; the central server is a separate, isolated
-# deployment (central-server/docker-compose.yml). No JWT secret is set here — the
-# backend verifies tokens via the remote server's /auth/verify.
+# deployment (central-server/docker-compose.yml). No auth is configured
+# anywhere — GAVEL Studio is a single-operator, localhost application.
 #
 # Re-runnable: existing values are kept; you can press Enter to skip any prompt.
 ###############################################################################
@@ -33,7 +34,7 @@ warn() { echo "${C_Y}! $*${C_O}"; }
 
 # Single source of truth for app config: backend/.env. Docker reads it via
 # `docker compose --env-file backend/.env`, so compose's ${VAR} interpolation
-# (JWT_SECRET_KEY, HF_TOKEN, SLURM_SSH_KEY_FILE) comes from this SAME file —
+# (HF_TOKEN, SLURM_SSH_KEY_FILE) comes from this SAME file —
 # there is no separate repo-root .env.
 ENV="backend/.env"
 
@@ -58,11 +59,11 @@ else
   ok "$ENV already exists — updating it"
 fi
 
-# No JWT secret step: this stack (backend + frontend + postgres) connects to a
-# REMOTE central server, so no signing key is needed here. The backend holds no
-# JWT secret either — it verifies tokens via the central server's /auth/verify.
-# (Running your OWN central server? It's a separate, isolated deployment:
-#  central-server/docker-compose.yml, configured via central-server/.env.)
+# No auth step: GAVEL Studio has no login. Every request is attributed to one
+# fixed local user, seeded into the database at boot. The only reason a central
+# server still exists is to PUBLISH to the HuggingFace registry (it holds the
+# write token). It is a separate, isolated deployment:
+#  central-server/docker-compose.yml, configured via central-server/.env.
 
 # --- 2. optional parameters (prompt only if interactive + not already set) ---
 prompt_kv() {   # key, human label
@@ -80,13 +81,10 @@ prompt_kv() {   # key, human label
 step "Optional parameters (press Enter to skip)"
 # OpenAI drives AI generation in the backend — always relevant.
 prompt_kv OPENAI_API_KEY     "OpenAI API key      — enables AI rule/CE generation"
-# Central server URL — the remote server this deployment connects to for
-# auth/login/community. The bundled local central is opt-in (compose 'central'
-# profile), so set this to your remote server's URL.
-# A localhost value (the local-mode default or a leftover) must NOT count as
-# "already configured" — clear it so we re-prompt for the real URL.
-case "$(get_kv CENTRAL_SERVER_URL)" in http://localhost*|http://127.0.0.1*) set_kv CENTRAL_SERVER_URL "";; esac
-prompt_kv CENTRAL_SERVER_URL "Central server URL  — REQUIRED, the server everyone connects to, e.g. https://central.example"
+# Central server URL — OPTIONAL. Needed ONLY to publish to the public library;
+# reading it (sync / Browse / Fork) is anonymous and needs nothing. Leave blank
+# to run fully self-contained.
+prompt_kv CENTRAL_SERVER_URL "Central server URL  — optional, only needed to PUBLISH (blank = no publishing)"
 # HF_TOKEN is WRITE-scope and used ONLY by the central service (to publish to
 # HF). The backend never uses it (it read-syncs the public library anonymously).
 # So only ask for it when you're self-hosting central; if you pointed at a
@@ -98,7 +96,7 @@ else
 fi
 
 ok "$ENV is ready"
-echo "    ${C_D}Edit by hand in backend/.env: OPENAI_API_KEY, CENTRAL_SERVER_URL.${C_O}"
+echo "    ${C_D}Edit by hand in backend/.env: OPENAI_API_KEY (AI generation), CENTRAL_SERVER_URL (publishing only).${C_O}"
 
 # --- 3. offer to launch ------------------------------------------------------
 _DC="docker compose --env-file backend/.env up --build"

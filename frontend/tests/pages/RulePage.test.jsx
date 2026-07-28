@@ -4,7 +4,7 @@
 // view (bucket chip statuses + sample dialogue toggle).
 //
 // Follows the smoke-test pattern: mock EVERY '../api' export the page and its
-// children (StarRating) might touch, stub nothing else heavy, set a logged-in
+// children might touch, stub nothing else heavy, set a local
 // user in localStorage, and wrap in MemoryRouter with a matching Route so
 // useParams resolves :ruleId.
 
@@ -20,16 +20,12 @@ vi.mock('react-router-dom', async () => {
     return { ...actual, useNavigate: () => mockNavigate };
 });
 
-// --- API mock. Covers RulePage's own calls AND StarRating's (it imports
-// getRatingSummary / rateAsset / withdrawRating from ../../api). ----------
+// --- API mock. Covers RulePage's own calls. -----------------------------
 const getRuleDetail = vi.fn(() => Promise.resolve({ data: null }));
 const previewRuleTestSets = vi.fn(() => Promise.resolve({ data: { default: { buckets: [] } } }));
 const getRuleBookmarks = vi.fn(() => Promise.resolve({ data: { bookmarks: [] } }));
 const addRuleBookmark = vi.fn(() => Promise.resolve({ data: {} }));
 const removeRuleBookmark = vi.fn(() => Promise.resolve({ data: {} }));
-const getRatingSummary = vi.fn(() => Promise.resolve({ data: { rating_count: 0, rating_avg: null, your_score: null } }));
-const rateAsset = vi.fn(() => Promise.resolve({ data: { rating_count: 1, rating_avg: 5, your_score: 5 } }));
-const withdrawRating = vi.fn(() => Promise.resolve({ data: { rating_count: 0, rating_avg: null, your_score: null } }));
 
 vi.mock('../../src/api', () => ({
     default: { get: vi.fn(() => Promise.resolve({ data: {} })) },
@@ -41,9 +37,6 @@ vi.mock('../../src/api', () => ({
     getRuleBookmarks: (...a) => getRuleBookmarks(...a),
     addRuleBookmark: (...a) => addRuleBookmark(...a),
     removeRuleBookmark: (...a) => removeRuleBookmark(...a),
-    getRatingSummary: (...a) => getRatingSummary(...a),
-    rateAsset: (...a) => rateAsset(...a),
-    withdrawRating: (...a) => withdrawRating(...a),
 }));
 
 import RulePage from '../../src/pages/RulePage';
@@ -73,7 +66,6 @@ beforeEach(() => {
     getRuleBookmarks.mockResolvedValue({ data: { bookmarks: [] } });
     addRuleBookmark.mockResolvedValue({ data: {} });
     removeRuleBookmark.mockResolvedValue({ data: {} });
-    getRatingSummary.mockResolvedValue({ data: { rating_count: 0, rating_avg: null, your_score: null } });
 });
 
 describe('RulePage — loading & basic states', () => {
@@ -278,14 +270,13 @@ describe('RulePage — test set', () => {
 });
 
 describe('RulePage — public header & bookmarks', () => {
-    it('renders StarRating + Save button for a published rule', async () => {
+    it('renders the Save button for a published rule', async () => {
         getRuleDetail.mockResolvedValue({
             data: { name: 'Pub Rule', public_id: 'pub-123', created_by_username: 'bob' },
         });
         renderRule('42');
-        // StarRating fetches its summary; Save button appears for the logged-in user.
+        // The bookmark ("Save") action is the published-rule affordance.
         expect(await screen.findByRole('button', { name: /Save/i })).toBeInTheDocument();
-        await waitFor(() => expect(getRatingSummary).toHaveBeenCalledWith('rule', 'pub-123'));
     });
 
     it('omits the public header entirely for an unpublished rule', async () => {
@@ -293,7 +284,6 @@ describe('RulePage — public header & bookmarks', () => {
         renderRule('42');
         await screen.findByRole('heading', { name: 'Draft Rule' });
         expect(screen.queryByRole('button', { name: /Save/i })).not.toBeInTheDocument();
-        expect(getRatingSummary).not.toHaveBeenCalled();
     });
 
     it('shows "Remove" when the rule is already bookmarked', async () => {

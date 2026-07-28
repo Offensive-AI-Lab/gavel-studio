@@ -71,7 +71,17 @@ from utils.PostgreSQL import get_connection, release_connection
 #      row stays the authoring source / fork target and is NEVER itself published —
 #      publishing mints a separate public record (public_rule_sets/<pid>.json),
 #      leaving the private workspace fully editable/deletable.
-SCHEMA_VERSION = 19
+#   v20: LOGIN REMOVED — single local user. Two changes:
+#      (a) a fixed `users` row (utils.auth.LOCAL_USER_ID) is seeded, because
+#          six tables FK to users(user_id) ON DELETE CASCADE and nothing
+#          creates that row anymore now that register/login are gone;
+#      (b) `rule_bookmarks` / `ce_bookmarks` / `rule_set_bookmarks` come BACK
+#          as local tables. They had been moved to the central server so they
+#          could follow an account between machines; with one local user there
+#          is no account to follow, so they live here again. This also repairs
+#          /library/bookmarks/search, whose category-only browse path still
+#          JOINed these tables after they were dropped (it was dead code).
+SCHEMA_VERSION = 20
 
 # Baseline taxonomy kept general and shared across rules/CEs
 DEFAULT_CATEGORIES = [
@@ -112,8 +122,8 @@ def drop_all_tables():
     it together with the rest."""
     print("--- Dropping All Tables ---")
     tables = [
-        # Bookmarks (FK to users + rules/CEs)
-        "ce_bookmarks", "rule_bookmarks",
+        # Bookmarks (FK to users + rules/CEs/rule_sets)
+        "ce_bookmarks", "rule_bookmarks", "rule_set_bookmarks",
         # Ratings + aggregates (Phase 1 of artist feature)
         "ratings", "asset_ratings_summary", "user_ratings_summary",
         # Wizard state (FK to users, classifiers, scenarios, rules — drop
@@ -188,6 +198,10 @@ _CRITICAL_TABLES = (
     "categories",
     "neutral_corpus",
     "bundle_jobs",
+    # v20: bookmarks are local again (no accounts, nothing to sync to).
+    "rule_bookmarks",
+    "ce_bookmarks",
+    "rule_set_bookmarks",
 )
 
 
@@ -218,6 +232,33 @@ def _critical_tables_present() -> bool:
         return False
 
 
+def ensure_local_user():
+    """Guarantee the single local user row exists.
+
+    There is no register/login flow anymore, so nothing else ever creates a
+    `users` row — yet six tables FK to it with ON DELETE CASCADE
+    (target_models, classifiers, guardrail_folders, bundle_jobs, test_datasets,
+    pipeline_runs). Without this row every "create a model / rule set / folder"
+    insert would fail on the foreign key.
+
+    Called on EVERY boot (not just when the DDL block runs), so a database whose
+    user row was manually deleted self-heals on restart instead of failing every
+    write. Idempotent: ON CONFLICT DO NOTHING leaves an existing row — including
+    any display_name/bio the user edited — untouched.
+    """
+    from utils.auth import (
+        LOCAL_USER_ID, LOCAL_USERNAME, LOCAL_EMAIL, LOCAL_DISPLAY_NAME,
+    )
+    exec_query(
+        """
+        INSERT INTO users (user_id, username, email, password, display_name, is_team)
+        VALUES (%s, %s, %s, '', %s, FALSE)
+        ON CONFLICT (user_id) DO NOTHING
+        """,
+        (LOCAL_USER_ID, LOCAL_USERNAME, LOCAL_EMAIL, LOCAL_DISPLAY_NAME),
+    )
+
+
 def init_database():
     """Idempotent schema bootstrap. Runs the full DDL block only when
     `SCHEMA_VERSION` (the source-of-truth constant in this file) differs
@@ -246,6 +287,9 @@ def init_database():
     if _schema_version_table_exists():
         stored = _stored_schema_version()
         if stored == SCHEMA_VERSION and _critical_tables_present():
+            # Still (cheaply) re-assert the local user on the fast path — it is
+            # the one row the whole schema's ownership FKs depend on.
+            ensure_local_user()
             print(f"[init_database] schema up-to-date (v{SCHEMA_VERSION}), skipping setup.")
             return
         if stored != 0 and stored != SCHEMA_VERSION:
@@ -595,10 +639,33 @@ def init_database():
     # Drop the legacy cache table on existing deployments.
     exec_query("DROP TABLE IF EXISTS realtime_analysis_cache CASCADE;")
 
-    # 9. BOOKMARKS — moved to central server (see central-server/app/routes/bookmarks.py)
-    # Drop legacy local tables on existing deployments.
-    exec_query("DROP TABLE IF EXISTS rule_bookmarks CASCADE;")
-    exec_query("DROP TABLE IF EXISTS ce_bookmarks CASCADE;")
+    # 9. BOOKMARKS (v20 — local again).
+    #
+    # These lived on the central server for a while so a user's bookmarks would
+    # follow their ACCOUNT between machines, keyed by the HF `public_id`. With
+    # login removed there is no account and no second machine, so they are plain
+    # local rows keyed by the local SERIAL id — which also means you can bookmark
+    # a DRAFT (the central version couldn't: an unpublished rule has no
+    # public_id). `rule_set_bookmarks` is created further down, after the
+    # `rule_sets` table it references exists.
+    exec_query("""
+        CREATE TABLE IF NOT EXISTS rule_bookmarks (
+            user_id    INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            rule_id    INTEGER NOT NULL REFERENCES rules(rule_id) ON DELETE CASCADE,
+            created_at TIMESTAMPTZ DEFAULT now(),
+            PRIMARY KEY (user_id, rule_id)
+        );
+    """)
+    exec_query("CREATE INDEX IF NOT EXISTS rule_bookmarks_user_idx ON rule_bookmarks (user_id, created_at DESC);")
+    exec_query("""
+        CREATE TABLE IF NOT EXISTS ce_bookmarks (
+            user_id    INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            ce_id      INTEGER NOT NULL REFERENCES cognitive_elements(ce_id) ON DELETE CASCADE,
+            created_at TIMESTAMPTZ DEFAULT now(),
+            PRIMARY KEY (user_id, ce_id)
+        );
+    """)
+    exec_query("CREATE INDEX IF NOT EXISTS ce_bookmarks_user_idx ON ce_bookmarks (user_id, created_at DESC);")
 
     # Backfill hybrid search columns for existing deployments
     column_alterations = [
@@ -961,6 +1028,18 @@ def init_database():
     """)
     exec_query("CREATE INDEX IF NOT EXISTS idx_rule_set_member_rule ON rule_set_member (rule_id);")
 
+    # Rule-set bookmarks (v20). Created here rather than with the other two
+    # bookmark tables because it FKs `rule_sets`, which is only defined above.
+    exec_query("""
+        CREATE TABLE IF NOT EXISTS rule_set_bookmarks (
+            user_id     INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            rule_set_id INTEGER NOT NULL REFERENCES rule_sets(rule_set_id) ON DELETE CASCADE,
+            created_at  TIMESTAMPTZ DEFAULT now(),
+            PRIMARY KEY (user_id, rule_set_id)
+        );
+    """)
+    exec_query("CREATE INDEX IF NOT EXISTS rule_set_bookmarks_user_idx ON rule_set_bookmarks (user_id, created_at DESC);")
+
     # Ratings: one row per (user, asset). UNIQUE means re-rating becomes
     # an UPDATE. CHECK enforces 1-5 score. Self-rating is blocked in
     # application code (the relevant row's created_by_username must !=
@@ -997,6 +1076,9 @@ def init_database():
         """,
         (str(SCHEMA_VERSION),),
     )
+    # The single local user (v20). Must exist before any model / rule set /
+    # folder can be created, since all of those FK to users(user_id).
+    ensure_local_user()
     print(f"[OK]Database Initialized: Public Library + Private Setup Overrides (schema v{SCHEMA_VERSION}).")
 
 

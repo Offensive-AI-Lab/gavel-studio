@@ -49,13 +49,13 @@ def versions(request: Request, response: Response):
 
 @router.websocket("/ws")
 async def ws(websocket: WebSocket):
-    """PUBLIC notification socket — deliberately UNauthenticated.
+    """PUBLIC notification socket.
 
     The {"event":"version_update"} signal is non-sensitive: the registry and
-    GET /versions are already public, so a client should NOT have to hold a JWT
-    (or have one captured in its backend) just to be told "go re-check /versions".
-    That avoids spreading credentials across every user's backend. The only gate
-    is a connection cap, to bound resource use on an open endpoint."""
+    GET /versions are already public, so being told "go re-check /versions"
+    reveals nothing. (Nothing on this server is authenticated anyway — see the
+    module docstring in app/main.py.) The only gate is a connection cap, to
+    bound resource use on an open endpoint."""
     if not await cp.WS_MANAGER.connect(websocket):   # capacity check inside
         return
     try:

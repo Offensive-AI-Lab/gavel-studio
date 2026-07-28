@@ -32,11 +32,7 @@ const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
     const user = JSON.parse(sessionStorage.getItem('user'));
 
     useEffect(() => {
-        if (!user) {
-            navigate('/login');
-        } else {
-            fetchBookmarks();
-        }
+        fetchBookmarks();
     }, [navigate]);
 
     // Auto-refresh on any library mutation app-wide.
@@ -186,11 +182,10 @@ const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
     };
 
     const mapCeData = (item) => ({
-        // Spread the raw item first so backend fields the rating widget
-        // depends on (public_id, created_by_username) and other future
-        // additions survive into the card. The named keys below override
-        // for normalization. Without the spread, public_id was dropped
-        // and the StarRating widget never rendered.
+        // Spread the raw item first so backend fields the card depends on
+        // (public_id, created_by_username) and future additions survive into
+        // it. The named keys below override for normalization. Without the
+        // spread, public_id was dropped
         ...item,
         ce_id: item.ce_id || item.id,
         name: item.name,
@@ -417,7 +412,7 @@ const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
     if (embedded) return body;
 
     return (
-        <Layout onLogout={() => { sessionStorage.removeItem('token'); sessionStorage.removeItem('user'); sessionStorage.removeItem('models'); navigate('/login'); }}>
+        <Layout>
             <header className="page-header">
                 <div>
                     <div style={{ display: 'flex', gap: '10px', marginBottom: '8px', flexWrap: 'wrap' }}>

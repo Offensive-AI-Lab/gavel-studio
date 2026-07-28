@@ -1,9 +1,22 @@
 """Central server entrypoint.
 
+Scope: this server exists for ONE reason — it is the HuggingFace **write**
+proxy. The HF write token lives only here, so a local backend that wants to
+publish a rule / CE / rule set sends the file operations here and this server
+performs the commit. It also runs the registry control plane (the watcher that
+notices a new registry commit and pushes `version_update` to connected
+backends).
+
+There is no login anywhere in GAVEL Studio, so this server has no users,
+no auth, no ratings and no bookmarks — those were multi-user features. Every
+endpoint is unauthenticated, which is safe because the deployment model is
+"one operator, own machine/network". Do NOT expose this on the open internet
+with a real HF_TOKEN configured.
+
 Run locally:
     cd central-server
     pip install -r requirements.txt
-    cp .env.example .env  # fill in DATABASE_URL, JWT_SECRET_KEY, HF_TOKEN
+    cp .env.example .env  # fill in DATABASE_URL, HF_TOKEN
     uvicorn app.main:app --reload --port 8001
 
 In production (Render):
@@ -17,7 +30,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .routes import auth, bookmarks, hf, ratings, registry_sync, users
+from .routes import hf, registry_sync
 from .services import control_plane
 from .utils.schema import init_schema
 
@@ -94,10 +107,6 @@ else:
     _cors["allow_origin_regex"] = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 app.add_middleware(CORSMiddleware, **_cors)
 
-app.include_router(auth.router)
-app.include_router(users.router)
-app.include_router(ratings.router)
-app.include_router(bookmarks.router)
 app.include_router(hf.router)
 app.include_router(registry_sync.router)
 

@@ -130,8 +130,7 @@ const Guardrails = () => {
 
     useEffect(() => {
         const storedUser = JSON.parse(sessionStorage.getItem('user'));
-        if (!storedUser) navigate('/login');
-        else {
+        {
             setUser(storedUser);
             fetchGuardrails();
             fetchFolders();
@@ -605,7 +604,7 @@ const Guardrails = () => {
     if (!user) return null;
 
     return (
-        <Layout onLogout={() => { sessionStorage.removeItem('token'); sessionStorage.removeItem('user'); sessionStorage.removeItem('models'); navigate('/login'); }}>
+        <Layout>
             <header className="page-header">
                 <div>
                     <Breadcrumb items={[
