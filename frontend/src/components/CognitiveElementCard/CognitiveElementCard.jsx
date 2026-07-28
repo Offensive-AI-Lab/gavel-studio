@@ -103,9 +103,9 @@ const CognitiveElementCard = ({
                     </div>
                 </div>
                 <div className="ce-actions" onClick={(e) => e.stopPropagation()}>
-                    {/* Drafts can't be bookmarked — bookmarks live on the
-                        central server keyed by public_id, which drafts
-                        don't have yet. Drafts live in "My Drafts". */}
+                    {/* Drafts can't be bookmarked here — this bookmark path is
+                        keyed by public_id, which drafts don't have yet.
+                        Drafts live in "My Drafts". */}
                     {onBookmark && !ce.is_local_draft && ce.public_id && (
                         <button
                             className="bookmark-btn"

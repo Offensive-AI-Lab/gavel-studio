@@ -1045,7 +1045,7 @@ def init_database():
     # application code (the relevant row's created_by_username must !=
     # rater's username) rather than via a CHECK constraint that would
     # need to look across tables.
-    # RATINGS + summaries — moved to central server (see central-server/app/utils/schema.py).
+    # RATINGS + summaries — removed with multi-user support.
     # Drop legacy local tables and triggers on existing deployments.
     exec_query("DROP TRIGGER IF EXISTS trg_ratings_summary ON ratings;")
     exec_query("DROP TRIGGER IF EXISTS trg_rules_contribution_count ON rules;")

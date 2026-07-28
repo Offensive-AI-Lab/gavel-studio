@@ -3,10 +3,6 @@ uvicorn==0.27.0
 # Required by FastAPI when any route uses File() / Form() data — the /upload
 # endpoint needs it at import time, not just at request time.
 python-multipart>=0.0.26
-# WebSocket CLIENT for the registry-sync subscriber (services/registry_sync/
-# subscriber.py). uvicorn here is the plain build (NOT [standard]), so the
-# websockets client lib isn't pulled in transitively — pin it explicitly.
-websockets>=12.0
 psycopg2-binary==2.9.11
 passlib==1.7.4
 bcrypt==4.1.2

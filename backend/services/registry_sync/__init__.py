@@ -1,11 +1,12 @@
-"""Registry sync — the client-side observer wired into the local backend.
+"""Registry sync — the backend's link to the public library registry.
 
 The backend ingests the public library into its DB via
-`services.hf_sync.sync_library`. This package adds the real-time trigger: a
-subscriber that listens to the central server's `version_update` notifications
-(with WS reconnect + a safety poll as the backstop) and drives that sync.
+`services.hf_sync.sync_library`. This package adds:
+  * the read-side port (`RegistryReader` + the HuggingFace adapter), and
+  * the freshness trigger: a periodic poller that probes HF for changes and
+    drives the sidebar's "Updates available" badge.
 
-Entry point: `build_subscriber()` (started in the backend's lifespan).
+Entry point: `build_poller()` (started in the backend's lifespan).
 """
 from .reader import (
     HuggingFaceReader,
@@ -14,11 +15,11 @@ from .reader import (
     RegistryReadError,
     build_reader,
 )
-from .subscriber import RegistrySyncSubscriber, derive_ws_url
-from .wiring import build_subscriber
+from .poller import RegistryUpdatePoller
+from .wiring import build_poller
 
 __all__ = [
-    "RegistrySyncSubscriber", "derive_ws_url", "build_subscriber",
+    "RegistryUpdatePoller", "build_poller",
     # read-side port + adapters
     "RegistryReader", "HuggingFaceReader", "build_reader",
     "RegistryReadError", "RegistryNotFound",

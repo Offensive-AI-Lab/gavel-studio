@@ -15,7 +15,7 @@ seam (`hf_hub_download`, `_fetch_head_sha_and_manifest`, `_resolve_token`,
 `_get_api`, etc.) is monkeypatched on the module-under-test namespace.
 
 Pure network I/O with no branching logic (the actual `hf_hub_download`
-round-trips, `_push_atomic`, `central_server.*`) is deliberately NOT tested
+round-trips, `_push_atomic`, `hf_write.*`) is deliberately NOT tested
 here — there is no logic to assert on, only a forwarded call.
 """
 import hashlib

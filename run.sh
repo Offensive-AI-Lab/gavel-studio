@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-# GAVEL Cloud Platform — one-shot bootstrap & launch (Linux / macOS / Windows)
+# GAVEL Studio — one-shot bootstrap & launch (Linux / macOS / Windows)
 #
 #   ./run.sh
 #
@@ -9,19 +9,19 @@
 #   1. Ensures Python 3.12+, Node 20+, and a running PostgreSQL server
 #      (auto-installs the missing ones via apt/dnf/pacman/zypper/brew; on
 #      Windows it prints install links and stops).
-#   2. Asks for your REMOTE central server URL and an optional OpenAI key. No
-#      JWT secret or HuggingFace token is needed on this machine — the backend
-#      verifies logins via the central server's /auth/verify, and publishing
-#      happens on that server, not here.
+#   2. Asks for an optional OpenAI key (AI rule/CE generation). Publishing to
+#      the HF registry is optional too — add a write-scope HF_TOKEN to
+#      backend/.env by hand to enable it; everything else works without one.
 #   3. Installs Python deps for the backend and Node deps for the frontend
-#      ("downloads everything he needs"). No local central-server is set up.
+#      ("downloads everything he needs").
 #   4. Creates the backend database (gavel_db) via psycopg2 — no psql CLI
 #      required — resolving a superuser that works on your machine
 #      (Homebrew uses your account; Linux gets a role bootstrapped for you).
-#   5. Writes backend/.env (pointing at your central server), then launches
-#      the backend + frontend and streams their logs. Ctrl+C stops them.
+#   5. Writes backend/.env, then launches the backend + frontend and streams
+#      their logs. Ctrl+C stops them.
 #
-# Open http://localhost:5173 when it's up, register a user, and log in.
+# Open http://localhost:5173 when it's up. There is no login — the app serves
+# one local operator.
 #
 # Needs: an internet connection. The FIRST run downloads the ML stack
 # (torch, transformers, ...), so it can take several minutes.
@@ -49,9 +49,7 @@ DB_USER="${DB_USER:-postgres}"
 DB_PASSWORD="${DB_PASSWORD:-}"
 DB_MAINT="${DB_MAINT:-postgres}"
 BACKEND_DB="${BACKEND_DB:-gavel_db}"
-CENTRAL_DB="${CENTRAL_DB:-gavel_central}"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
-CENTRAL_PORT="${CENTRAL_PORT:-8001}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 LOG_DIR="$ROOT/logs"; mkdir -p "$LOG_DIR"
 
@@ -207,27 +205,14 @@ fi
 ok "PostgreSQL server is up"
 
 ###############################################################################
-# 2. Server connection + optional credentials (so the rest runs unattended)
+# 2. Optional credentials (so the rest runs unattended)
 ###############################################################################
-# This machine runs the BACKEND + FRONTEND only and connects to your REMOTE
-# central server (auth/login, community, publishing). No local central server
-# is started here, so no HuggingFace token is needed on this machine.
-step "Central server connection"
+step "Optional credentials"
 # Reuse values already saved in .env from a previous run; ignore placeholders.
 OPENAI_VAL="$(get_env backend/.env OPENAI_API_KEY)"
-CENTRAL_VAL="$(get_env backend/.env CENTRAL_SERVER_URL)"
-# A localhost value left over from a local-mode run must NOT pin us to localhost.
-case "$CENTRAL_VAL" in http://localhost*|http://127.0.0.1*) CENTRAL_VAL="";; esac
 if [ -t 0 ]; then
-  # Always OFFER to set/update the server connection; press Enter to keep the
-  # value already saved in backend/.env.
-  if [ -n "$CENTRAL_VAL" ]; then chint="Enter to keep [$CENTRAL_VAL]"; else chint="required, e.g. https://your.server"; fi
-  printf "  %sCentral server URL (%s): %s" "$C_DIM" "$chint" "$C_OFF"
-  read -r ans || ans=""; [ -n "$ans" ] && CENTRAL_VAL="$ans"
-
   [ -z "$OPENAI_VAL" ] && { printf "  %sOpenAI API key — AI rule & CE generation (Enter to skip): %s" "$C_DIM" "$C_OFF"; read -r OPENAI_VAL || OPENAI_VAL=""; }
 fi
-[ -n "$CENTRAL_VAL" ] || die "Central server URL is required. Re-run and enter it, or set CENTRAL_SERVER_URL in backend/.env."
 
 ###############################################################################
 # 3. Dependencies (Python venvs + Node modules)
@@ -253,11 +238,11 @@ ok "frontend deps installed"
 # superuser (no 'postgres' role), so we try that too.
 db_bootstrap() {
   "$BACKEND_PY" - "$DB_HOST" "$DB_PORT" "$DB_USER" "$DB_PASSWORD" "$DB_MAINT" \
-                 "$BACKEND_DB" "$CENTRAL_DB" "$(id -un 2>/dev/null || echo '')" <<'PYEOF'
+                 "$BACKEND_DB" "$(id -un 2>/dev/null || echo '')" <<'PYEOF'
 import sys
 import psycopg2
 from psycopg2 import sql
-host, port, user, pw, maint, bdb, cdb, osuser = sys.argv[1:9]
+host, port, user, pw, maint, bdb, osuser = sys.argv[1:8]
 pw = pw or None
 cand_users  = [u for u in dict.fromkeys([user, osuser, "postgres"]) if u]
 cand_maints = [m for m in dict.fromkeys([maint, "postgres", "template1"]) if m]
@@ -274,8 +259,6 @@ if not conn:
     print("AUTHFAIL"); sys.exit(0)
 conn.autocommit = True
 cur = conn.cursor()
-# Client mode: only the BACKEND database is created here. The central
-# server's database lives on your remote server, not on this machine.
 for db in (bdb,):
     cur.execute("SELECT 1 FROM pg_database WHERE datname=%s", (db,))
     if not cur.fetchone():
@@ -322,29 +305,25 @@ case "$RES" in
 esac
 
 ###############################################################################
-# 5. Environment file (backend points at your REMOTE central server)
+# 5. Environment file
 ###############################################################################
 step "Configuring environment files"
 [ -f backend/.env ]  || { cp backend/.env.example backend/.env; ok "created backend/.env"; }
 [ -f frontend/.env ] || { cp frontend/.env.example frontend/.env 2>/dev/null || :; }
 
-# No JWT secret is written here: the backend holds NO signing key — it verifies
-# the tokens the central server signs by calling that server's /auth/verify. So
-# login works with just CENTRAL_SERVER_URL; nothing JWT-related is needed locally.
 set_env backend/.env DB_HOST "$DB_HOST"
 set_env backend/.env DB_PORT "$DB_PORT"
 set_env backend/.env DB_USER "$DB_USER"
 set_env backend/.env DB_PASSWORD "$DB_PASSWORD"
 set_env backend/.env DB_NAME "$BACKEND_DB"
-set_env backend/.env CENTRAL_SERVER_URL "$CENTRAL_VAL"
 set_env backend/.env ALLOWED_ORIGINS "http://localhost:${FRONTEND_PORT}"
 set_env backend/.env FRONTEND_URL "http://localhost:${FRONTEND_PORT}"
 set_env backend/.env OPENAI_API_KEY "$OPENAI_VAL"
 
 [ -f frontend/.env ] && set_env frontend/.env VITE_API_URL "http://localhost:${BACKEND_PORT}"
 
-ok "backend will connect to central server: $CENTRAL_VAL"
 [ -z "$OPENAI_VAL" ] && warn "OPENAI_API_KEY not set — AI rule/CE generation disabled (everything else works)."
+[ -z "$(get_env backend/.env HF_TOKEN)" ] && warn "HF_TOKEN not set — publishing to the HF registry disabled (everything else works)."
 ok "environment configured"
 
 ###############################################################################
@@ -376,8 +355,8 @@ wait_http "http://127.0.0.1:${FRONTEND_PORT}" "frontend" 60
 
 echo
 ok "GAVEL is up!"
-echo "    ${C_GREEN}Open  http://localhost:${FRONTEND_PORT}${C_OFF}   (register a user, then log in)"
-echo "    ${C_DIM}backend  http://localhost:${BACKEND_PORT}/docs   central (remote)  ${CENTRAL_VAL}${C_OFF}"
+echo "    ${C_GREEN}Open  http://localhost:${FRONTEND_PORT}${C_OFF}"
+echo "    ${C_DIM}backend  http://localhost:${BACKEND_PORT}/docs${C_OFF}"
 echo "    ${C_DIM}logs     $LOG_DIR/{backend,frontend}.log${C_OFF}"
 echo "    ${C_YEL}Press Ctrl+C to stop all services.${C_OFF}"
 echo

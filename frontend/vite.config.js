@@ -38,9 +38,9 @@ function cspPlugin(connectSrc) {
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  // axios (src/api.js) talks ONLY to the local backend (VITE_API_URL); the
-  // backend proxies to the central server, so the SPA never needs the central
-  // origin in connect-src. Allow both loopback spellings when unset.
+  // axios (src/api.js) talks ONLY to the local backend (VITE_API_URL); all
+  // registry traffic happens backend-side, so no other origin is needed in
+  // connect-src. Allow both loopback spellings when unset.
   const sources = new Set(["'self'"])
   if (env.VITE_API_URL) {
     try { sources.add(new URL(env.VITE_API_URL).origin) }

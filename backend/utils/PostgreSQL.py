@@ -50,8 +50,8 @@ def release_connection(conn):
 
 # ---------------------------------------------------------------------------
 # Local-only helpers
-# Auth, ratings, and bookmarks now live on the central server (HTTP API)
-# — see services/central_server.py. Direct PostgreSQL remote-pool access
+# Auth and ratings were removed with multi-user support; bookmarks live in
+# this local database (services/bookmarks.py). Direct PostgreSQL remote-pool access
 # is no longer needed here.
 # ---------------------------------------------------------------------------
 

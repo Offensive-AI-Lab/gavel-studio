@@ -101,8 +101,9 @@ def _boot_step(name: str, fn):
     print(f"[boot] {name} in {elapsed:.2f}s")
 
 
-# Initialize local database. Users, ratings, bookmarks, and the HF token
-# now live on the central server (central-server/) — see services/central_server.py.
+# Initialize local database. Everything lives here — this is a single-machine
+# deployment; publishing to the HF registry is done directly by the backend
+# (services/hf_write.py) when HF_TOKEN is configured.
 # Synchronous: every route assumes the schema exists. Fast-skips when
 # the live schema is already at the expected version (see DButils.SCHEMA_VERSION).
 _boot_step("db init", init_database)
@@ -123,25 +124,25 @@ _boot_step("db init", init_database)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Process-wide startup/shutdown (modern replacement for @app.on_event)."""
-    # --- startup: start the registry-sync subscriber — real-time public-library
-    # sync driven by the central server's version_update notifications, with the
-    # WS reconnect + safety poll as the backstop. Non-fatal if it can't start. ---
-    subscriber = None
+    # --- startup: start the registry update poller — a periodic freshness
+    # probe against HF that drives the sidebar's "Updates available" badge.
+    # Non-fatal if it can't start. ---
+    poller = None
     try:
-        from services.registry_sync.wiring import build_subscriber
-        subscriber = build_subscriber()
-        if subscriber is not None:
-            await subscriber.start()
-            print("[registry] subscriber started")
+        from services.registry_sync.wiring import build_poller
+        poller = build_poller()
+        if poller is not None:
+            await poller.start()
+            print("[registry] update poller started")
     except Exception as e:
-        print(f"[registry] subscriber start failed (non-fatal): {e}")
+        print(f"[registry] poller start failed (non-fatal): {e}")
     try:
         yield
     finally:
-        # --- shutdown: stop the subscriber, then end warm realtime sessions. ---
-        if subscriber is not None:
+        # --- shutdown: stop the poller, then end warm realtime sessions. ---
+        if poller is not None:
             try:
-                await subscriber.stop()
+                await poller.stop()
             except Exception:
                 pass
         _shutdown_end_realtime_sessions()

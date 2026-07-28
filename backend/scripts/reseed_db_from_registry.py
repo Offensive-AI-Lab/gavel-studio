@@ -42,6 +42,8 @@ except ImportError:
 
 
 # --- Configuration ---
+# Resolved in main() AFTER load_dotenv so an HF_REPO_ID/HF_REPO_TYPE override
+# in backend/.env is honored — must match hf_sync.REPO_ID's resolution.
 
 REPO_ID = "GavelPublicData/public-library"
 REPO_TYPE = "dataset"
@@ -218,6 +220,10 @@ def upsert_rule_from_hf(record: dict, ce_public_id_to_local_id: dict) -> int:
 
 def main():
     load_dotenv(dotenv_path=BACKEND_DIR / ".env")
+
+    global REPO_ID, REPO_TYPE
+    REPO_ID = os.getenv("HF_REPO_ID", REPO_ID)
+    REPO_TYPE = os.getenv("HF_REPO_TYPE", REPO_TYPE)
 
     token = os.environ.get("HF_TOKEN")
     if not token:

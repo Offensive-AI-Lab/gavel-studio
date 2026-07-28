@@ -40,7 +40,7 @@ Rather than relying on surface-text moderation, GAVEL Studio works at the activa
 ```bash
 git clone https://github.com/Offensive-AI-Lab/gavel-studio-beta.git
 cd gavel-studio-beta
-./setup-docker.sh        # fills in backend/.env, prompts for your central server URL + keys, then launches
+./setup-docker.sh        # fills in backend/.env, prompts for the optional keys, then launches
 ```
 
 > Got `permission denied`? The checkout didn't preserve the executable bit — just
@@ -49,7 +49,7 @@ cd gavel-studio-beta
 > `run.sh`.
 
 `setup-docker.sh` fills in `backend/.env` — the **single** config file for both
-Docker and native — prompts you for your remote `CENTRAL_SERVER_URL` and the
+Docker and native — prompts you for the
 optional values (`OPENAI_API_KEY`, `HF_TOKEN` — press Enter to skip any), and
 offers to run `docker compose --env-file backend/.env up --build` for you. It's
 safe to re-run; it keeps anything already set. (Prefer to do it by hand?
@@ -114,18 +114,13 @@ Then open `backend/.env`:
 # REQUIRED for AI rule / CE generation; the rest of the app works without it
 OPENAI_API_KEY=sk-...
 
-# OPTIONAL — only the central server uses it, to PUBLISH (write) to HF. The
-# public library READ-sync needs no token, so Browse works either way.
+# OPTIONAL — write-scope HF token; the backend uses it to PUBLISH to the HF
+# registry. The public library READ-sync needs no token, so Browse works
+# either way. Leave blank and everything works except publishing.
+# HF_REPO_ID points publishes (and reads) at your own registry repo instead of
+# the shared public library.
 HF_TOKEN=
-
-# OPTIONAL — the central server. There is NO login; its only job is proxying
-# WRITES to the public HuggingFace registry (it holds the write token). Leave
-# blank and everything works except publishing — library sync, Browse and Fork
-# all read HuggingFace anonymously.
-CENTRAL_SERVER_URL=
-
-# Self-hosting the central server is a separate, isolated deployment:
-# central-server/docker-compose.yml (configured via central-server/.env).
+# HF_REPO_ID=your-user/your-registry
 ```
 
 **You do NOT need to set `DB_HOST`, `DB_USER`, `DB_PASSWORD`, etc.** —

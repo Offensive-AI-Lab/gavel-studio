@@ -226,10 +226,9 @@ const RuleCard = ({
                     </div>
                 </div>
                 <div className="rule-actions">
-                    {/* Drafts can't be bookmarked — bookmarks live on the
-                        central server keyed by public_id (HF identifier),
-                        which drafts don't have yet. Drafts live in
-                        "My Drafts" instead. */}
+                    {/* Drafts can't be bookmarked here — this bookmark path is
+                        keyed by public_id (HF identifier), which drafts don't
+                        have yet. Drafts live in "My Drafts" instead. */}
                     {onBookmark && !rule.is_local_draft && rule.public_id && (
                         <button
                             className="bookmark-btn"

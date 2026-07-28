@@ -816,13 +816,10 @@ def start_training(
     """
     Starts training the RNN guardrail.
 
-    Two modes:
-      * CLUSTER mode (CENTRAL_SERVER_URL is set): prepares the job payload
-        locally (CE datasets, model path, labels, config) and submits it
-        to the central server. The cluster agent picks it up, runs sbatch,
-        and the callback notifies central when done.
-      * LOCAL mode (no central server): runs training on the user's GPU
-        in a background task, same as before.
+    Compute is resolved via services.compute (remote_worker / slurm / local —
+    see the provider registry). Off-box providers get the job payload built
+    locally (CE datasets, model path, labels, config) and submitted; LOCAL
+    mode runs training on this machine's GPU in a background task.
 
     Returns immediately; poll /training-status for progress.
     """

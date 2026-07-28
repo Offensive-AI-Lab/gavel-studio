@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import abc
 import json
+import os
 from typing import Optional
 
 
@@ -90,10 +91,14 @@ def _is_not_found(exc: Exception) -> bool:
 # The active reader. To move to a different storage backend, return a different
 # adapter here — one line, one place.
 # --------------------------------------------------------------------------- #
-REPO_ID = "GavelPublicData/public-library"
-REPO_TYPE = "dataset"
-
-
 def build_reader() -> RegistryReader:
-    """The registry reader the backend uses."""
-    return HuggingFaceReader(REPO_ID, REPO_TYPE)
+    """The registry reader the backend uses.
+
+    The repo ref is resolved at build time (not import time) with the same
+    HF_REPO_ID / HF_REPO_TYPE overrides as hf_sync.REPO_ID — reads and writes
+    must always target the SAME registry. (Not imported from hf_sync because
+    hf_sync imports this module.)"""
+    return HuggingFaceReader(
+        os.getenv("HF_REPO_ID", "GavelPublicData/public-library"),
+        os.getenv("HF_REPO_TYPE", "dataset"),
+    )

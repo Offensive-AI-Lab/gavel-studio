@@ -46,8 +46,11 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 
-REPO_ID = "GavelPublicData/public-library"
-REPO_TYPE = "dataset"
+# The registry repo, for BOTH reads (sync/Browse) and writes (publish via
+# services/hf_write). Overridable so a local-only deployment can point its
+# publishes at its own dataset repo instead of the shared public library.
+REPO_ID = os.getenv("HF_REPO_ID", "GavelPublicData/public-library")
+REPO_TYPE = os.getenv("HF_REPO_TYPE", "dataset")
 
 # sync_state keys
 _LAST_MANIFEST_HASH_KEY = "last_manifest_hash"

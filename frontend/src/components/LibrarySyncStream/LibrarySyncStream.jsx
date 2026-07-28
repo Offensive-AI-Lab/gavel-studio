@@ -1,10 +1,9 @@
 // LibrarySyncStream — opens a Server-Sent-Events stream to the backend and
 // reacts to live freshness push events. No polling.
 //
-// The flow is all push: the central server pushes `version_update` to the
-// backend over a WebSocket; the backend probes whether it's behind (without
+// The backend periodically probes the HF registry for changes (without
 // touching the DB) and pushes `update_available` / `synced` here over SSE. So
-// the sidebar surfaces a "click to sync" badge the instant an update is
+// the sidebar surfaces a "click to sync" badge when an update is
 // published — and the user applies it on their click (handled in the Sidebar),
 // never auto-mutated mid-session. The publisher's own commit doesn't flag them
 // (their backend probe comes back "synced").

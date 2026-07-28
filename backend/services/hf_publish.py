@@ -91,12 +91,11 @@ def _to_bytes(payload: dict) -> bytes:
 
 
 def _resolve_token() -> Optional[str]:
-    """HF READ token (optional). Used only for manifest download and
-    other reads. Writes go through the central server's /hf/commit
-    proxy, which holds the write token. Returns None if HF_TOKEN is
-    unset OR empty — public repos read fine without a token, and a blank
-    token would yield an illegal ``Bearer `` header that breaks even the
-    anonymous reads (see hf_sync._resolve_token for the full rationale)."""
+    """HF token (optional for reads). Public repos read fine without a
+    token. Writes use the same HF_TOKEN via services/hf_write. Returns
+    None if HF_TOKEN is unset OR empty — a blank token would yield an
+    illegal ``Bearer `` header that breaks even the anonymous reads (see
+    hf_sync._resolve_token for the full rationale)."""
     backend_dir = Path(__file__).resolve().parent.parent
     load_dotenv(dotenv_path=backend_dir / ".env")
     return (os.environ.get("HF_TOKEN") or "").strip() or None
@@ -419,17 +418,17 @@ def _build_rule_payload(
 def _fetch_head_sha_and_manifest() -> Tuple[str, dict]:
     """Return (HEAD commit SHA, parsed manifest).
 
-    HEAD SHA is fetched from the central server (which holds the HF
-    token). The manifest is downloaded directly from HF as a public
-    asset — anonymous access works for the public registry, and we use
-    the local HF_TOKEN as a fallback for private repos / rate limiting.
+    HEAD SHA is read straight from HF with the write token (see
+    services/hf_write). The manifest is downloaded directly from HF as a
+    public asset — anonymous access works for the public registry, and we
+    use the local HF_TOKEN as a fallback for private repos / rate limiting.
     """
-    from services import central_server
+    from services import hf_write
     from huggingface_hub import hf_hub_download
 
-    head_sha = central_server.hf_head_sha()
+    head_sha = hf_write.hf_head_sha()
     if not head_sha:
-        raise RuntimeError("Central server returned no HEAD SHA")
+        raise RuntimeError("HF returned no HEAD SHA")
 
     local_read_token = _resolve_token()  # OK if None — public repos don't need it
     path = hf_hub_download(
@@ -441,28 +440,26 @@ def _fetch_head_sha_and_manifest() -> Tuple[str, dict]:
 
 
 def _push_atomic(operations: list, parent_sha: str, message: str):
-    """Forward a batch of file ops to the central server's /hf/commit.
+    """Commit a batch of file ops directly to HF (services/hf_write).
 
     `operations` is a list of plain dicts `{"path": str, "content": bytes}`.
-    The central server base64-encodes them and commits to HF using its
-    write token.
 
     Raises on race or any other HF error so the caller can distinguish
-    via _is_race_error(). On race, the central server returns 200 with
-    status='race' — we translate that to a raised exception so the
-    existing catch logic in publish_ce / publish_rule works unchanged.
+    via _is_race_error(). On race, hf_write returns status='race' — we
+    translate that to a raised exception so the existing catch logic in
+    publish_ce / publish_rule works unchanged.
     """
-    from services import central_server
-    from services.central_server import CentralServerError
+    from services import hf_write
+    from services.hf_write import HFWriteError
 
     try:
-        resp = central_server.hf_commit(
+        resp = hf_write.hf_commit(
             operations=operations,
             commit_message=message,
             parent_commit=parent_sha,
         )
-    except CentralServerError as err:
-        raise RuntimeError(f"Central server HF commit failed: {err}")
+    except HFWriteError as err:
+        raise RuntimeError(f"HF commit failed: {err}")
 
     status = resp.get("status") if isinstance(resp, dict) else None
     if status == "race":
@@ -473,8 +470,8 @@ def _push_atomic(operations: list, parent_sha: str, message: str):
 
 
 def _op(path: str, content: bytes) -> dict:
-    """Build one commit operation in the dict format the central server
-    expects. Replaces direct use of huggingface_hub.CommitOperationAdd."""
+    """Build one commit operation in the dict format hf_write.hf_commit
+    expects."""
     return {"path": path, "content": content}
 
 
@@ -529,18 +526,16 @@ def _set_sync_state(manifest: dict) -> None:
 
 
 def _record_pushed_manifest_hash(commit_resp, local_manifest: dict) -> None:
-    """Cache last_manifest_hash to the sha256 of the manifest the central server
-    ACTUALLY committed (post version-stamp), which it returns as `manifest_sha256`.
+    """Cache last_manifest_hash to the sha256 of the manifest bytes that were
+    ACTUALLY committed, which hf_write.hf_commit returns as `manifest_sha256`.
 
-    The publisher builds a PRE-stamp manifest; the central server rewrites it
-    (manifest_versions.augment_manifest injects global_signature/namespaces)
-    before the commit lands. Hashing our local copy would therefore never match
-    HF, so our own next reconcile would see a "changed" manifest and we'd flash a
-    phantom "update available" for a publish we already hold. Caching the
-    authoritative hash makes that reconcile short-circuit cleanly.
-
-    Falls back to the local manifest hash only if an older central server didn't
-    send one (best-effort — preserves prior behaviour)."""
+    Nothing rewrites the manifest anymore (version stamping went away with the
+    central server), so this hash equals the hash of our local copy — but we
+    still prefer the value from the commit response as the authoritative
+    record of what landed on HF, so our own next freshness probe
+    short-circuits and never flashes a phantom "update available" for a
+    publish we already hold. Falls back to hashing the local manifest if the
+    response carried none."""
     sha = commit_resp.get("manifest_sha256") if isinstance(commit_resp, dict) else None
     if sha:
         execute_query(

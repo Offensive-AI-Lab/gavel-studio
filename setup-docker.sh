@@ -9,15 +9,12 @@
 # container-only values (DB host, the mounted SSH-key path). This script fills
 # in backend/.env so a fresh clone can run the whole stack without hand-editing:
 #   * creates backend/.env (from backend/.env.example, or fresh) if missing,
-#   * prompts for the optional parameters (OpenAI / HuggingFace / remote
-#     central server URL), explaining what each unlocks,
+#   * prompts for the optional parameters (OpenAI / HuggingFace token),
+#     explaining what each unlocks,
 #   * offers to run `docker compose --env-file backend/.env up --build`.
 #
-# Optionally connects to a central server for PUBLISHING (CENTRAL_SERVER_URL);
-# there is no login. This stack runs
-# only backend + frontend + postgres; the central server is a separate, isolated
-# deployment (central-server/docker-compose.yml). No auth is configured
-# anywhere — GAVEL Studio is a single-operator, localhost application.
+# There is no login. This stack runs backend + frontend + postgres. No auth is
+# configured anywhere — GAVEL Studio is a single-operator, localhost application.
 #
 # Re-runnable: existing values are kept; you can press Enter to skip any prompt.
 ###############################################################################
@@ -60,10 +57,7 @@ else
 fi
 
 # No auth step: GAVEL Studio has no login. Every request is attributed to one
-# fixed local user, seeded into the database at boot. The only reason a central
-# server still exists is to PUBLISH to the HuggingFace registry (it holds the
-# write token). It is a separate, isolated deployment:
-#  central-server/docker-compose.yml, configured via central-server/.env.
+# fixed local user, seeded into the database at boot.
 
 # --- 2. optional parameters (prompt only if interactive + not already set) ---
 prompt_kv() {   # key, human label
@@ -81,22 +75,13 @@ prompt_kv() {   # key, human label
 step "Optional parameters (press Enter to skip)"
 # OpenAI drives AI generation in the backend — always relevant.
 prompt_kv OPENAI_API_KEY     "OpenAI API key      — enables AI rule/CE generation"
-# Central server URL — OPTIONAL. Needed ONLY to publish to the public library;
-# reading it (sync / Browse / Fork) is anonymous and needs nothing. Leave blank
-# to run fully self-contained.
-prompt_kv CENTRAL_SERVER_URL "Central server URL  — optional, only needed to PUBLISH (blank = no publishing)"
-# HF_TOKEN is WRITE-scope and used ONLY by the central service (to publish to
-# HF). The backend never uses it (it read-syncs the public library anonymously).
-# So only ask for it when you're self-hosting central; if you pointed at a
-# REMOTE central, that server holds its own token — you don't need one here.
-if [ -n "$(get_kv CENTRAL_SERVER_URL)" ]; then
-  ok "HF_TOKEN not needed — you're connecting to a remote central (it holds its own token)"
-else
-  prompt_kv HF_TOKEN         "HuggingFace token   — only to PUBLISH from your own central (blank = no publishing)"
-fi
+# HF_TOKEN is WRITE-scope and used ONLY to PUBLISH to the HF registry. The
+# backend read-syncs the public library anonymously, so leave blank to run
+# fully self-contained (everything works except publishing).
+prompt_kv HF_TOKEN           "HuggingFace token   — write-scope, only needed to PUBLISH (blank = no publishing)"
 
 ok "$ENV is ready"
-echo "    ${C_D}Edit by hand in backend/.env: OPENAI_API_KEY (AI generation), CENTRAL_SERVER_URL (publishing only).${C_O}"
+echo "    ${C_D}Edit by hand in backend/.env: OPENAI_API_KEY (AI generation), HF_TOKEN + HF_REPO_ID (publishing only).${C_O}"
 
 # --- 3. offer to launch ------------------------------------------------------
 _DC="docker compose --env-file backend/.env up --build"

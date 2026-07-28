@@ -223,7 +223,7 @@ export const getAllCategories = async () => api.get(`/library/categories`);
 // gavel:libraryChanged dispatched on a no-op pull, so we gate the
 // dispatch on actual deltas. Ongoing live updates do NOT come through
 // here — they arrive via the SSE stream (LibrarySyncStream), which the
-// backend pushes the instant a central version_update is applied.
+// backend pushes when its registry update poll spots a change.
 export const syncLibrary = async ({ force = false } = {}) => {
     const res = await api.get(`/library/sync`, { params: force ? { force: true } : {} });
     const data = res?.data || {};
