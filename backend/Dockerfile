@@ -2,9 +2,10 @@
 # hundred MB of build tools we don't need at runtime.
 FROM python:3.12-slim
 
-# psycopg2-binary ships its own libpq, so we don't need libpq-dev. Adding
-# build-essential anyway because some optional deps (sentence-transformers
-# pulls in scientific packages) occasionally fall back to source builds.
+# The database is SQLite via Python's stdlib sqlite3 — no client libraries
+# needed. build-essential is here because some optional deps
+# (sentence-transformers pulls in scientific packages) occasionally fall back
+# to source builds.
 # curl is here so the healthcheck below can hit /health without extra layers.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \

@@ -31,7 +31,7 @@ import time
 
 import pytest
 
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 
 
 pytestmark = pytest.mark.slow
@@ -199,6 +199,16 @@ class TestTrainThenClassify:
         classifier_id, user_id, ce_ids, ce_names = _seed_trainable_classifier(
             client, auth_headers, test_user, test_model
         )
+        # main.py warms torch/transformers on a background thread; importing
+        # transformers HERE while that thread is mid-import can observe a
+        # partially-initialized package ("cannot import name 'AutoTokenizer'").
+        # Gate on the warmup flag /health exposes for exactly this purpose.
+        import time as _time
+        for _ in range(180):
+            health = client.get("/health").json()
+            if health.get("components", {}).get("transformers"):
+                break
+            _time.sleep(1)
         try:
             from classifier_engine.trainer import run_training, classifier_workdir
 
@@ -243,21 +253,31 @@ class TestTrainThenClassify:
             )
             assert res.status_code == 200, res.text
             data = res.json()
-            # Shape contract the frontend renders.
+            # Shape contract the frontend renders. analyze-stored is TURNS-
+            # based: each assistant turn carries its own windows/tokens span;
+            # windows/tokens are not top-level keys.
             assert set(data["labels"].keys()) == set(meta["labels"].keys())
-            assert isinstance(data["windows"], list) and len(data["windows"]) >= 1
-            assert isinstance(data["tokens"], list) and len(data["tokens"]) >= 1
-            assert data["num_windows"] == len(data["windows"])
+            assistant_turns = [
+                t for t in data["turns"]
+                if t.get("role") == "assistant" and "windows" in t
+            ]
+            assert assistant_turns, f"no scored assistant turn in {data['turns']}"
+            turn = assistant_turns[0]
+            assert isinstance(turn["windows"], list) and len(turn["windows"]) >= 1
+            assert isinstance(turn["tokens"], list) and len(turn["tokens"]) >= 1
+            assert turn["num_windows"] == len(turn["windows"])
             # One rule was wired -> exactly one rule verdict, with a boolean fired.
             assert len(data["rule_triggers"]) == 1
             assert isinstance(data["rule_triggers"][0]["fired"], bool)
             # Each window carries real per-CE probabilities in [0,1] for both CEs.
-            probs = data["windows"][0]["probabilities"]
+            probs = turn["windows"][0]["probabilities"]
             assert set(probs.keys()) == set(meta["labels"].keys())
             for v in probs.values():
                 assert 0.0 <= float(v) <= 1.0
-            # Tokens drive the per-token chart -> each has a logits vector of len 2.
-            assert len(data["tokens"][0]["logits"]) == 2
+            # Tokens drive the per-token chart -> raw logits are stripped
+            # (NaN-safe payloads); each token carries per-CE probabilities.
+            tok_probs = turn["tokens"][0]["probabilities"]
+            assert set(tok_probs.keys()) == set(meta["labels"].keys())
             # No calibration row yet -> thresholds default to 0.5 for every CE.
             for spec in data["thresholds_used"].values():
                 assert spec["threshold"] == 0.5

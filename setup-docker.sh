@@ -6,14 +6,16 @@
 #
 # Config lives in ONE place: backend/.env — the SAME file native dev uses. The
 # compose file mounts it into the backend container and overrides only the few
-# container-only values (DB host, the mounted SSH-key path). This script fills
-# in backend/.env so a fresh clone can run the whole stack without hand-editing:
+# container-only values (CORS origins, the mounted SSH-key path). This script
+# fills in backend/.env so a fresh clone can run the whole stack without
+# hand-editing:
 #   * creates backend/.env (from backend/.env.example, or fresh) if missing,
 #   * prompts for the optional parameters (OpenAI / HuggingFace token),
 #     explaining what each unlocks,
 #   * offers to run `docker compose --env-file backend/.env up --build`.
 #
-# There is no login. This stack runs backend + frontend + postgres. No auth is
+# There is no login. This stack runs backend + frontend; the database is a
+# SQLite file (backend/db/gavel.sqlite3) the backend creates itself. No auth is
 # configured anywhere — GAVEL Studio is a single-operator, localhost application.
 #
 # Re-runnable: existing values are kept; you can press Enter to skip any prompt.

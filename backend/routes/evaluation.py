@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from utils.auth import get_current_user
 from utils.ownership import require_classifier_owner
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 from classifier_engine.cancellation import InferenceCancelled  # torch-free
 
 logger = logging.getLogger(__name__)
@@ -52,14 +52,16 @@ def _jsonb(obj) -> str:
 # them — old runs are still available via DB archeology, just not surfaced.
 #
 # COALESCE: a never-trained guardrail has trained_at = NULL, in which case
-# we want the filter to be a no-op (`created_at >= -infinity` is always true).
+# we want the filter to be a no-op (year-1 sentinel: every real timestamp is
+# after it, so `created_at >= '0001-01-01'` is always true — the SQLite
+# stand-in for Postgres' '-infinity').
 # An untrained guardrail shouldn't have any evaluation_results rows anyway,
 # but being defensive here avoids hiding rows that might exist (e.g. left
 # over from a crash mid-train).
 _POST_TRAIN_CLAUSE = (
     "AND created_at >= COALESCE("
     "(SELECT trained_at FROM classifiers WHERE classifier_id = %s),"
-    " '-infinity'::timestamptz)"
+    " '0001-01-01 00:00:00')"
 )
 
 
@@ -321,13 +323,17 @@ def _run_calibration(classifier_id: int, patience_values: list = None):
         rule_scoped_rows = []
         if active_rule_ids:
             rule_scoped_rows = execute_query_dict("""
-                SELECT DISTINCT ON (rule_id) dataset_id, rule_id, conversations
-                FROM test_datasets
-                WHERE rule_id = ANY(%s)
-                  AND dataset_type = 'positive_calibration'
-                  AND is_default = TRUE
-                  AND status = 'ready'
-                ORDER BY rule_id, created_at DESC
+                SELECT dataset_id, rule_id, conversations FROM (
+                    SELECT dataset_id, rule_id, conversations,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY rule_id ORDER BY created_at DESC
+                           ) AS rn
+                    FROM test_datasets
+                    WHERE rule_id = ANY(%s)
+                      AND dataset_type = 'positive_calibration'
+                      AND is_default = TRUE
+                      AND status = 'ready'
+                ) ranked WHERE rn = 1
             """, (active_rule_ids,)) or []
 
         # Each calibration row is tagged with its own rule's name.
@@ -521,7 +527,7 @@ def _run_evaluation(classifier_id: int, dataset_pairs: list, include_neutral: bo
                WHERE classifier_id = %s AND eval_type = 'calibration'
                  AND thresholds IS NOT NULL
                  {_POST_TRAIN_CLAUSE}
-               ORDER BY created_at DESC LIMIT 1""",
+               ORDER BY created_at DESC, eval_id DESC LIMIT 1""",
             (classifier_id, classifier_id),
         )
         thresholds = thresholds_result[0]["thresholds"] if thresholds_result else None
@@ -645,12 +651,17 @@ def _load_default_eval_pairs(classifier_id: int) -> list:
 
     rows = execute_query_dict(
         """
-        SELECT DISTINCT ON (rule_id, dataset_type) rule_id, dataset_type, conversations
-        FROM test_datasets
-        WHERE rule_id = ANY(%s)
-          AND dataset_type IN ('positive', 'negative')
-          AND status = 'ready'
-        ORDER BY rule_id, dataset_type, is_default ASC, created_at DESC
+        SELECT rule_id, dataset_type, conversations FROM (
+            SELECT rule_id, dataset_type, conversations,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY rule_id, dataset_type
+                       ORDER BY is_default ASC, created_at DESC
+                   ) AS rn
+            FROM test_datasets
+            WHERE rule_id = ANY(%s)
+              AND dataset_type IN ('positive', 'negative')
+              AND status = 'ready'
+        ) ranked WHERE rn = 1
         """,
         (active_rule_ids,),
     ) or []
@@ -804,13 +815,17 @@ def get_evaluation_results(classifier_id: int, _: int = Depends(get_current_user
     training so a retrain visibly clears the page until new runs land —
     instead of confusingly displaying stale numbers from the previous model.
     """
+    # eval_id DESC tiebreak: created_at defaults have whole-second precision,
+    # so a '*_error' row written in the same second as its '*_running' marker
+    # would otherwise lose the DESC LIMIT 1 pick — leaving the UI showing a
+    # dead run as "running" until the next restart's crash recovery.
     calibration = execute_query_dict(
         f"""SELECT eval_id, eval_type, thresholds, metrics, plots, created_at
            FROM evaluation_results
            WHERE classifier_id = %s
              AND eval_type IN ('calibration', 'calibration_error', 'calibration_running')
              {_POST_TRAIN_CLAUSE}
-           ORDER BY created_at DESC LIMIT 1""",
+           ORDER BY created_at DESC, eval_id DESC LIMIT 1""",
         (classifier_id, classifier_id),
     )
     evaluation = execute_query_dict(
@@ -819,7 +834,7 @@ def get_evaluation_results(classifier_id: int, _: int = Depends(get_current_user
            WHERE classifier_id = %s
              AND eval_type IN ('evaluation', 'evaluation_error', 'evaluation_running')
              {_POST_TRAIN_CLAUSE}
-           ORDER BY created_at DESC LIMIT 1""",
+           ORDER BY created_at DESC, eval_id DESC LIMIT 1""",
         (classifier_id, classifier_id),
     )
     return {
@@ -841,7 +856,7 @@ def get_calibrated_thresholds(classifier_id: int, _: int = Depends(get_current_u
            WHERE classifier_id = %s AND eval_type = 'calibration'
              AND thresholds IS NOT NULL
              {_POST_TRAIN_CLAUSE}
-           ORDER BY created_at DESC LIMIT 1""",
+           ORDER BY created_at DESC, eval_id DESC LIMIT 1""",
         (classifier_id, classifier_id),
     )
     if not result or not result[0]["thresholds"]:

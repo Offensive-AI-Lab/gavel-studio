@@ -7,7 +7,7 @@ All test data is cleaned up by the session-level snapshot fixture in conftest.py
 """
 import time
 import pytest
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 
 
 # ---------------------------------------------------------------------------
@@ -420,24 +420,24 @@ class TestDefinitionScripts:
 
 
 # ---------------------------------------------------------------------------
-# utils/PostgreSQL — direct DB function tests
+# utils/sqlite_db — direct DB function tests
 # ---------------------------------------------------------------------------
 
-class TestPostgreSQLUtils:
+class TestSqliteDbUtils:
     def test_execute_query_returns_dict_list(self):
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         result = execute_query_dict("SELECT 1 AS v, 'hello' AS s")
         assert len(result) == 1
         assert result[0]["v"] == 1
         assert result[0]["s"] == "hello"
 
     def test_execute_query_with_params(self):
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         result = execute_query_dict("SELECT %s::int AS v", (42,))
         assert result[0]["v"] == 42
 
     def test_execute_query_empty_result(self):
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         result = execute_query_dict("SELECT 1 WHERE FALSE")
         assert result == [] or result is None
 

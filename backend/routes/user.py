@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from utils.auth import LOCAL_USER_ID, LOCAL_USERNAME
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 from utils.text_safety import clean_text
 
 router = APIRouter()
@@ -131,7 +131,7 @@ def _local_published_counts(usernames: List[str]) -> dict:
 def _last_published(username: str) -> Optional[str]:
     rows = execute_query_dict(
         """
-        SELECT MAX(published_at) AS ts FROM (
+        SELECT MAX(published_at) AS "ts [TIMESTAMPTZ]" FROM (
             SELECT published_at FROM rules
             WHERE LOWER(created_by_username) = %s AND is_local_draft = FALSE
             UNION ALL
@@ -142,7 +142,12 @@ def _last_published(username: str) -> Optional[str]:
         (username, username),
     ) or []
     ts = rows[0]["ts"] if rows else None
-    return ts.isoformat() if ts else None
+    if ts is None:
+        return None
+    # The [TIMESTAMPTZ] alias makes the aggregate come back as a datetime;
+    # tolerate raw text anyway (it is already ISO-ish) so a stored odd format
+    # degrades to a string instead of a 500.
+    return ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
 
 
 def _known_contributors() -> List[dict]:

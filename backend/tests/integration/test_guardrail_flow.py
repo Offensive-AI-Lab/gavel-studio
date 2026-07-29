@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 
 
 def _unique(prefix: str) -> str:

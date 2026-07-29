@@ -38,7 +38,7 @@ class TestDbLoader:
             {"category": "conversational", "conversation": [{"role": "user", "content": "hey"}, {"role": "assistant", "content": "b"}]},
             {"category": "weird", "conversation": [{"role": "user", "content": "z"}, {"role": "assistant", "content": "c"}]},
         ]
-        import utils.PostgreSQL as pg
+        import utils.sqlite_db as pg
         monkeypatch.setattr(pg, "execute_query_dict", lambda *a, **k: rows)
         grouped = nc.load_neutral_corpus_by_category()
         assert len(grouped["instructive"]) == 1
@@ -46,14 +46,14 @@ class TestDbLoader:
         assert len(grouped["conversational"]) == 2
 
     def test_empty_db_returns_empty_groups_no_fallback(self, monkeypatch):
-        import utils.PostgreSQL as pg
+        import utils.sqlite_db as pg
         monkeypatch.setattr(pg, "execute_query_dict", lambda *a, **k: [])
         grouped = nc.load_neutral_corpus_by_category()
         assert grouped == {"conversational": [], "instructive": []}
         assert nc.load_neutral_corpus() == []
 
     def test_db_error_returns_empty_groups(self, monkeypatch):
-        import utils.PostgreSQL as pg
+        import utils.sqlite_db as pg
         def boom(*a, **k):
             raise RuntimeError("no db")
         monkeypatch.setattr(pg, "execute_query_dict", boom)

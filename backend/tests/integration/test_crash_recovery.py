@@ -15,7 +15,7 @@ class TestStuckEvaluationRecovery:
     so a crash mid-run never leaves a partial/stale result and is re-runnable."""
 
     def test_running_rows_deleted(self, client, test_classifier, auth_headers):
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
         cid = test_classifier["classifier_id"]
         # Two interrupted runs: a plain one + one that had a cluster job stashed.
         execute_query(
@@ -44,7 +44,7 @@ class TestStuckEvaluationRecovery:
         assert after[0]["n"] == 0
 
     def test_completed_results_untouched(self, client, test_classifier, auth_headers):
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
         cid = test_classifier["classifier_id"]
         execute_query(
             "INSERT INTO evaluation_results (classifier_id, eval_type, thresholds) "
@@ -64,7 +64,7 @@ class TestStuckTrainingRecovery:
 
     def test_stuck_training_reset_to_error(self, client, test_classifier, auth_headers):
         """Simulate a server crash during training — status should be recoverable."""
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
         cid = test_classifier["classifier_id"]
 
         # Simulate stuck training
@@ -88,7 +88,7 @@ class TestStuckTrainingRecovery:
 
     def test_stuck_training_with_existing_model_preserves(self, client, test_classifier, auth_headers):
         """If a previous trained model exists, recovery should set 'needs_retraining' not 'error'."""
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
         cid = test_classifier["classifier_id"]
 
         # Create fake model files to simulate previous training
@@ -126,7 +126,7 @@ class TestStuckTrainingRecovery:
         If the existence check is ever weakened from `and` to `or`, this case
         would be wrongly preserved as 'needs_retraining'.
         """
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
         cid = test_classifier["classifier_id"]
 
         # Use the helper so the test path stays in lockstep with whatever
@@ -162,7 +162,7 @@ class TestStuckTrainingRecovery:
         """Symmetric to the rnn-only case: only `classifier_meta.json` exists,
         no weights. Also incomplete; must not be preserved.
         """
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
         cid = test_classifier["classifier_id"]
 
         # Use the helper so the test path stays in lockstep with whatever
@@ -193,7 +193,7 @@ class TestStuckTrainingRecovery:
 
     def test_stuck_training_no_model_deletes_files(self, client, test_classifier, auth_headers):
         """If no valid model, recovery should delete partial files and set 'error'."""
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
         cid = test_classifier["classifier_id"]
 
         # Create partial training directory (no valid model)
@@ -225,7 +225,7 @@ class TestStuckTestGenerationRecovery:
 
     def test_stuck_generating_marked_error(self, client, test_classifier, auth_headers):
         """Simulate stuck test generation — should be marked as error."""
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
         cid = test_classifier["classifier_id"]
 
         # Insert a stuck generating record (test sets are rule-scoped now;
@@ -254,7 +254,7 @@ class TestStuckTestGenerationRecovery:
 
     def test_ready_datasets_not_affected(self, client, test_classifier, auth_headers):
         """Recovery should NOT touch datasets with status='ready'."""
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
         cid = test_classifier["classifier_id"]
 
         result = execute_query_dict(
@@ -360,7 +360,7 @@ class TestIncompletePipelineRecovery:
 
     @staticmethod
     def _insert_pending_rule(name: str) -> int:
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rows = execute_query_dict(
             """
             INSERT INTO rules (name, predicate, description, categories, is_ready)
@@ -372,7 +372,7 @@ class TestIncompletePipelineRecovery:
 
     @staticmethod
     def _insert_pending_ce(name: str) -> int:
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rows = execute_query_dict(
             """
             INSERT INTO cognitive_elements (name, definition, categories, is_ready)
@@ -384,7 +384,7 @@ class TestIncompletePipelineRecovery:
 
     @staticmethod
     def _link_ce_to_rule(rule_id: int, ce_id: int):
-        from utils.PostgreSQL import execute_query
+        from utils.sqlite_db import execute_query
         execute_query(
             "INSERT INTO rule_ce_link (rule_id, ce_id, role, fallback_group) VALUES (%s, %s, 'necessary', 0)",
             (rule_id, ce_id),
@@ -394,7 +394,7 @@ class TestIncompletePipelineRecovery:
     def _start_active_run(rule_id: int, user_id: int, classifier_id: int):
         # Pin the rule to an active wizard run. The recovery query uses
         # `completed = FALSE` as its "user will be back" signal.
-        from utils.PostgreSQL import execute_query
+        from utils.sqlite_db import execute_query
         execute_query(
             """
             INSERT INTO pipeline_runs (user_id, classifier_id, rule_id, current_step, steps, completed)
@@ -404,7 +404,7 @@ class TestIncompletePipelineRecovery:
         )
 
     def test_inactive_pending_rule_wiped(self, client):
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rule_id = self._insert_pending_rule("ipr_inactive_rule")
 
         from utils.crash_recovery import IncompletePipelineRecovery
@@ -414,7 +414,7 @@ class TestIncompletePipelineRecovery:
         assert not rows, "is_ready=FALSE rule with no active wizard run should be wiped"
 
     def test_unattached_pending_ce_wiped(self, client):
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         ce_id = self._insert_pending_ce("ipr_unattached_ce")
 
         from utils.crash_recovery import IncompletePipelineRecovery
@@ -427,7 +427,7 @@ class TestIncompletePipelineRecovery:
         # New contract: a crash wipes the draft even if a wizard run pointed
         # at it — "like we didn't generate it". The unfinished run is dropped
         # too so nothing tries to resume into the deleted rule.
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rule_id = self._insert_pending_rule("ipr_active_rule")
         self._start_active_run(rule_id, test_user["user_id"], test_classifier["classifier_id"])
 
@@ -443,7 +443,7 @@ class TestIncompletePipelineRecovery:
 
     def test_ces_linked_to_active_rule_are_wiped(self, client, test_classifier, test_user):
         # The dependent CE is wiped along with its incomplete rule.
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rule_id = self._insert_pending_rule("ipr_active_rule_w_ce")
         ce_id = self._insert_pending_ce("ipr_dep_ce")
         self._link_ce_to_rule(rule_id, ce_id)
@@ -460,7 +460,7 @@ class TestIncompletePipelineRecovery:
     def test_test_eval_run_not_deleted(self, client, test_classifier, test_user):
         # Only rule/CE generation runs are cleared. A test_eval wizard run is
         # a different flow and must survive recovery.
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
         rows = execute_query_dict(
             """
             INSERT INTO pipeline_runs (user_id, classifier_id, rule_id, current_step, steps, completed, pipeline_type)
@@ -481,7 +481,7 @@ class TestIncompletePipelineRecovery:
     def test_mixed_run_wipes_both_active_and_inactive(self, client, test_classifier, test_user):
         # Hybrid: one rule with an active run and one with none — both are
         # wiped now, since neither finished generating.
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         active_id = self._insert_pending_rule("ipr_mixed_active")
         inactive_id = self._insert_pending_rule("ipr_mixed_inactive")
         self._start_active_run(active_id, test_user["user_id"], test_classifier["classifier_id"])
@@ -495,7 +495,7 @@ class TestIncompletePipelineRecovery:
     def test_finalized_rule_untouched(self, client):
         # Sanity: the recovery query is gated on is_ready=FALSE. A live,
         # finalized rule (is_ready=TRUE) must never be touched, parked or not.
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rows = execute_query_dict(
             """
             INSERT INTO rules (name, predicate, description, categories, is_ready)
@@ -526,7 +526,7 @@ class TestTrainingTaskErrorHandling:
 
     def test_training_task_sets_error_on_exception(self, client, test_classifier, auth_headers):
         """If training fails, status should be 'error', not stuck in 'training'."""
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
         cid = test_classifier["classifier_id"]
 
         # Set to training

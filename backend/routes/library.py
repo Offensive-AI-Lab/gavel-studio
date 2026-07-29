@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 from utils.auth import get_current_user
 from utils.embedding_utils import embed_query
 from services.library_search import HybridSearchService
@@ -178,7 +178,7 @@ def _run_hybrid_search(
     limit: int,
     bookmark_user_id: Optional[int] = None,
 ) -> List[dict]:
-    """Thin route-level wrapper around HybridSearchService that maps Postgres
+    """Thin route-level wrapper around HybridSearchService that maps database
     schema errors back into helpful HTTP responses. The service itself stays
     HTTP-agnostic so it can be reused (and unit-tested) outside FastAPI."""
     try:
@@ -192,10 +192,8 @@ def _run_hybrid_search(
     except Exception as e:
         msg = str(e)
         print(f"Hybrid Search Error: {msg}")
-        if "relation" in msg and "does not exist" in msg:
-            raise HTTPException(status_code=500, detail="Database schema outdated. Please run 'reseed_db_from_registry.py' to update tables.")
-        if "vector" in msg:
-            raise HTTPException(status_code=500, detail="PostgreSQL extension 'pgvector' is missing. Please install it.")
+        if "no such table" in msg:
+            raise HTTPException(status_code=500, detail="Database schema outdated. Restart the backend (init_database rebuilds the schema) or run 'reseed_db_from_registry.py'.")
         raise HTTPException(status_code=500, detail=msg)
 
 
@@ -262,7 +260,10 @@ async def search_library(
             cat_filter = ""
             if category_ids:
                 cat_ids_str = ",".join(map(str, category_ids))
-                cat_filter = f"AND categories && ARRAY[{cat_ids_str}]"
+                cat_filter = (
+                    "AND EXISTS (SELECT 1 FROM json_each(categories) "
+                    f"WHERE json_each.value IN ({cat_ids_str}))"
+                )
             # Author filter (browse path). CITEXT column makes the
             # equality case-insensitive automatically, but we use a
             # parameterized placeholder rather than inlining to keep the
@@ -395,7 +396,10 @@ async def search_bookmarks(
             cat_filter = ""
             if category_ids:
                 cat_ids_str = ",".join(map(str, category_ids))
-                cat_filter = f"AND r.categories && ARRAY[{cat_ids_str}]"
+                cat_filter = (
+                    "AND EXISTS (SELECT 1 FROM json_each(r.categories) "
+                    f"WHERE json_each.value IN ({cat_ids_str}))"
+                )
 
             browse_sqls: List[str] = []
             if "rule" in requested_assets:
@@ -856,10 +860,12 @@ async def list_local_drafts(_: int = Depends(get_current_user)):
             SELECT
                 r.rule_id, r.name, r.predicate, r.description,
                 r.created_at,
-                (SELECT array_agg(c.name) FROM categories c WHERE c.category_id = ANY(r.categories)) AS categories,
+                (SELECT json_group_array(c.name) FROM categories c
+                 WHERE c.category_id IN (SELECT value FROM json_each(r.categories))
+                ) AS "categories [JSONB]",
                 COALESCE(
-                    json_agg(
-                        json_build_object(
+                    json_group_array(
+                        json_object(
                             'ce_id', ce.ce_id,
                             'name', ce.name,
                             'role', COALESCE(rl.role, 'necessary'),
@@ -867,7 +873,7 @@ async def list_local_drafts(_: int = Depends(get_current_user)):
                         )
                     ) FILTER (WHERE ce.ce_id IS NOT NULL),
                     '[]'
-                ) AS active_ces
+                ) AS "active_ces [JSONB]"
             FROM rules r
             LEFT JOIN rule_ce_link rl ON r.rule_id = rl.rule_id
             LEFT JOIN cognitive_elements ce ON rl.ce_id = ce.ce_id
@@ -891,10 +897,12 @@ async def list_local_drafts(_: int = Depends(get_current_user)):
             """
             SELECT
                 ce.ce_id, ce.name, ce.definition, ce.category, ce.created_at,
-                (SELECT array_agg(c.name) FROM categories c WHERE c.category_id = ANY(ce.categories)) AS categories,
+                (SELECT json_group_array(c.name) FROM categories c
+                 WHERE c.category_id IN (SELECT value FROM json_each(ce.categories))
+                ) AS "categories [JSONB]",
                 ce.is_local_draft,
                 ce.examples,
-                CASE WHEN ed.dataset_id IS NOT NULL THEN TRUE ELSE FALSE END AS has_training_data
+                CASE WHEN ed.dataset_id IS NOT NULL THEN TRUE ELSE FALSE END AS "has_training_data [BOOLEAN]"
             FROM cognitive_elements ce
             LEFT JOIN excitation_datasets ed ON ce.ce_id = ed.ce_id
             WHERE ce.is_local_draft = TRUE AND ce.is_ready = TRUE

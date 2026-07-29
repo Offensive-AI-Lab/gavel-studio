@@ -77,7 +77,7 @@ class TestUploadCleanupOnSuccess:
 
     def test_successful_upload_creates_file_and_cleanup_works(self, client, auth_headers, test_user):
         import shutil
-        from utils.PostgreSQL import execute_query
+        from utils.sqlite_db import execute_query
 
         model_name = f"ResourceTestModel_{int.from_bytes(os.urandom(2), 'big')}"
         res = client.post(
@@ -109,7 +109,7 @@ class TestDatabaseConnectionPool:
 
     def test_many_queries_dont_exhaust_pool(self):
         """Run 100 queries — pool should release connections back."""
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         for _ in range(100):
             res = execute_query_dict("SELECT 1 AS v")
             assert res[0]["v"] == 1
@@ -169,7 +169,7 @@ class TestLargePayloadHandling:
         if res.status_code == 200:
             ce_id = res.json().get("ce_id")
             if ce_id:
-                from utils.PostgreSQL import execute_query
+                from utils.sqlite_db import execute_query
                 execute_query("DELETE FROM cognitive_elements WHERE ce_id = %s", (ce_id,))
 
     def test_empty_payload_to_post_endpoint(self, client, auth_headers):

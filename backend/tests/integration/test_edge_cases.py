@@ -6,7 +6,7 @@ import io
 import struct
 import time
 import pytest
-from utils.PostgreSQL import execute_query
+from utils.sqlite_db import execute_query
 
 
 class TestPaginationEdgeCases:
@@ -44,7 +44,7 @@ class TestCascadeDeletes:
 
     def test_delete_ce_cascades_to_excitation_dataset(self, client, auth_headers, test_user):
         """Deleting a CE should cascade to its excitation dataset."""
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         from sql_scripts.definition_scripts import save_excitation_dataset
         import json
 
@@ -76,7 +76,7 @@ class TestStringEncoding:
 
     def test_emoji_in_ce_definition(self, client, auth_headers, test_user):
         """Emojis in CE definition should round-trip correctly."""
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         ce_res = client.post("/cognitive/create", json={
             "user_id": test_user["user_id"],
             "name": f"emoji_ce_{int(time.time())}",
@@ -109,7 +109,7 @@ class TestStateConsistency:
 
     def test_classifier_create_with_fk_violation_cleans_up(self, client, auth_headers):
         """Bad model_id in classifier creation should not leave half-state in DB."""
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         before = execute_query_dict("SELECT COUNT(*) AS c FROM classifiers WHERE name = 'rollback_test'")
 
         res = client.post("/classifiers/create", json={
@@ -158,7 +158,7 @@ class TestDuplicatePrevention:
 
     def test_duplicate_classifier_name_for_same_model(self, client, test_model, auth_headers):
         """Same classifier name for same model should be prevented or generate unique IDs."""
-        from utils.PostgreSQL import execute_query
+        from utils.sqlite_db import execute_query
         model_id = test_model["model_id"]
         name = f"dup_cls_{int(time.time())}"
 

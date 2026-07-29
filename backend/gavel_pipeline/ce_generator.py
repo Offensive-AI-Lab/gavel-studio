@@ -20,7 +20,7 @@ from typing import Dict, Optional, Tuple
 import litellm
 
 from gavel_pipeline.db_access import fetch_categories_dict
-from utils.PostgreSQL import execute_query_dict
+from utils.sqlite_db import execute_query_dict
 
 
 PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "ce_generator_prompt.md")

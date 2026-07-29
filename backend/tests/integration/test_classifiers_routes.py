@@ -20,7 +20,7 @@ import time
 
 import pytest
 
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 from sql_scripts.model_scripts import compute_classifier_policy_fingerprint
 
 
@@ -29,8 +29,16 @@ from sql_scripts.model_scripts import compute_classifier_policy_fingerprint
 # ---------------------------------------------------------------------------
 
 
+import itertools
+
+_uniq_seq = itertools.count()
+
+
 def _unique(prefix: str) -> str:
-    return f"{prefix}_{int(time.time() * 1000) % 10_000_000}"
+    # Millisecond time alone is NOT unique — two back-to-back inserts can land
+    # in the same millisecond (SQLite is fast enough to make that routine), so
+    # a process-wide counter guarantees distinctness.
+    return f"{prefix}_{int(time.time() * 1000) % 10_000_000}_{next(_uniq_seq)}"
 
 
 def _create_classifier(client, model_id, auth_headers, name=None) -> int:
@@ -231,7 +239,7 @@ class TestTrainedPolicySnapshot:
         """A (re)train wipes the previous model's calibration + evaluation
         results, but leaves any '*_running' marker (it may own a cluster job)."""
         from sql_scripts.model_scripts import commit_trained_policy_snapshot
-        from utils.PostgreSQL import execute_query
+        from utils.sqlite_db import execute_query
         cid = _create_classifier(client, test_model["model_id"], auth_headers)
         _seed_rule_with_ce(cid, test_user["user_id"])
         for et in ("calibration", "evaluation", "calibration_error", "evaluation_error"):
@@ -418,8 +426,13 @@ class TestDetailsAndDelete:
         res = client.delete("/classifiers/99999999", headers=auth_headers)
         assert res.status_code == 404
 
-    def test_delete_without_auth_is_allowed(self, client, test_classifier):
-        res = client.delete(f"/classifiers/{test_classifier['classifier_id']}")
+    def test_delete_without_auth_is_allowed(self, client, test_model, auth_headers):
+        # Use a DEDICATED classifier, not the session-scoped test_classifier:
+        # with no auth the delete actually SUCCEEDS, and destroying the shared
+        # fixture broke every later test that depends on it (per-test cleanup
+        # can delete stray rows but cannot resurrect deleted ones).
+        cid = _create_classifier(client, test_model["model_id"], auth_headers)
+        res = client.delete(f"/classifiers/{cid}")
         assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
     def test_delete_then_details_gone(self, client, test_model, auth_headers):
@@ -449,11 +462,11 @@ class TestRulesListing:
         assert isinstance(data["rules"], list)
         assert data["rules"] == []
 
-    def test_rules_unknown_classifier_returns_empty_list(self, client, auth_headers):
-        # No row -> the query simply returns no rules (not a 404).
+    def test_rules_unknown_classifier_returns_404(self, client, auth_headers):
+        # The route carries require_classifier_owner, which 404s an unknown id
+        # (404 rather than 403 so ids can't be probed for existence).
         res = client.get("/classifiers/99999999/rules", headers=auth_headers)
-        assert res.status_code == 200
-        assert res.json()["rules"] == []
+        assert res.status_code == 404
 
     def test_rules_reflect_seeded_link(
         self, client, test_model, test_user, auth_headers

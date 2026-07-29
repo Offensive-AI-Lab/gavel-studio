@@ -23,7 +23,7 @@ import time
 
 import pytest
 
-from utils.PostgreSQL import execute_query_dict
+from utils.sqlite_db import execute_query_dict
 
 
 def _uniq(prefix: str) -> str:
@@ -212,7 +212,7 @@ class TestDraftRuleGating:
         hidden = client.get("/library/drafts", headers=auth_headers).json()["rules"]
         assert name not in {r["name"] for r in hidden}
 
-        from utils.PostgreSQL import execute_query
+        from utils.sqlite_db import execute_query
         execute_query(
             "UPDATE test_datasets SET status = 'ready' WHERE dataset_id = %s", (ds_id,)
         )
@@ -298,7 +298,7 @@ class TestDeleteDraftRule:
         assert res.status_code == 404
 
     def test_delete_published_rule_refused(self, client, auth_headers):
-        from utils.PostgreSQL import execute_query_dict as eqd
+        from utils.sqlite_db import execute_query_dict as eqd
         rows = eqd(
             """
             INSERT INTO rules (name, predicate, description, categories, is_local_draft, public_id)
@@ -328,7 +328,7 @@ class TestDeleteDraftCE:
         assert res.status_code == 404
 
     def test_delete_published_ce_refused(self, client, auth_headers):
-        from utils.PostgreSQL import execute_query_dict as eqd
+        from utils.sqlite_db import execute_query_dict as eqd
         rows = eqd(
             """
             INSERT INTO cognitive_elements (name, definition, is_local_draft, public_id)

@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 from utils.DButils import normalize_and_upsert_categories
 from utils.embedding_utils import trigger_embedding
 from services.library_schemas import (
@@ -267,18 +267,26 @@ def _hf_pubat_is_newer(manifest_pubat: str, local_pubat) -> bool:
     if local_pubat is None:
         return True
 
-    from datetime import datetime
+    from datetime import datetime, timezone
+
+    def _naive_utc(dt: datetime) -> datetime:
+        # The DB hands back naive-UTC datetimes; manifest strings usually
+        # carry a Z/offset. Normalize both sides to naive UTC so the
+        # comparison never mixes aware and naive (that raises TypeError).
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
 
     try:
-        manifest_dt = datetime.fromisoformat(str(manifest_pubat).replace('Z', '+00:00'))
+        manifest_dt = _naive_utc(datetime.fromisoformat(str(manifest_pubat).replace('Z', '+00:00')))
     except Exception:
         return False
 
     if isinstance(local_pubat, datetime):
-        local_dt = local_pubat
+        local_dt = _naive_utc(local_pubat)
     else:
         try:
-            local_dt = datetime.fromisoformat(str(local_pubat).replace('Z', '+00:00'))
+            local_dt = _naive_utc(datetime.fromisoformat(str(local_pubat).replace('Z', '+00:00')))
         except Exception:
             return False
 
@@ -1490,9 +1498,10 @@ def _sync_library_locked(force: bool) -> SyncResult:
     # round-trips bottlenecked on latency, not CPU, so a ThreadPoolExecutor
     # gives a 4–8× wall-clock speedup on a cold sync. CEs go first so rules
     # can resolve their CE dependencies; the two phases stay sequential.
-    # Worker count is conservative — psycopg2 pool is 20 wide, embedding
-    # model load is shared (PyTorch forward passes are thread-safe for
-    # inference), and 8 saturates HF's HTTPS keep-alive comfortably.
+    # Worker count is conservative — SQLite serializes writers (WAL +
+    # busy_timeout make queued writes cheap), embedding model load is shared
+    # (PyTorch forward passes are thread-safe for inference), and 8 saturates
+    # HF's HTTPS keep-alive comfortably.
     from concurrent.futures import ThreadPoolExecutor
     _SYNC_WORKERS = 8
 

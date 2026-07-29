@@ -201,18 +201,28 @@ class TestHybridSearchHappyPath:
     """End-to-end-on-the-service-level: real embedder call, mocked SQL."""
 
     def test_search_calls_embedder_and_returns_db_rows(self, monkeypatch):
-        # Mock execute_query_dict to return a known non-empty result set, so
-        # we can verify the service actually surfaces what the DB hands back.
-        # If the `or []` short-circuit ever flips to `and []` (mutation #64),
-        # this test fails because the result becomes [] regardless of input.
-        fake_rows = [
-            {"id": 1, "asset_type": "rule", "name": "fake_rule",
-             "content": "predicate", "type": None, "categories": [],
-             "final_score": 0.9},
-        ]
+        # Mock the two DB touchpoints of the SQLite implementation: the
+        # candidate fetch (per-asset table scan) and the FTS5 keyword query.
+        # The candidate carries a real float32-blob embedding so the semantic
+        # signal ranks it; its name contains the query so the trigram bonus
+        # fires too.
+        import numpy as np
         from services import library_search as ls
 
-        monkeypatch.setattr(ls, "execute_query_dict", lambda sql, params: fake_rows)
+        embedding_blob = np.asarray([0.1] * 384, dtype=np.float32).tobytes()
+        candidate = {
+            "id": 1, "name": "hello_rule", "content": "predicate",
+            "type": None, "categories": [], "is_local_draft": False,
+            "created_by_username": "someone", "public_id": None,
+            "embedding": embedding_blob,
+        }
+
+        def fake_query(sql, params=None):
+            if "MATCH" in sql:
+                return [{"id": 1, "score": -1.5}]
+            return [dict(candidate)]
+
+        monkeypatch.setattr(ls, "execute_query_dict", fake_query)
 
         embedder = _RecordingEmbedder()
         service = ls.HybridSearchService(embedder=embedder)
@@ -226,10 +236,16 @@ class TestHybridSearchHappyPath:
             f"embedder was not called as expected: {embedder.calls}"
         )
 
-        # 2) The DB rows flow through to the caller untouched. If `or []` is
-        # mutated to `and []` (mutation #64), this assertion fails because
-        # the function would always return [].
-        assert result == fake_rows
+        # 2) The candidate flows through to the caller, tagged and scored;
+        # the raw embedding blob must NOT leak into the result row.
+        assert len(result) == 1
+        row = result[0]
+        assert row["id"] == 1
+        assert row["asset_type"] == "rule"
+        assert row["name"] == "hello_rule"
+        assert row["content"] == "predicate"
+        assert row["final_score"] > 0
+        assert "embedding" not in row
 
     def test_search_returns_empty_list_when_db_returns_none(self, monkeypatch):
         # The `or []` defends against the DB layer returning None on a no-

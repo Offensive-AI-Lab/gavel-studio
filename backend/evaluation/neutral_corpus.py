@@ -61,7 +61,7 @@ def load_neutral_corpus_by_category() -> Dict[str, List[List[Dict[str, str]]]]:
     """
     grouped: Dict[str, List[List[Dict[str, str]]]] = {c: [] for c in CATEGORIES}
     try:
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rows = execute_query_dict("SELECT category, conversation FROM neutral_corpus") or []
     except Exception as e:
         logger.warning("neutral_corpus DB read failed: %s", e)

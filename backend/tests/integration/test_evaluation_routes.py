@@ -53,15 +53,11 @@ class TestEvalCalibrationStatusRoute:
         assert res.status_code == 200
         assert "ces" in res.json()
 
-    def test_status_unknown_classifier_returns_empty(self, client, auth_headers):
-        # No meta.json and no rule_setup rows -> empty CE list, all_ready True
-        # (vacuous all() over empty), total 0. Still a clean 200.
+    def test_status_unknown_classifier_returns_404(self, client, auth_headers):
+        # The evaluation router carries require_classifier_owner router-wide;
+        # an unknown id is a 404 (404 rather than 403 so ids can't be probed).
         res = client.get("/evaluation/999999999/calibration-status", headers=auth_headers)
-        assert res.status_code == 200
-        data = res.json()
-        assert data["total"] == 0
-        assert data["ces"] == []
-        assert data["all_ready"] is True
+        assert res.status_code == 404
 
 
 class TestEvalResultsRoute:
@@ -88,10 +84,10 @@ class TestEvalResultsRoute:
         assert isinstance(data["results"], list)
         assert len(data["results"]) <= 3
 
-    def test_history_unknown_classifier_empty_list(self, client, auth_headers):
+    def test_history_unknown_classifier_404(self, client, auth_headers):
+        # Router-wide ownership guard: unknown classifier id -> 404.
         res = client.get("/evaluation/999999999/results/history", headers=auth_headers)
-        assert res.status_code == 200
-        assert res.json()["results"] == []
+        assert res.status_code == 404
 
     def test_thresholds_unknown_classifier_404(self, client, auth_headers):
         # No calibration rows at all -> 404 from the thresholds endpoint.
@@ -114,7 +110,7 @@ class TestEvalCalibrationDefaultOnlySelection:
         """Insert a minimal real rule and return its id. test_datasets.rule_id
         is a FK to rules(rule_id), so the dataset rows need a real parent. Both
         tables are tracked, so the conftest cleans this up automatically."""
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rows = execute_query_dict(
             "INSERT INTO rules (name, predicate) VALUES (%s, %s) RETURNING rule_id",
             (f"caltest_rule_{_uniq()}", "CE"),
@@ -124,7 +120,7 @@ class TestEvalCalibrationDefaultOnlySelection:
     @staticmethod
     def _insert_test_dataset(rule_id, *, is_default, status="ready",
                              dataset_type="positive_calibration"):
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rows = execute_query_dict(
             """
             INSERT INTO test_datasets (
@@ -141,20 +137,24 @@ class TestEvalCalibrationDefaultOnlySelection:
         # Sanity: insert a default and a non-default positive_calibration row
         # under a real throwaway rule, and confirm the runner's exact selection
         # predicate (is_default=TRUE AND status='ready') picks ONLY the default.
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rule_id = self._make_rule()
         default_id = self._insert_test_dataset(rule_id, is_default=True)
         custom_id = self._insert_test_dataset(rule_id, is_default=False)
 
         selected = execute_query_dict(
             """
-            SELECT DISTINCT ON (rule_id) dataset_id
-            FROM test_datasets
-            WHERE rule_id = ANY(%s)
-              AND dataset_type = 'positive_calibration'
-              AND is_default = TRUE
-              AND status = 'ready'
-            ORDER BY rule_id, created_at DESC
+            SELECT dataset_id FROM (
+                SELECT dataset_id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY rule_id ORDER BY created_at DESC
+                       ) AS rn
+                FROM test_datasets
+                WHERE rule_id = ANY(%s)
+                  AND dataset_type = 'positive_calibration'
+                  AND is_default = TRUE
+                  AND status = 'ready'
+            ) ranked WHERE rn = 1
             """,
             ([rule_id],),
         )
@@ -163,7 +163,7 @@ class TestEvalCalibrationDefaultOnlySelection:
         assert custom_id not in picked
 
     def test_non_ready_default_excluded(self, client, auth_headers):
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rule_id = self._make_rule()
         # A default but still-generating row must NOT be selected.
         self._insert_test_dataset(rule_id, is_default=True, status="generating")
@@ -186,10 +186,15 @@ class TestRunInferenceDispatch:
     local GPU/CPU inference when the cluster is off OR errors — never failing the
     run just because the cluster is unavailable."""
 
-    def test_uses_local_when_cluster_disabled(self):
+    def test_uses_local_when_cluster_disabled(self, tmp_path):
+        import json as _json
+        import evaluation.inference  # ensure submodule exists for patching
         from unittest.mock import patch
         from routes import evaluation as ev
+        (tmp_path / "classifier_meta.json").write_text(_json.dumps({"model_path": "m"}))
+        (tmp_path / "trained_rnn.pth").write_text("x")
         with patch("services.compute.providers.slurm.cluster_direct.is_enabled", return_value=False), \
+             patch("classifier_engine.trainer.classifier_workdir", return_value=str(tmp_path)), \
              patch("evaluation.inference.run_inference_on_dialogues",
                    return_value=[{"logits": "L"}]) as local:
             out = ev._run_inference(1, [{"conversation": [], "metadata": {}}])
@@ -213,34 +218,60 @@ class TestRunInferenceDispatch:
         assert out == [{"ok": True}]
         local.assert_called_once()
 
-    def test_falls_back_to_local_when_cluster_unreachable(self):
-        # The reachability probe fails fast (no banner-exchange hang), so we go
-        # straight to local without ever attempting the heavy cluster upload.
+    def test_falls_back_to_local_when_cluster_unreachable(self, tmp_path, monkeypatch):
+        # With no SLURM configured (or the probe failing), the failover chain
+        # contains only the local tiers — the cluster transport is never touched.
+        import json as _json
+        import evaluation.inference  # ensure submodule exists for patching
         from unittest.mock import patch
         from routes import evaluation as ev
-        with patch("services.compute.providers.slurm.cluster_direct.is_enabled", return_value=True), \
-             patch("services.compute.providers.slurm.cluster_direct.ping", return_value=False), \
-             patch("services.compute.providers.slurm.cluster_direct.run_inference_blocking") as cluster, \
-             patch("evaluation.inference.run_inference_on_dialogues",
-                   return_value=[{"ok": True}]) as local:
-            out = ev._run_inference(3, [{"conversation": [], "metadata": {}}])
+        from services.compute import registry as compute_registry
+        monkeypatch.delenv("SLURM_HOST", raising=False)
+        # GPU_PROVIDER is read at import time into a module constant, so a
+        # developer's backend/.env (e.g. GPU_PROVIDER=local) would otherwise
+        # decide this test's outcome. Pin auto-mode explicitly.
+        monkeypatch.setattr(compute_registry, "_PROVIDER", "auto")
+        compute_registry.invalidate_cache()
+        (tmp_path / "classifier_meta.json").write_text(_json.dumps({"model_path": "m"}))
+        (tmp_path / "trained_rnn.pth").write_text("x")
+        try:
+            with patch("classifier_engine.trainer.classifier_workdir", return_value=str(tmp_path)), \
+                 patch("services.compute.providers.slurm.cluster_direct.run_inference_blocking") as cluster, \
+                 patch("evaluation.inference.run_inference_on_dialogues",
+                       return_value=[{"ok": True}]) as local:
+                out = ev._run_inference(3, [{"conversation": [], "metadata": {}}])
+        finally:
+            compute_registry.invalidate_cache()
         assert out == [{"ok": True}]
         cluster.assert_not_called()
         local.assert_called_once()
 
-    def test_uses_cluster_when_enabled(self, tmp_path):
+    def test_uses_cluster_when_enabled(self, tmp_path, monkeypatch):
         import json as _json
+        import evaluation.inference  # ensure submodule exists for patching
         from unittest.mock import patch
         from routes import evaluation as ev
+        from services.compute import registry as compute_registry
+        # SLURM is enabled by env presence (checked at call time) + auto mode
+        # (import-time constant, see note in the fallback test). The transport
+        # itself is mocked below.
+        monkeypatch.setenv("SLURM_HOST", "cluster.example")
+        monkeypatch.setenv("SLURM_USER", "tester")
+        monkeypatch.setattr(compute_registry, "_PROVIDER", "auto")
+        compute_registry.invalidate_cache()
         (tmp_path / "classifier_meta.json").write_text(_json.dumps({"model_path": "hf/model"}))
         (tmp_path / "trained_rnn.pth").write_text("x")
-        with patch("services.compute.providers.slurm.cluster_direct.is_enabled", return_value=True), \
-             patch("services.compute.providers.slurm.cluster_direct.ping", return_value=True), \
-             patch("classifier_engine.trainer.classifier_workdir", return_value=str(tmp_path)), \
-             patch("services.compute.providers.slurm.cluster_direct.run_inference_blocking",
-                   return_value=[{"logits": "from_cluster"}]) as cluster, \
-             patch("evaluation.inference.run_inference_on_dialogues") as local:
-            out = ev._run_inference(9, [{"conversation": [], "metadata": {}}])
+        try:
+            with patch("services.compute.providers.slurm.cluster_direct.is_enabled", return_value=True), \
+                 patch("services.compute.providers.slurm.cluster_direct.ping", return_value=True), \
+                 patch("classifier_engine.trainer.classifier_workdir", return_value=str(tmp_path)), \
+                 patch("services.compute.providers.slurm.cluster_direct.run_inference_blocking",
+                       return_value=[{"logits": "from_cluster"}]) as cluster, \
+                 patch("evaluation.inference.run_inference_on_dialogues") as local:
+                out = ev._run_inference(9, [{"conversation": [], "metadata": {}}])
+        finally:
+            # Don't leak the fake cluster availability into later tests.
+            compute_registry.invalidate_cache()
         assert out == [{"logits": "from_cluster"}]
         cluster.assert_called_once()
         local.assert_not_called()
@@ -253,7 +284,7 @@ class TestDefaultEvalPairsPerRule:
     rules onto one use-case row."""
 
     def test_pairs_carry_each_rules_own_name(self, client, test_model, test_user, auth_headers):
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
         from routes.evaluation import _load_default_eval_pairs
 
         # user_id is NOT NULL on classifiers (schema v15). This raw INSERT used
@@ -338,14 +369,14 @@ class TestEvalPostRetrainResultsRoute:
     @staticmethod
     def _insert_eval_row(classifier_id, eval_type, *, age_seconds, thresholds=None):
         import json
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rows = execute_query_dict(
             """
             INSERT INTO evaluation_results (
                 classifier_id, eval_type, thresholds, metrics, plots, created_at
             )
             VALUES (%s, %s, %s::jsonb, NULL, NULL,
-                    now() - (%s || ' seconds')::interval)
+                    datetime('now', '-' || %s || ' seconds'))
             RETURNING eval_id
             """,
             (
@@ -359,9 +390,9 @@ class TestEvalPostRetrainResultsRoute:
 
     @staticmethod
     def _set_trained_at(classifier_id, age_seconds):
-        from utils.PostgreSQL import execute_query
+        from utils.sqlite_db import execute_query
         execute_query(
-            "UPDATE classifiers SET trained_at = now() - (%s || ' seconds')::interval "
+            "UPDATE classifiers SET trained_at = datetime('now', '-' || %s || ' seconds') "
             "WHERE classifier_id = %s",
             (str(age_seconds), classifier_id),
         )
@@ -424,7 +455,7 @@ class TestRunOnceLock:
         # The per-test cleanup only deletes NEW rows; it doesn't revert UPDATEs.
         # We flip the shared classifier's status/trained_at, so snapshot and
         # restore them here or the change leaks into later untrained-state tests.
-        from utils.PostgreSQL import execute_query_dict, execute_query
+        from utils.sqlite_db import execute_query_dict, execute_query
         cid = test_classifier["classifier_id"]
         orig = execute_query_dict(
             "SELECT status, trained_at FROM classifiers WHERE classifier_id = %s", (cid,)
@@ -437,20 +468,20 @@ class TestRunOnceLock:
 
     @staticmethod
     def _mark_trained(cid, age_seconds=30):
-        from utils.PostgreSQL import execute_query
+        from utils.sqlite_db import execute_query
         execute_query(
             "UPDATE classifiers SET status = 'active', "
-            "trained_at = now() - (%s || ' seconds')::interval WHERE classifier_id = %s",
+            "trained_at = datetime('now', '-' || %s || ' seconds') WHERE classifier_id = %s",
             (str(age_seconds), cid),
         )
 
     @staticmethod
     def _insert_row(cid, eval_type, age_seconds=5, thresholds=None):
         import json
-        from utils.PostgreSQL import execute_query
+        from utils.sqlite_db import execute_query
         execute_query(
             "INSERT INTO evaluation_results (classifier_id, eval_type, thresholds, metrics, plots, created_at) "
-            "VALUES (%s, %s, %s::jsonb, NULL, NULL, now() - (%s || ' seconds')::interval)",
+            "VALUES (%s, %s, %s::jsonb, NULL, NULL, datetime('now', '-' || %s || ' seconds'))",
             (cid, eval_type, json.dumps(thresholds) if thresholds is not None else None, str(age_seconds)),
         )
 

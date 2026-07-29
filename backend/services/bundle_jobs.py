@@ -20,7 +20,7 @@ import os
 import shutil
 import uuid
 
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 
 logger = logging.getLogger(__name__)
 

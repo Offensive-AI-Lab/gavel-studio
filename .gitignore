@@ -33,6 +33,9 @@ attention_based_classification-temp-detached-fix/
 # Classifier training artifacts (large model files - not tracked in git)
 backend/trained_classifiers/
 backend/LLMs/
+
+# SQLite database (all app data lives here; delete for a clean slate)
+backend/db/
 .claude/
 
 # Test reports & artifacts (generated, not tracked)

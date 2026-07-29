@@ -6,7 +6,7 @@ guards the operation rather than corrupting state or silently duplicating.
 """
 import time
 
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 
 
 def _uniq(p: str) -> str:

@@ -29,7 +29,7 @@ from sql_scripts.model_scripts import (
     reconcile_classifier_status,
 )
 from sql_scripts.definition_scripts import create_ce
-from utils.PostgreSQL import execute_query_dict
+from utils.sqlite_db import execute_query_dict
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -68,7 +68,7 @@ def _update_training_log(classifier_id: int, mutate) -> None:
     """Read-modify-write the guardrail's training_log JSON under the download lock
     (serialized vs the status poller). `mutate(dict)` edits the parsed log in
     place; a no-op if the guardrail is no longer training."""
-    from utils.PostgreSQL import execute_query, execute_query_dict
+    from utils.sqlite_db import execute_query, execute_query_dict
     lock = _get_download_lock(classifier_id)
     with lock:
         row = execute_query_dict(
@@ -487,7 +487,7 @@ def get_policy_comparison(classifier_id: int, mode: str = "same_policy",
             WHERE classifier_id = %s AND eval_type = 'evaluation' AND metrics IS NOT NULL
               AND created_at >= COALESCE(
                   (SELECT trained_at FROM classifiers WHERE classifier_id = %s),
-                  '-infinity'::timestamptz)
+                  '0001-01-01 00:00:00')
             ORDER BY created_at DESC LIMIT 1
             """,
             (cid, cid),
@@ -533,7 +533,7 @@ def get_policy_comparison(classifier_id: int, mode: str = "same_policy",
 
 def _mark_needs_retraining(classifier_id: int):
     """If the guardrail is 'active', mark it as needing retraining due to rule changes."""
-    from utils.PostgreSQL import execute_query as _eq
+    from utils.sqlite_db import execute_query as _eq
     _eq(
         "UPDATE classifiers SET status = 'needs_retraining' WHERE classifier_id = %s AND status = 'active'",
         (classifier_id,),
@@ -692,7 +692,7 @@ def update_training_config(
     # Build config dict from non-None fields only
     config = {k: v for k, v in req.model_dump().items() if v is not None}
 
-    from utils.PostgreSQL import execute_query
+    from utils.sqlite_db import execute_query
     execute_query(
         "UPDATE classifiers SET training_config = %s::jsonb WHERE classifier_id = %s",
         (json.dumps(config), classifier_id),
@@ -730,7 +730,7 @@ def _run_training_task(classifier_id: int):
     stale text doesn't linger past the run.
     """
     import traceback
-    from utils.PostgreSQL import execute_query as _eq
+    from utils.sqlite_db import execute_query as _eq
 
     def _on_progress(stage: str, detail: str = ""):
         label = _TRAINING_PHASE_LABELS.get(stage, stage.replace("_", " ").title())
@@ -871,7 +871,7 @@ def start_training(
         )
 
     # Set status to training immediately so UI can reflect it.
-    from utils.PostgreSQL import execute_query
+    from utils.sqlite_db import execute_query
     execute_query(
         "UPDATE classifiers SET status = 'training', training_log = NULL, "
         "training_phase = NULL, training_phase_detail = NULL "
@@ -901,7 +901,7 @@ def start_training(
             )
             job = provider.submit_training(spec)
             mode = "remote_worker" if provider.name == "remote_worker" else "cluster"
-            from utils.PostgreSQL import execute_update
+            from utils.sqlite_db import execute_update
             # Failover ladder for this run (remote_worker -> slurm -> local GPU; no
             # CPU tier for training). chain_pos marks the tier we're on; if it dies
             # mid-run the status poller advances to the next tier (see _failover).
@@ -1184,7 +1184,7 @@ def get_training_status(classifier_id: int, auth_uid: int = Depends(get_current_
     if _job_info:
         from services import compute
         from services.compute.base import JobState
-        from utils.PostgreSQL import execute_query
+        from utils.sqlite_db import execute_query
         expected_provider, job = _job_info
         provider = compute.get_provider(compute.Workload.TRAINING)
         where = "the GPU worker" if expected_provider == "remote_worker" else "the cluster"

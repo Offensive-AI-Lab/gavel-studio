@@ -20,7 +20,7 @@ import pytest
 
 
 def _insert_pending_ce(name: str, public_id: str | None = None) -> int:
-    from utils.PostgreSQL import execute_query_dict
+    from utils.sqlite_db import execute_query_dict
     rows = execute_query_dict(
         """
         INSERT INTO cognitive_elements (name, definition, public_id, is_local_draft)
@@ -32,7 +32,7 @@ def _insert_pending_ce(name: str, public_id: str | None = None) -> int:
 
 
 def _insert_pending_rule(name: str, public_id: str | None = None) -> int:
-    from utils.PostgreSQL import execute_query_dict
+    from utils.sqlite_db import execute_query_dict
     rows = execute_query_dict(
         """
         INSERT INTO rules (name, predicate, description, categories, is_ready, public_id, is_local_draft)
@@ -52,22 +52,19 @@ class TestAuxTablesExist:
     def test_rule_calibration_table_was_merged_away(self, client):
         # The old `rule_calibration_datasets` table is gone after the
         # merge — its content lives in `test_datasets` instead.
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rows = execute_query_dict(
             """
-            SELECT 1 FROM information_schema.tables
-            WHERE table_name = 'rule_calibration_datasets'
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'rule_calibration_datasets'
             """
         ) or []
         assert not rows, "rule_calibration_datasets should be dropped post-merge"
 
     def test_test_datasets_table_present(self, client):
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rows = execute_query_dict(
-            """
-            SELECT column_name FROM information_schema.columns
-            WHERE table_name = 'test_datasets'
-            """
+            "SELECT name AS column_name FROM pragma_table_info('test_datasets')"
         ) or []
         cols = {r["column_name"] for r in rows}
         # Must at least have the columns the calibration runner reads from.
@@ -79,11 +76,11 @@ class TestAuxTablesExist:
         # Earlier iteration created `rule_evaluation_datasets`; the
         # decision was walked back. The migration explicitly drops the
         # table, and there should be no trace of it after init_database.
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rows = execute_query_dict(
             """
-            SELECT 1 FROM information_schema.tables
-            WHERE table_name = 'rule_evaluation_datasets'
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'rule_evaluation_datasets'
             """
         ) or []
         assert not rows, "rule_evaluation_datasets should have been dropped"
@@ -97,7 +94,7 @@ class TestAuxTablesExist:
 class TestEnsureRuleCalibrationPresence:
     def test_returns_false_when_classifier_has_no_calibration_row(self, client, test_classifier):
         from services.hf_sync import ensure_rule_calibration
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         cid = test_classifier["classifier_id"]
         rule_id = _insert_pending_rule("aux_presence_no_row_rule")
         rows = execute_query_dict(
@@ -111,12 +108,12 @@ class TestEnsureRuleCalibrationPresence:
         try:
             assert ensure_rule_calibration(rule_id) is False
         finally:
-            from utils.PostgreSQL import execute_query
+            from utils.sqlite_db import execute_query
             execute_query("DELETE FROM rule_setup WHERE setup_id = %s", (setup_id,))
 
     def test_returns_true_when_calibration_row_exists_for_classifier(self, client, test_classifier):
         from services.hf_sync import ensure_rule_calibration
-        from utils.PostgreSQL import execute_query_dict, execute_query
+        from utils.sqlite_db import execute_query_dict, execute_query
         cid = test_classifier["classifier_id"]
         rule_id = _insert_pending_rule("aux_presence_with_row_rule")
         rs_rows = execute_query_dict(
@@ -152,7 +149,7 @@ class TestEnsureRuleCalibrationPresence:
 class TestEnsureRuleAuxForClassifier:
     def test_classifier_with_no_rules_returns_zero_summary(self, client, test_classifier):
         from services.hf_sync import ensure_rule_aux_for_classifier
-        from utils.PostgreSQL import execute_query
+        from utils.sqlite_db import execute_query
         cid = test_classifier["classifier_id"]
         # Make absolutely sure no rules are linked.
         execute_query("DELETE FROM rule_setup WHERE classifier_id = %s", (cid,))

@@ -34,7 +34,7 @@ import shutil
 import zipfile
 from datetime import datetime, timezone
 
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 
 FORMAT = "gavel.classifier.bundle"
 FORMAT_VERSION = 1
@@ -120,7 +120,7 @@ def _latest_eval(classifier_id: int, eval_type: str, trained_at):
             SELECT thresholds, metrics, plots, created_at
             FROM evaluation_results
             WHERE classifier_id = %s AND eval_type = %s AND created_at >= %s
-            ORDER BY created_at DESC LIMIT 1
+            ORDER BY created_at DESC, eval_id DESC LIMIT 1
             """,
             (classifier_id, eval_type, trained_at),
         )
@@ -130,7 +130,7 @@ def _latest_eval(classifier_id: int, eval_type: str, trained_at):
             SELECT thresholds, metrics, plots, created_at
             FROM evaluation_results
             WHERE classifier_id = %s AND eval_type = %s
-            ORDER BY created_at DESC LIMIT 1
+            ORDER BY created_at DESC, eval_id DESC LIMIT 1
             """,
             (classifier_id, eval_type),
         )
@@ -750,7 +750,7 @@ def import_bundle(zip_bytes: bytes, user_id: int, *, sync: bool = True,
         # Back trained_at off slightly so the calibration/eval inserts below are
         # unambiguously newer and survive the post-train visibility filter.
         execute_query(
-            "UPDATE classifiers SET trained_at = trained_at - INTERVAL '5 seconds' WHERE classifier_id = %s",
+            "UPDATE classifiers SET trained_at = datetime(trained_at, '-5 seconds') WHERE classifier_id = %s",
             (classifier_id,),
         )
 

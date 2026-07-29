@@ -198,7 +198,7 @@ def run_evaluation(
 
 def _serialise_eval_result(result: dict) -> dict:
     """Convert pandas DataFrames inside the reference eval result to plain
-    lists of dicts so the whole thing fits into PostgreSQL JSONB."""
+    lists of dicts so the whole thing fits into the JSONB result columns."""
     import pandas as pd
 
     out = {}

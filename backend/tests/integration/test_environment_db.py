@@ -10,7 +10,7 @@ class TestDatabaseConnectivity:
     """Verify env vars resolve to a working DB connection."""
 
     def test_can_get_connection(self):
-        from utils.PostgreSQL import get_connection, release_connection
+        from utils.sqlite_db import get_connection, release_connection
         conn = get_connection()
         try:
             assert conn is not None
@@ -24,7 +24,7 @@ class TestDatabaseInitialization:
     def test_init_database_idempotent(self):
         """Running init_database twice should not error or duplicate data."""
         from utils.DButils import init_database
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
 
         before = execute_query_dict("SELECT COUNT(*) AS c FROM categories")
         count_before = before[0]["c"]
@@ -37,7 +37,7 @@ class TestDatabaseInitialization:
 
     def test_required_tables_exist(self):
         """Critical tables must exist after init."""
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         # Bookmarks + ratings tables moved to the central server when we
         # migrated users to a shared identity service; only model/training
         # data lives locally now.
@@ -49,18 +49,23 @@ class TestDatabaseInitialization:
             "evaluation_results", "test_datasets",
         ]
         result = execute_query_dict(
-            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
         )
-        existing = {r["tablename"] for r in result or []}
+        existing = {r["name"] for r in result or []}
         missing = [t for t in required if t not in existing]
         assert not missing, f"Missing tables: {missing}"
 
-    def test_required_extensions_loaded(self):
-        """pg_trgm and vector extensions must be present for search/embeddings."""
-        from utils.PostgreSQL import execute_query_dict
+    def test_search_infrastructure_present(self):
+        """The SQLite replacements for the old Postgres extensions must exist:
+        FTS5 side-tables (replaced tsvector/pg_trgm search) and enforced
+        foreign keys (replaced Postgres' always-on FK enforcement)."""
+        from utils.sqlite_db import execute_query_dict, get_connection
         result = execute_query_dict(
-            "SELECT extname FROM pg_extension WHERE extname IN ('pg_trgm', 'vector')"
+            "SELECT name FROM sqlite_master WHERE name IN ('rules_fts', 'ces_fts')"
         )
-        extensions = {r["extname"] for r in result or []}
-        assert "pg_trgm" in extensions, "pg_trgm extension required for fuzzy search"
-        assert "vector" in extensions, "pgvector extension required for semantic search"
+        fts = {r["name"] for r in result or []}
+        assert "rules_fts" in fts, "rules_fts FTS5 table required for keyword search"
+        assert "ces_fts" in fts, "ces_fts FTS5 table required for keyword search"
+        # Cascades depend on this pragma being ON for every connection.
+        fk = get_connection().execute("PRAGMA foreign_keys").fetchone()[0]
+        assert fk == 1, "foreign_keys pragma must be ON (cascade chains depend on it)"

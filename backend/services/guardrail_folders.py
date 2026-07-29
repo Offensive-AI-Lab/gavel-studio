@@ -5,7 +5,7 @@ decides what goes in each folder — there is no automatic arrangement. Deleting
 folder CASCADE-deletes the guardrails inside it (enforced by the FK in DButils),
 so removing a folder removes its guardrails.
 """
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 
 
 # --- folder CRUD -----------------------------------------------------------

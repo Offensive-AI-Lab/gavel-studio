@@ -54,7 +54,7 @@ def build_unified_ruleset(classifier_id: int) -> Dict[str, dict]:
       * Otherwise (never trained, or snapshot was cleared), fall back to
         every rule_setup row currently attached to the guardrail.
     """
-    from utils.PostgreSQL import execute_query_dict
+    from utils.sqlite_db import execute_query_dict
 
     snapshot = execute_query_dict(
         "SELECT trained_rule_setup_ids FROM classifiers WHERE classifier_id = %s",

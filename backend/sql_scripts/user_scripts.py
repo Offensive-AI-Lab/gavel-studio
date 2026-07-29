@@ -12,7 +12,7 @@ Those placeholder rows carry a username and nothing else — display name, bio
 and email used to come from the central server, which no longer exists. They
 are purely a local index of "who authored the content I've synced".
 """
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 
 
 def get_user_by_id(user_id: int):
@@ -60,11 +60,16 @@ def ensure_creators_in_local(usernames: list):
             # placeholders never collide with LOCAL_USER_ID (1) or look like a
             # "real" account. email is synthesized because the column is UNIQUE
             # NOT NULL and we have no real address for a remote author.
+            # MAX(a, b) is SQLite's scalar GREATEST; the inner MAX(user_id) is
+            # the aggregate. `WHERE TRUE` is required: SQLite refuses an upsert
+            # clause after a SELECT source unless the SELECT has a WHERE
+            # (parser-ambiguity rule).
             execute_query(
                 """
                 INSERT INTO users (user_id, username, email, password, is_team)
-                SELECT GREATEST(COALESCE(MAX(user_id), 0) + 1, 1000), %s, %s, '', FALSE
+                SELECT MAX(1000, COALESCE(MAX(user_id), 0) + 1), %s, %s, '', FALSE
                 FROM users
+                WHERE TRUE
                 ON CONFLICT DO NOTHING
                 """,
                 (name, f"{name}@registry.local"),

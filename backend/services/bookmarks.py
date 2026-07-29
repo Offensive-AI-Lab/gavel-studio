@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import List
 
 from utils.auth import LOCAL_USER_ID
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 
 
 class BookmarkLookupError(Exception):

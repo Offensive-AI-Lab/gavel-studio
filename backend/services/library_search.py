@@ -1,22 +1,32 @@
-"""Hybrid library search service.
+"""Hybrid library search service (SQLite edition).
 
 A single entry point — `HybridSearchService.search()` — handles both Rule and CE
 queries (and any future asset type) through the same pipeline. Routes call this
 service; they don't write SQL.
 
-SOLID intent:
-  * Single responsibility — this module owns the math + SQL of hybrid retrieval.
-    Routes own HTTP I/O and validation. Hydration (joining categories/CEs) lives
-    elsewhere.
+Three signals per asset type, fused with Reciprocal Rank Fusion exactly like
+the Postgres version did:
+  1. Semantic — brute-force cosine over float32-BLOB embeddings (numpy). The
+     library is thousands of rows, so a full matrix product is sub-millisecond
+     and needs no vector index.
+  2. Keyword  — FTS5 MATCH on rules_fts / ces_fts, ranked by bm25 with a 10x
+     weight on the name column (replaces setweight A/B + ts_rank_cd).
+  3. Name     — pg_trgm-style trigram similarity computed in Python on rows
+     whose name contains the query as a substring.
+
+SOLID intent (unchanged):
+  * Single responsibility — this module owns the retrieval math. Routes own
+    HTTP I/O and validation. Hydration (joining categories/CEs) lives elsewhere.
   * Open/closed — adding a new searchable asset type means adding one entry to
     ASSET_REGISTRY. The service code, fusion math, and routes stay unchanged.
   * Dependency inversion — the service receives a callable embedder, so it can
     be unit-tested without loading SentenceTransformer.
 """
+import re
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence
 
-from utils.PostgreSQL import execute_query_dict
+from utils.sqlite_db import execute_query_dict
 
 
 # Reciprocal Rank Fusion constant. 60 from Cormack et al. 2009 — robust default.
@@ -25,20 +35,25 @@ _RRF_K = 60
 # name hit ranks above the strongest pure-semantic top-1 (1/(60+1) ≈ 0.0164)
 # without drowning out keyword fusion.
 _NAME_BOOST = 0.5
+# bm25 column weights (name, body): name hits outrank body hits, mirroring the
+# old setweight('A') / setweight('B') ratio.
+_BM25_NAME_WEIGHT = 10.0
+_BM25_BODY_WEIGHT = 1.0
 
 
 @dataclass(frozen=True)
 class AssetSpec:
     """Tells `HybridSearchService` how to query one searchable asset type.
 
-    Anything with (id, name, body, embedding, search_vector, categories) and an
-    optional bookmark join table can be plugged in by adding an entry to
+    Anything with (id, name, body, embedding, categories), an FTS5 side-table
+    and an optional bookmark join table can be plugged in by adding an entry to
     `ASSET_REGISTRY` — no service or route changes required.
     """
     asset_type: str               # tag emitted in result rows ("rule", "ce", ...)
     table: str                    # main table name
     id_col: str                   # primary key column name
     content_col: str              # body column surfaced as `content` in results
+    fts_table: str                # FTS5 side-table (rowid == id_col)
     bookmark_table: Optional[str] = None  # for "search my bookmarks" — same id_col
 
 
@@ -49,6 +64,7 @@ ASSET_REGISTRY: dict = {
         table="rules",
         id_col="rule_id",
         content_col="predicate",
+        fts_table="rules_fts",
         bookmark_table="rule_bookmarks",
     ),
     "ce": AssetSpec(
@@ -56,22 +72,49 @@ ASSET_REGISTRY: dict = {
         table="cognitive_elements",
         id_col="ce_id",
         content_col="definition",
+        fts_table="ces_fts",
         bookmark_table="ce_bookmarks",
     ),
 }
 
 
+# --------------------------------------------------------------------- helpers
+
+def _trigrams(text: str) -> set:
+    """pg_trgm-style trigram set: lowercase, split into words, pad each word
+    with two leading and one trailing space, take all 3-grams."""
+    grams = set()
+    for word in re.findall(r"\w+", text.lower()):
+        padded = f"  {word} "
+        for i in range(len(padded) - 2):
+            grams.add(padded[i:i + 3])
+    return grams
+
+
+def trigram_similarity(a: str, b: str) -> float:
+    """|A ∩ B| / |A ∪ B| over trigram sets — same formula as pg_trgm's
+    similarity(). Not bit-identical to Postgres, but the same shape and range."""
+    ta, tb = _trigrams(a), _trigrams(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _fts_match_expr(query_text: str) -> str:
+    """Build a safe FTS5 MATCH expression: each token double-quoted (so FTS5
+    operator characters in user input can't break the query), implicit AND
+    between tokens — the same semantics websearch_to_tsquery gave for plain
+    word queries."""
+    tokens = re.findall(r"\w+", query_text)
+    return " ".join(f'"{t}"' for t in tokens)
+
+
 class HybridSearchService:
     """RRF-fused hybrid search across one or more asset types.
 
-    Three signals per asset type:
-      1. Semantic — pgvector cosine via HNSW
-      2. Keyword  — Postgres full-text (websearch_to_tsquery + ts_rank_cd)
-      3. Name     — trigram-similarity bonus on verbatim name matches
-
     Each signal contributes its top-N candidates, ranked. RRF combines them via
-    1 / (k + rank). The name signal is added as a multiplicative bonus to catch
-    short / acronym queries that tsvector under-ranks.
+    1 / (k + rank). The name signal is added as an additive bonus to catch
+    short / acronym queries that keyword search under-ranks.
 
     The service is stateless; it can be a long-lived singleton or constructed
     per request — both are fine.
@@ -107,131 +150,145 @@ class HybridSearchService:
         if not query_vector:
             return []
 
-        sql, params = self._build_sql(
-            specs=specs,
-            query_vector=query_vector,
-            query_text=query_text,
-            category_ids=list(category_ids or []),
-            bookmark_user_id=bookmark_user_id,
-            limit=limit,
-        )
-        try:
-            return execute_query_dict(sql, params) or []
-        except Exception:
-            # Routes decide how to surface this; we just don't swallow the trace.
-            raise
+        wanted_categories = set(int(c) for c in (category_ids or []))
 
-    # ----------------------------------------------------------------- SQL builder
+        results: List[dict] = []
+        for spec in specs:
+            results.extend(
+                self._search_one(
+                    spec=spec,
+                    query_text=query_text,
+                    query_vector=query_vector,
+                    wanted_categories=wanted_categories,
+                    bookmark_user_id=bookmark_user_id,
+                    limit=limit,
+                )
+            )
 
-    def _build_sql(
+        results.sort(key=lambda r: r["final_score"], reverse=True)
+        return results[:limit]
+
+    # ------------------------------------------------------------ per-asset search
+
+    def _search_one(
         self,
         *,
-        specs: Sequence[AssetSpec],
-        query_vector: List[float],
+        spec: AssetSpec,
         query_text: str,
-        category_ids: List[int],
+        query_vector: List[float],
+        wanted_categories: set,
         bookmark_user_id: Optional[int],
         limit: int,
-    ):
-        # category_ids contain only ints already; safe to inline.
-        cat_filter = ""
-        if category_ids:
-            cat_ids_sql = ",".join(str(int(cid)) for cid in category_ids)
-            cat_filter = f"AND x.categories && ARRAY[{cat_ids_sql}]"
+    ) -> List[dict]:
+        candidates = self._fetch_candidates(spec, bookmark_user_id)
+        if wanted_categories:
+            candidates = [
+                c for c in candidates
+                if wanted_categories & set(c.get("categories") or [])
+            ]
+        if not candidates:
+            return []
 
-        # pgvector accepts the literal '[1,2,...]' form. Built once and reused so
-        # the query text is identical across CTEs (helps Postgres' plan cache).
-        qvec_lit = str(query_vector)
+        by_id = {c["id"]: c for c in candidates}
+        scores = {cid: 0.0 for cid in by_id}
 
-        ctes: List[str] = []
-        union_parts: List[str] = []
-        params: List = []
+        # 1) Semantic — normalized embeddings, so cosine == dot product.
+        for rank, cid in enumerate(
+            self._semantic_ranking(candidates, query_vector, limit), start=1
+        ):
+            scores[cid] += 1.0 / (_RRF_K + rank)
 
-        for spec in specs:
-            if bookmark_user_id is not None and spec.bookmark_table:
-                join_clause = (
-                    f"JOIN {spec.bookmark_table} bk ON x.{spec.id_col} = bk.{spec.id_col}"
-                )
-                user_filter = f"AND bk.user_id = {int(bookmark_user_id)}"
-            else:
-                join_clause = ""
-                user_filter = ""
+        # 2) Keyword — FTS5 bm25 (lower is better; ORDER BY score ASC).
+        for rank, cid in enumerate(
+            self._keyword_ranking(spec, query_text, by_id, limit), start=1
+        ):
+            scores[cid] += 1.0 / (_RRF_K + rank)
 
-            tag = spec.asset_type
+        # 3) Name — trigram-similarity bonus on substring name matches.
+        q_lower = query_text.lower()
+        for c in candidates:
+            name = c.get("name") or ""
+            if q_lower in name.lower():
+                scores[c["id"]] += trigram_similarity(name, query_text) * _NAME_BOOST
 
-            # 1) Semantic — top-K nearest neighbors via HNSW.
-            ctes.append(f"""
-            sem_{tag} AS (
-                SELECT x.{spec.id_col} AS id, '{tag}' AS asset_type, x.name,
-                       x.{spec.content_col} AS content, x.type, x.categories,
-                       x.is_local_draft, x.created_by_username, x.public_id,
-                       RANK() OVER (ORDER BY x.embedding <=> '{qvec_lit}') AS rk
-                FROM {spec.table} x
-                {join_clause}
-                WHERE x.embedding IS NOT NULL {cat_filter} {user_filter}
-                ORDER BY x.embedding <=> '{qvec_lit}'
-                LIMIT {limit}
-            )""")
+        out = []
+        for cid, score in scores.items():
+            if score <= 0.0:
+                continue
+            row = dict(by_id[cid])
+            row.pop("embedding", None)
+            row["asset_type"] = spec.asset_type
+            row["final_score"] = score
+            out.append(row)
+        out.sort(key=lambda r: r["final_score"], reverse=True)
+        return out[:limit]
 
-            # 2) Keyword — full-text rank on weighted tsvector (name=A, body=B).
-            ctes.append(f"""
-            kw_{tag} AS (
-                SELECT x.{spec.id_col} AS id, '{tag}' AS asset_type, x.name,
-                       x.{spec.content_col} AS content, x.type, x.categories,
-                       x.is_local_draft, x.created_by_username, x.public_id,
-                       RANK() OVER (
-                           ORDER BY ts_rank_cd(x.search_vector, websearch_to_tsquery('english', %s)) DESC
-                       ) AS rk
-                FROM {spec.table} x
-                {join_clause}
-                WHERE x.search_vector @@ websearch_to_tsquery('english', %s)
-                      {cat_filter} {user_filter}
-                LIMIT {limit}
-            )""")
-            params.extend([query_text, query_text])
-
-            # 3) Name match — trigram similarity on verbatim name. Catches
-            # acronyms / short queries that tsvector misses. Uses gin_trgm_ops.
-            ctes.append(f"""
-            nm_{tag} AS (
-                SELECT x.{spec.id_col} AS id, '{tag}' AS asset_type, x.name,
-                       x.{spec.content_col} AS content, x.type, x.categories,
-                       x.is_local_draft, x.created_by_username, x.public_id,
-                       similarity(x.name, %s) AS sim
-                FROM {spec.table} x
-                {join_clause}
-                WHERE x.name ILIKE %s {cat_filter} {user_filter}
-                LIMIT {limit}
-            )""")
-            params.extend([query_text, f"%{query_text}%"])
-
-            union_parts.append(
-                f"SELECT id, asset_type, name, content, type, categories, is_local_draft, created_by_username, public_id, "
-                f"1.0 / ({_RRF_K} + rk) AS contrib FROM sem_{tag}"
+    def _fetch_candidates(self, spec: AssetSpec, bookmark_user_id: Optional[int]) -> List[dict]:
+        join_clause = ""
+        params: tuple = ()
+        if bookmark_user_id is not None and spec.bookmark_table:
+            join_clause = (
+                f"JOIN {spec.bookmark_table} bk "
+                f"ON x.{spec.id_col} = bk.{spec.id_col} AND bk.user_id = %s"
             )
-            union_parts.append(
-                f"SELECT id, asset_type, name, content, type, categories, is_local_draft, created_by_username, public_id, "
-                f"1.0 / ({_RRF_K} + rk) AS contrib FROM kw_{tag}"
-            )
-            union_parts.append(
-                f"SELECT id, asset_type, name, content, type, categories, is_local_draft, created_by_username, public_id, "
-                f"sim * {_NAME_BOOST} AS contrib FROM nm_{tag}"
-            )
-
-        cte_sql = "WITH " + ",\n".join(ctes)
-        union_sql = "\n        UNION ALL\n        ".join(union_parts)
-
-        main_sql = f"""
-        {cte_sql}
-        SELECT id, asset_type, name, content, type, categories, is_local_draft,
-               created_by_username, public_id,
-               SUM(contrib) AS final_score
-        FROM (
-            {union_sql}
-        ) unified
-        GROUP BY id, asset_type, name, content, type, categories, is_local_draft,
-                 created_by_username, public_id
-        ORDER BY final_score DESC
-        LIMIT {limit}
+            params = (int(bookmark_user_id),)
+        sql = f"""
+            SELECT x.{spec.id_col} AS id, x.name, x.{spec.content_col} AS content,
+                   x.type, x.categories, x.is_local_draft, x.created_by_username,
+                   x.public_id, x.embedding
+            FROM {spec.table} x
+            {join_clause}
         """
-        return main_sql, tuple(params)
+        return execute_query_dict(sql, params or None) or []
+
+    @staticmethod
+    def _semantic_ranking(candidates: List[dict], query_vector: List[float], limit: int) -> List[int]:
+        import numpy as np
+        from utils.embedding_utils import blob_to_embedding
+
+        ids, vectors = [], []
+        dim = len(query_vector)
+        for c in candidates:
+            blob = c.get("embedding")
+            if not blob:
+                continue
+            vec = blob_to_embedding(blob)
+            if vec.shape[0] != dim:
+                continue  # stale row embedded with a different model
+            ids.append(c["id"])
+            vectors.append(vec)
+        if not ids:
+            return []
+        matrix = np.stack(vectors)
+        sims = matrix @ np.asarray(query_vector, dtype=np.float32)
+        order = np.argsort(-sims)[:limit]
+        return [ids[i] for i in order]
+
+    @staticmethod
+    def _keyword_ranking(spec: AssetSpec, query_text: str, by_id: dict, limit: int) -> List[int]:
+        match_expr = _fts_match_expr(query_text)
+        if not match_expr:
+            return []
+        try:
+            # No SQL LIMIT here: the candidate scoping (bookmarks / categories)
+            # was applied to `by_id`, and ranks must be computed WITHIN that
+            # scoped set — capping the global FTS result first would silently
+            # drop scoped rows that rank below the global top-N (the Postgres
+            # version filtered inside the keyword CTE before its LIMIT). The
+            # match set is bounded by the library size, so this stays cheap.
+            rows = execute_query_dict(
+                f"""
+                SELECT rowid AS id,
+                       bm25({spec.fts_table}, {_BM25_NAME_WEIGHT}, {_BM25_BODY_WEIGHT}) AS score
+                FROM {spec.fts_table}
+                WHERE {spec.fts_table} MATCH %s
+                ORDER BY score ASC
+                """,
+                (match_expr,),
+            ) or []
+        except Exception:
+            # An exotic query FTS5 refuses to parse should degrade to "no
+            # keyword signal", not a 500 — semantic + name still rank.
+            return []
+        scoped = [r["id"] for r in rows if r["id"] in by_id]
+        return scoped[:limit]

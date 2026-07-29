@@ -42,8 +42,10 @@ class TestConstants:
 
     def test_schema_version_current_value(self):
         # Locks the constant: bumping the schema must update this test too,
-        # mirroring the file's own version log.
-        assert db.SCHEMA_VERSION == 20
+        # mirroring the file's own version log. v21 = SQLite migration,
+        # v23 = post-review hardening with a real rebuild migration
+        # (fractional eval timestamps, NOT NULL junction keys).
+        assert db.SCHEMA_VERSION == 23
 
     def test_default_categories_shape(self):
         assert isinstance(db.DEFAULT_CATEGORIES, list)

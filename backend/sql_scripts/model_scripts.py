@@ -1,6 +1,6 @@
 # backend/sql_scripts/model_scripts.py
 import hashlib
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 # We import create_global_rule to re-use the logic for adding to the main table
 from sql_scripts.definition_scripts import create_global_rule
 
@@ -429,28 +429,35 @@ def get_classifier_rules(classifier_id: int):
             r.public_id AS public_id,
             r.description AS description,
             r.created_by_username AS created_by_username,
-            COALESCE(cat.category_names, ARRAY[]::text[]) AS categories,
-            COALESCE(cat.category_ids, r.categories) AS category_ids,
+            -- Correlated scalar subqueries replace the Postgres LATERAL join:
+            -- ordered name list + id list of the source rule's categories.
             COALESCE(
-                json_agg(
-                    json_build_object(
+                (SELECT json_group_array(name) FROM (
+                    SELECT c.name FROM categories c
+                    WHERE c.category_id IN (SELECT value FROM json_each(r.categories))
+                    ORDER BY c.name
+                )),
+                '[]'
+            ) AS "categories [JSONB]",
+            COALESCE(
+                (SELECT json_group_array(c.category_id) FROM categories c
+                 WHERE c.category_id IN (SELECT value FROM json_each(r.categories))),
+                r.categories,
+                '[]'
+            ) AS "category_ids [JSONB]",
+            COALESCE(
+                json_group_array(
+                    json_object(
                         'ce_id', ce.ce_id,
                         'name', ce.name,
                         'role', COALESCE(link.role, 'necessary'),
                         'fallback_group', COALESCE(link.fallback_group, 0)
                     )
-                ) FILTER (WHERE ce.ce_id IS NOT NULL), 
+                ) FILTER (WHERE ce.ce_id IS NOT NULL),
                 '[]'
-            ) as active_ces
+            ) as "active_ces [JSONB]"
         FROM rule_setup rs
         LEFT JOIN rules r ON rs.rule_id = r.rule_id
-        LEFT JOIN LATERAL (
-            SELECT 
-                array_agg(c.name ORDER BY c.name) AS category_names,
-                array_agg(c.category_id) AS category_ids
-            FROM categories c
-            WHERE r.categories IS NOT NULL AND c.category_id = ANY(r.categories)
-        ) cat ON TRUE
         LEFT JOIN setup_ce_link link ON rs.setup_id = link.setup_id
         LEFT JOIN cognitive_elements ce ON link.ce_id = ce.ce_id
         WHERE rs.classifier_id = %s
@@ -460,7 +467,7 @@ def get_classifier_rules(classifier_id: int):
           -- not yet ready.
           AND (rs.rule_id IS NULL OR r.is_ready = TRUE)
         GROUP BY rs.setup_id, r.categories, r.is_local_draft, r.public_id,
-                 r.description, r.created_by_username, cat.category_names, cat.category_ids
+                 r.description, r.created_by_username
         ORDER BY rs.setup_id ASC
     """
     return execute_query_dict(query, (classifier_id,))
@@ -638,15 +645,15 @@ def fork_setup_to_draft(
         """
         SELECT rs.setup_id, rs.custom_name,
                COALESCE(
-                   json_agg(
-                       json_build_object(
+                   json_group_array(
+                       json_object(
                            'ce_id', scl.ce_id,
                            'role', scl.role,
                            'fallback_group', scl.fallback_group
                        )
                    ) FILTER (WHERE scl.ce_id IS NOT NULL),
-                   '[]'::json
-               ) AS links
+                   '[]'
+               ) AS "links [JSONB]"
         FROM rule_setup rs
         LEFT JOIN setup_ce_link scl ON scl.setup_id = rs.setup_id
         WHERE rs.classifier_id = %s AND rs.setup_id <> %s

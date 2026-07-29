@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 from services.hf_sync import REPO_ID, REPO_TYPE, sync_library
 
 logger = logging.getLogger(__name__)
@@ -130,7 +130,7 @@ def _resolve_username(publisher_user_id: Optional[int]) -> Optional[str]:
     but doesn't resolve — that's a programming error, not a soft case."""
     if publisher_user_id is None:
         return None
-    from utils.PostgreSQL import execute_query_dict
+    from utils.sqlite_db import execute_query_dict
     rows = execute_query_dict(
         "SELECT username FROM users WHERE user_id = %s", (publisher_user_id,)
     )
@@ -496,7 +496,7 @@ def _sync_is_fresh(window_seconds: int = 30) -> bool:
     try:
         rows = execute_query_dict(
             """
-            SELECT EXTRACT(EPOCH FROM (now() - updated_at)) AS age_seconds
+            SELECT (unixepoch('now') - unixepoch(updated_at)) AS age_seconds
             FROM sync_state
             WHERE key = 'last_manifest_hash'
             """

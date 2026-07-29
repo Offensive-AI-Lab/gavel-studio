@@ -47,7 +47,7 @@ def _resolve_user_id(classifier_id: int) -> int:
     Raises ValueError on a missing guardrail so callers fail loudly
     instead of silently writing to a junk path.
     """
-    from utils.PostgreSQL import execute_query_dict
+    from utils.sqlite_db import execute_query_dict
     rows = execute_query_dict(
         """
         SELECT m.user_id
@@ -146,7 +146,7 @@ def get_training_config(classifier_id: int) -> dict:
     """Load training config from DB, merged with defaults. The guardrail's MODEL
     can pin which LLM layers to use (target_models.selected_layers) — when set it
     overrides the default range, so the per-model layer choice drives training."""
-    from utils.PostgreSQL import execute_query_dict
+    from utils.sqlite_db import execute_query_dict
     result = execute_query_dict(
         "SELECT training_config FROM classifiers WHERE classifier_id = %s",
         (classifier_id,),
@@ -161,7 +161,7 @@ def get_training_config(classifier_id: int) -> dict:
 
 def _model_selected_layers(classifier_id: int):
     """The [start, end) LLM-layer range pinned on this guardrail's model, or None."""
-    from utils.PostgreSQL import execute_query_dict
+    from utils.sqlite_db import execute_query_dict
     rows = execute_query_dict(
         "SELECT tm.selected_layers FROM classifiers c "
         "JOIN target_models tm ON c.model_id = tm.model_id WHERE c.classifier_id = %s",
@@ -177,7 +177,7 @@ def _sanitize_label(name: str) -> str:
 
 
 def get_classifier_info(classifier_id: int):
-    from utils.PostgreSQL import execute_query_dict
+    from utils.sqlite_db import execute_query_dict
     query = """
         SELECT c.classifier_id, c.model_id, c.name, c.status,
                tm.storage_path, tm.name as model_name
@@ -194,7 +194,7 @@ def get_classifier_ces_with_datasets(classifier_id: int):
     Return all CEs linked to this guardrail's rules that have excitation datasets.
     Returns list of {ce_id, name, dataset_json}.
     """
-    from utils.PostgreSQL import execute_query_dict
+    from utils.sqlite_db import execute_query_dict
     query = """
         SELECT DISTINCT
             ce.ce_id,
@@ -212,7 +212,7 @@ def get_classifier_ces_with_datasets(classifier_id: int):
 
 
 def update_classifier_status(classifier_id: int, status: str, model_path: str = None, training_log: str = None):
-    from utils.PostgreSQL import execute_query
+    from utils.sqlite_db import execute_query
     if model_path is not None and training_log is not None:
         execute_query(
             "UPDATE classifiers SET status = %s, model_path = %s, training_log = %s WHERE classifier_id = %s",
@@ -304,7 +304,7 @@ def fetch_calibration_entries(classifier_id: int, ces_with_datasets: list, per_c
     except Exception as fetch_err:
         logger.warning(f"[Trainer] CE-calibration lazy fetch failed: {fetch_err}")
     try:
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         names = [ce["name"] for ce in ces_with_datasets]
         rows = execute_query_dict("""
             SELECT ce.name, cd.dataset

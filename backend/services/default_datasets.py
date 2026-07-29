@@ -30,7 +30,7 @@ import json
 import threading
 from typing import Optional
 
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 
 # The three buckets that make up a rule's default test set.
 DEFAULT_DATASET_TYPES = ("positive", "negative", "positive_calibration")

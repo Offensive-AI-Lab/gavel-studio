@@ -7,7 +7,7 @@ AI-pipeline rule (which already has a description) is never overwritten.
 """
 import logging
 
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 
 logger = logging.getLogger(__name__)
 

@@ -30,7 +30,7 @@ class TestPromptInjection:
         ce_id = res.json().get("ce_id")
         # Cleanup
         if ce_id:
-            from utils.PostgreSQL import execute_query
+            from utils.sqlite_db import execute_query
             execute_query("DELETE FROM cognitive_elements WHERE ce_id = %s", (ce_id,))
 
     def test_system_prompt_override_attempt(self, client, auth_headers, test_user):
@@ -46,7 +46,7 @@ class TestPromptInjection:
         if res.status_code == 200:
             ce_id = res.json().get("ce_id")
             if ce_id:
-                from utils.PostgreSQL import execute_query
+                from utils.sqlite_db import execute_query
                 execute_query("DELETE FROM cognitive_elements WHERE ce_id = %s", (ce_id,))
 
     def test_base64_encoded_jailbreak(self, client, auth_headers, test_user):
@@ -60,7 +60,7 @@ class TestPromptInjection:
         assert res.status_code == 200
         ce_id = res.json().get("ce_id")
         if ce_id:
-            from utils.PostgreSQL import execute_query
+            from utils.sqlite_db import execute_query
             execute_query("DELETE FROM cognitive_elements WHERE ce_id = %s", (ce_id,))
 
 
@@ -79,7 +79,7 @@ class TestSensitiveDataPatterns:
         assert res.status_code == 200
         ce_id = res.json().get("ce_id")
         if ce_id:
-            from utils.PostgreSQL import execute_query
+            from utils.sqlite_db import execute_query
             execute_query("DELETE FROM cognitive_elements WHERE ce_id = %s", (ce_id,))
 
     def test_private_key_pattern_in_input(self, client, auth_headers, test_user):
@@ -94,7 +94,7 @@ class TestSensitiveDataPatterns:
         if res.status_code == 200:
             ce_id = res.json().get("ce_id")
             if ce_id:
-                from utils.PostgreSQL import execute_query
+                from utils.sqlite_db import execute_query
                 execute_query("DELETE FROM cognitive_elements WHERE ce_id = %s", (ce_id,))
 
 

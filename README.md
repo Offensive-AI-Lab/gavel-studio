@@ -12,7 +12,7 @@ GAVEL Studio Beta is an interactive web platform for building intent-aware, rule
 
 Rather than relying on surface-text moderation, GAVEL Studio works at the activation level. The platform brings the full GAVEL workflow into one UI: rule design, CE generation, classifier training, live monitoring, and access to a public registry of reusable rules and Cognitive Elements.
 
-- **Backend:** FastAPI + PostgreSQL (with the `pgvector` extension)
+- **Backend:** FastAPI + SQLite (a single file at `backend/db/gavel.sqlite3` — no database server)
 - **Frontend:** React 19 + Vite
 - **Public registry:** Hugging Face datasets (rules + CEs)
 
@@ -63,8 +63,8 @@ in — there is no login. Subsequent `docker compose up` runs start in seconds.
 The only thing you have to install on your machine is **Docker Desktop**:
 https://www.docker.com/products/docker-desktop/
 
-Everything else — Python 3.12, Node 20, PostgreSQL 17, the pgvector extension,
-all dependencies — comes pre-baked into the containers.
+Everything else — Python 3.12, Node 20, all dependencies — comes pre-baked
+into the containers. The database is a SQLite file the backend creates itself.
 
 ---
 
@@ -72,13 +72,13 @@ all dependencies — comes pre-baked into the containers.
 
 | Service | Port (host) | What it is                                    |
 |---------|-------------|------------------------------------------------|
-| `postgres` | (internal) | pgvector/pgvector:pg17 — DB + pgvector ext  |
 | `backend`  | 8000      | FastAPI + uvicorn with `--reload` for dev      |
 | `frontend` | 5173      | Vite dev server with hot module reload         |
 
-The backend talks to Postgres over Docker's internal network (hostname
-`postgres`). Your browser hits `localhost:5173` (frontend) and
-`localhost:8000` (backend API) on the host.
+All application data lives in **one SQLite file** — `backend/db/gavel.sqlite3`
+— created on first boot. It sits inside the `./backend` bind mount, so it
+persists across container restarts and rebuilds. Your browser hits
+`localhost:5173` (frontend) and `localhost:8000` (backend API) on the host.
 
 Useful commands:
 
@@ -90,8 +90,8 @@ docker compose --env-file backend/.env up          # foreground, see all logs
 docker compose --env-file backend/.env up -d       # detached
 docker compose --env-file backend/.env up --build  # rebuild after Dockerfile / requirements changes
 docker compose logs -f backend                     # tail one service's logs
-docker compose down                                # stop everything (DB data preserved)
-docker compose down -v                             # stop AND wipe the DB volume — clean slate
+docker compose down                                # stop everything (DB file preserved)
+rm backend/db/gavel.sqlite3                        # clean slate — the library re-syncs from HF on next boot
 ```
 
 ---
@@ -123,10 +123,9 @@ HF_TOKEN=
 # HF_REPO_ID=your-user/your-registry
 ```
 
-**You do NOT need to set `DB_HOST`, `DB_USER`, `DB_PASSWORD`, etc.** —
-docker-compose.yml overrides those to point at the in-network postgres
-container. `docker compose` substitutes `${VAR}` from this repo-root `.env`;
-`backend/.env` is the separate source of truth for *native* dev (see §6).
+**There are no database settings.** The backend stores everything in
+`backend/db/gavel.sqlite3` (override the path with `DB_PATH` if you want it
+elsewhere). No host, no credentials, no server to run.
 
 The frontend's `VITE_API_URL` already defaults to `http://localhost:8000`,
 so no separate `frontend/.env` is needed for the Docker workflow.
@@ -184,7 +183,7 @@ Something else on your machine is already using that port. Either stop it,
 or edit the `ports:` lines in `docker-compose.yml` (e.g. `5174:5173`).
 
 **`docker compose up` hangs at "Building backend"**
-First build pulls Python 3.12 + Node 20 + pgvector base images and runs
+First build pulls the Python 3.12 + Node 20 base images and runs
 `pip install` for the full ML stack (torch, transformers, sentence-transformers).
 That's ~2 GB and 3-5 min. After the first build it's instant — Docker caches
 the install layers and only rebuilds when `requirements.txt` / `package.json`
@@ -226,21 +225,15 @@ you and your code), you can run everything natively. You'll need:
 |-------------|----------|
 | Python      | 3.12+    |
 | Node.js     | 20+      |
-| PostgreSQL  | 14+ with pgvector |
 
-Quick path: keep using the Docker postgres container, run backend + frontend
-natively against it.
+No database server — the backend creates `backend/db/gavel.sqlite3` on first
+boot.
 
 ```bash
-# Postgres only, in Docker
-docker compose up -d postgres
-
 # Backend natively
 cd backend
 python -m venv .venv && source .venv/bin/activate    # or .venv\Scripts\Activate.ps1 on Windows
 pip install -r requirements.txt
-# DB_HOST in .env stays 127.0.0.1 — Docker exposes 5432 on the host when you
-# uncomment the ports: line in docker-compose.yml under `postgres`.
 uvicorn main:app --reload --host 127.0.0.1 --port 8000
 
 # Frontend natively (in a second terminal)
@@ -249,6 +242,10 @@ npm install
 cp .env.example .env
 npm run dev
 ```
+
+Note: Docker and native runs share the same DB file (it lives in the mounted
+`backend/` tree), so you can switch between the two modes freely — just don't
+run both backends at the same time.
 
 For test commands when running natively, see [.github/workflows/tests.yml](.github/workflows/tests.yml)
 — same install + invocation that CI uses.

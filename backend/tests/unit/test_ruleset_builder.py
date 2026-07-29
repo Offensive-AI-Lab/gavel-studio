@@ -1,14 +1,14 @@
 """Pure unit tests for ``evaluation.ruleset_builder.build_unified_ruleset``.
 
 ``build_unified_ruleset`` does all DB access through ``execute_query_dict``,
-which it imports *lazily inside the function body* from ``utils.PostgreSQL``:
+which it imports *lazily inside the function body* from ``utils.sqlite_db``:
 
-    from utils.PostgreSQL import execute_query_dict
+    from utils.sqlite_db import execute_query_dict
 
 Because the symbol is re-imported on every call (it is not bound at module
 import time on ``evaluation.ruleset_builder``), the only reliable patch point
-is the attribute on the ``utils.PostgreSQL`` module object itself — that is
-what the ``from utils.PostgreSQL import ...`` statement resolves against. We
+is the attribute on the ``utils.sqlite_db`` module object itself — that is
+what the ``from utils.sqlite_db import ...`` statement resolves against. We
 replace it with a small scripted fake that returns canned rows; no database is
 ever touched.
 
@@ -27,7 +27,7 @@ sufficient -> supporting) are exercised below.
 """
 import pytest
 
-import utils.PostgreSQL as pg
+import utils.sqlite_db as pg
 from evaluation.ruleset_builder import build_unified_ruleset
 
 

@@ -25,7 +25,7 @@ step evolution cheap (no migration for a new step-data field).
 from typing import Optional, List, Dict, Any
 import json
 
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 
 
 # Step ids per pipeline. The wizard frontend imports its own copy of
@@ -168,14 +168,17 @@ def update_step(
     "user clicked Next" instead of inferring advancement from status
     changes — a user can revisit a completed step without leaving it.
 
-    Postgres' `jsonb_set` lets us mutate a single key without rewriting
-    the whole blob, so concurrent step updates for different keys don't
-    clobber each other.
+    SQLite's `json_set` mutates a single key without rewriting the whole
+    blob (it creates the key if missing, like jsonb_set's create_missing),
+    so concurrent step updates for different keys don't clobber each other.
     """
     if step_id not in _ALL_STEP_IDS:
         raise ValueError(f"Unknown step id: {step_id}")
 
     new_value = json.dumps({"status": status, "data": data or {}})
+    # step_id comes from the _ALL_STEP_IDS whitelist, so quoting it into a
+    # JSON path is safe. Quotes keep ids like "2A" working as object keys.
+    step_path = f'$."{step_id}"'
 
     if advance_to is not None and advance_to not in _ALL_STEP_IDS:
         raise ValueError(f"Unknown step id for advance_to: {advance_to}")
@@ -184,24 +187,24 @@ def update_step(
         rows = execute_query_dict(
             f"""
             UPDATE pipeline_runs
-            SET steps = jsonb_set(steps, %s::text[], %s::jsonb, true),
+            SET steps = json_set(steps, %s, json(%s)),
                 current_step = %s,
                 updated_at = now()
             WHERE run_id = %s
             RETURNING {_COLS}
             """,
-            ([step_id], new_value, advance_to, run_id),
+            (step_path, new_value, advance_to, run_id),
         )
     else:
         rows = execute_query_dict(
             f"""
             UPDATE pipeline_runs
-            SET steps = jsonb_set(steps, %s::text[], %s::jsonb, true),
+            SET steps = json_set(steps, %s, json(%s)),
                 updated_at = now()
             WHERE run_id = %s
             RETURNING {_COLS}
             """,
-            ([step_id], new_value, run_id),
+            (step_path, new_value, run_id),
         )
     return rows[0] if rows else None
 

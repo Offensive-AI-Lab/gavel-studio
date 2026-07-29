@@ -211,7 +211,9 @@ class TestRuleSetupNotFound:
             pytest.skip("Could not create CE for link test")
         ce_id = ce_res.json()["ce_id"]
         res = client.post("/rules/setup/99999999/link-ce", json={"ce_id": ce_id})
-        assert res.status_code in (200, 400, 500)
+        # Ownership guard 404s an unknown setup id (404 rather than 403 so ids
+        # can't be probed for existence).
+        assert res.status_code == 404
 
     def test_link_ce_missing_ce_id_422(self, client):
         """LinkCERequest requires ce_id → 422 when omitted."""

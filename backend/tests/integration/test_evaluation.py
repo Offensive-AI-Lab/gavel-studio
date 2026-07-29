@@ -61,13 +61,13 @@ class TestPostRetrainResultsFilter:
                         thresholds: dict | None = None) -> int:
         """Insert an evaluation_results row backdated by `age_seconds`."""
         import json
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rows = execute_query_dict(
             """
             INSERT INTO evaluation_results (
                 classifier_id, eval_type, thresholds, metrics, plots, created_at
             )
-            VALUES (%s, %s, %s::jsonb, NULL, NULL, now() - (%s || ' seconds')::interval)
+            VALUES (%s, %s, %s::jsonb, NULL, NULL, datetime('now', '-' || %s || ' seconds'))
             RETURNING eval_id
             """,
             (
@@ -83,9 +83,9 @@ class TestPostRetrainResultsFilter:
     def _set_trained_at(classifier_id: int, age_seconds: int) -> None:
         """Set classifiers.trained_at to (now - age_seconds). Negative
         age means future-dated, but we always pass non-negative here."""
-        from utils.PostgreSQL import execute_query
+        from utils.sqlite_db import execute_query
         execute_query(
-            "UPDATE classifiers SET trained_at = now() - (%s || ' seconds')::interval WHERE classifier_id = %s",
+            "UPDATE classifiers SET trained_at = datetime('now', '-' || %s || ' seconds') WHERE classifier_id = %s",
             (str(age_seconds), classifier_id),
         )
 
@@ -135,7 +135,7 @@ class TestPostRetrainResultsFilter:
         # Filter is read-time masking, NOT destructive. The pre-retrain
         # row is still queryable by direct DB inspection — only the
         # endpoints hide it.
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         cid = test_classifier["classifier_id"]
         old_id = self._insert_eval_row(cid, "calibration", age_seconds=60)
         self._set_trained_at(cid, 30)
@@ -162,7 +162,7 @@ class TestPostRetrainResultsFilter:
     def test_never_trained_classifier_passes_filter_through(self, client, test_classifier, auth_headers):
         # Defensive: when trained_at IS NULL, the filter must NOT hide
         # rows. COALESCE to '-infinity' makes the predicate vacuously true.
-        from utils.PostgreSQL import execute_query
+        from utils.sqlite_db import execute_query
         cid = test_classifier["classifier_id"]
         execute_query(
             "UPDATE classifiers SET trained_at = NULL WHERE classifier_id = %s",

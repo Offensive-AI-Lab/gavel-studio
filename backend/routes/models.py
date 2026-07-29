@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 from sql_scripts.model_scripts import get_user_models, register_model, delete_model, update_model_layers
 from utils.auth import get_current_user
 from utils.ownership import require_model_owner
-from utils.PostgreSQL import execute_query_dict
+from utils.sqlite_db import execute_query_dict
 from utils.text_safety import clean_text
 router = APIRouter()
 

@@ -1,4 +1,4 @@
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 
 # --- JUNCTION TABLE LOGIC (Rule Instance <-> CE) ---
 
@@ -142,15 +142,15 @@ def find_existing_rule_setup_by_fingerprint(classifier_id: int, fingerprint: str
         """
         SELECT rs.setup_id, rs.custom_name,
                COALESCE(
-                   json_agg(
-                       json_build_object(
+                   json_group_array(
+                       json_object(
                            'ce_id', scl.ce_id,
                            'role', scl.role,
                            'fallback_group', scl.fallback_group
                        )
                    ) FILTER (WHERE scl.ce_id IS NOT NULL),
-                   '[]'::json
-               ) AS links
+                   '[]'
+               ) AS "links [JSONB]"
         FROM rule_setup rs
         LEFT JOIN setup_ce_link scl ON scl.setup_id = rs.setup_id
         WHERE rs.classifier_id = %s
@@ -175,15 +175,15 @@ def find_existing_rule_by_fingerprint(fingerprint: str, exclude_name: str = None
         """
         SELECT r.rule_id, r.name,
                COALESCE(
-                   json_agg(
-                       json_build_object(
+                   json_group_array(
+                       json_object(
                            'ce_id', rcl.ce_id,
                            'role', rcl.role,
                            'fallback_group', rcl.fallback_group
                        )
                    ) FILTER (WHERE rcl.ce_id IS NOT NULL),
-                   '[]'::json
-               ) AS links
+                   '[]'
+               ) AS "links [JSONB]"
         FROM rules r
         LEFT JOIN rule_ce_link rcl ON rcl.rule_id = r.rule_id
         WHERE (%s IS NULL OR r.name <> %s)

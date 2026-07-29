@@ -9,28 +9,32 @@
 #   docker compose --env-file backend/.env up       — foreground, all logs
 #   docker compose --env-file backend/.env up -d    — detached
 #   docker compose down                              — stop everything
-#   docker compose down -v                           — stop AND wipe the pg volume
 #
 # Tip: `export COMPOSE_ENV_FILES=backend/.env` once and you can drop the flag.
 #
-# Open http://localhost:5173 when it's up, register a user, and log in.
+# Open http://localhost:5173 when it's up — there is no login.
 #
 # Services & ports (host → container):
 #   frontend  5173   Vite dev server (browser entry point)
 #   backend   8000   FastAPI — rules, training, evaluation, AI pipeline
-#   postgres  —      pgvector/pg17, internal only (holds gavel_db)
 #
-# How the pieces talk (inside Docker's network, by service name via DNS):
+# The database is a SQLite file at backend/db/gavel.sqlite3, created by the
+# backend on first boot. It lives inside the ./backend bind mount, so it
+# persists across container restarts and rebuilds with no named volume.
+# Clean slate = delete backend/db/gavel.sqlite3 (the library re-syncs from
+# HuggingFace on the next boot).
+#
+# How the pieces talk:
 #   browser → localhost:5173 (frontend) and localhost:8000 (backend)
-#   backend → postgres:5432  and  → HuggingFace (library reads; publishes too,
-#             directly, when HF_TOKEN is set in backend/.env)
+#   backend → SQLite file on disk  and  → HuggingFace (library reads;
+#             publishes too, directly, when HF_TOKEN is set in backend/.env)
 #
 # Config: everything works out-of-the-box with built-in defaults. To enable
 # AI generation / HF publishing, fill the values in backend/.env; compose
 # substitutes ${VAR} from that SAME file (via --env-file backend/.env).
 # (Native dev also uses backend/.env — see ./run.sh. One file, both modes.)
 #
-# This stack = postgres + backend + frontend. That is the WHOLE app.
+# This stack = backend + frontend. That is the WHOLE app.
 #
 # Run modes (all driven by backend/.env, no compose edits needed):
 #   * Default:                        docker compose --env-file backend/.env up --build
@@ -41,32 +45,11 @@
 #   * Train on local CPU:             the default (nothing to set)
 
 services:
-  postgres:
-    image: pgvector/pgvector:pg17
-    container_name: gavel-postgres
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: gavel_db
-    volumes:
-      - gavel_pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    # Internal-only. To inspect with a GUI from the host, uncomment:
-    #   ports:
-    #     - "5432:5432"
-
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: gavel-backend
-    depends_on:
-      postgres:
-        condition: service_healthy
     # ── Config: ONE source of truth = backend/.env ──────────────────────────
     # backend/.env is bind-mounted at /app/.env (see volumes) and loaded by the
     # backend's load_dotenv. load_dotenv does NOT override variables that are
@@ -76,12 +59,6 @@ services:
     # comes from backend/.env. So you edit ONE file — backend/.env — whether you
     # run with Docker or natively. There is no separate repo-root app config.
     environment:
-      # DB — must point at the postgres SERVICE, not backend/.env's 127.0.0.1.
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_USER: postgres
-      DB_PASSWORD: postgres
-      DB_NAME: gavel_db
       # CORS / frontend (browser hits the host-mapped ports).
       ALLOWED_ORIGINS: http://localhost:5173
       FRONTEND_URL: http://localhost:5173
@@ -98,7 +75,9 @@ services:
       - "8000:8000"
     volumes:
       # Mount source so uvicorn --reload picks up edits without a rebuild.
-      # Anonymous volumes keep container-only scratch out of the working tree.
+      # This mount also carries the SQLite DB (backend/db/) — data persists on
+      # the host. Anonymous volumes keep container-only scratch out of the
+      # working tree.
       - ./backend:/app
       - /app/__pycache__
       - /app/.venv
@@ -127,7 +106,3 @@ services:
       - ./frontend:/app
       - /app/node_modules
     command: npm run dev -- --host 0.0.0.0
-
-# Named volume — survives `docker compose down`. Wiped only on `down -v`.
-volumes:
-  gavel_pgdata:

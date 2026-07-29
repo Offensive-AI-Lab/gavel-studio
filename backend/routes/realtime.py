@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from utils.auth import get_current_user
 from utils.ownership import require_classifier_owner
-from utils.PostgreSQL import execute_query_dict
+from utils.sqlite_db import execute_query_dict
 
 logger = logging.getLogger(__name__)
 # Every endpoint here is /{classifier_id}/… — guard the whole router so the
@@ -99,7 +99,7 @@ def _build_scoring_context(classifier_id: int, labels: dict):
            WHERE classifier_id = %s AND eval_type = 'calibration'
              AND thresholds IS NOT NULL
              {_POST_TRAIN_CLAUSE}
-           ORDER BY created_at DESC LIMIT 1""",
+           ORDER BY created_at DESC, eval_id DESC LIMIT 1""",
         (classifier_id, classifier_id),
     )
     thresholds_dict = calib_rows[0]["thresholds"] if calib_rows else {}
@@ -743,7 +743,7 @@ def _list_sample_groups(classifier_id: int) -> list:
         """
         SELECT DISTINCT td.dataset_id, td.dataset_type,
                COALESCE(rs.custom_name, r.name) AS rule_name,
-               COALESCE(jsonb_array_length(td.conversations), 0) AS count
+               COALESCE(json_array_length(td.conversations), 0) AS count
         FROM test_datasets td
         JOIN rule_setup rs ON rs.rule_id = td.rule_id AND rs.classifier_id = %s
         LEFT JOIN rules r ON r.rule_id = td.rule_id

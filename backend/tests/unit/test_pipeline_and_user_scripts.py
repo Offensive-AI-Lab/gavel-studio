@@ -317,11 +317,12 @@ class TestUpdateStep:
                         data={"k": "v"})
 
         sql = rec.last_sql
-        assert "jsonb_set" in sql
+        assert "json_set" in sql
         # No current_step bump when advance_to is omitted.
         assert "current_step = %s" not in sql
         path, value_json, run_id = rec.last_params
-        assert path == ["2A"]
+        # SQLite json_set takes a quoted JSON path, not a text[] array.
+        assert path == '$."2A"'
         assert json.loads(value_json) == {"status": "completed", "data": {"k": "v"}}
         assert run_id == 7
 
@@ -335,7 +336,7 @@ class TestUpdateStep:
         sql = rec.last_sql
         assert "current_step = %s" in sql
         path, value_json, advance_to, run_id = rec.last_params
-        assert path == ["2A"]
+        assert path == '$."2A"'
         assert advance_to == "2B"
         assert run_id == 7
         # data defaults to {} when None.
@@ -537,8 +538,8 @@ class TestEnsureCreatorsInLocal:
         inserted = sorted(c[1][0] for c in writes.calls)
         assert inserted == ["alice", "bob"]
         # Placeholder ids start above the local user so they can never collide
-        # with LOCAL_USER_ID.
-        assert "GREATEST" in writes.calls[0][0]
+        # with LOCAL_USER_ID (scalar MAX(1000, ...) is SQLite's GREATEST).
+        assert "MAX(1000" in writes.calls[0][0]
         assert "ON CONFLICT DO NOTHING" in writes.calls[0][0]
 
     def test_probe_is_lowercased_and_deduped(self, monkeypatch):

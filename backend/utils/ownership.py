@@ -26,7 +26,7 @@ user who isn't allowed to see it.
 """
 from fastapi import Depends, HTTPException, Path
 
-from utils.PostgreSQL import execute_query_dict
+from utils.sqlite_db import execute_query_dict
 from utils.auth import get_current_user
 
 

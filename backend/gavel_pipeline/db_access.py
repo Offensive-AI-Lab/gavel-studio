@@ -2,7 +2,7 @@ import collections
 import json
 from typing import Dict, List
 
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 from utils.embedding_utils import trigger_embedding
 from utils.DButils import normalize_and_upsert_categories
 

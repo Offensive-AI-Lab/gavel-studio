@@ -88,7 +88,7 @@ def _snapshot_pks() -> dict:
     column and composite primary keys. Failures are swallowed (return empty
     set) because some tables may be missing in tests that initialise a partial
     schema."""
-    from utils.PostgreSQL import execute_query_dict
+    from utils.sqlite_db import execute_query_dict
     snap: dict = {}
     for tbl, pk_cols in _TRACKED_TABLES:
         cols = ", ".join(pk_cols)
@@ -106,7 +106,7 @@ def _restore_to(snapshot: dict) -> None:
     second catches anything that lingered because of weird FK interactions in
     the first pass. Errors are swallowed per-row so one stuck row never blocks
     the rest of the cleanup."""
-    from utils.PostgreSQL import execute_query, execute_query_dict
+    from utils.sqlite_db import execute_query, execute_query_dict
     for _ in range(2):
         for tbl, pk_cols in _TRACKED_TABLES:
             cols = ", ".join(pk_cols)
@@ -192,7 +192,7 @@ def test_user(client):
     here would make every test that compares this fixture's username against an
     API response fail on such an install.
     """
-    from utils.PostgreSQL import execute_query_dict
+    from utils.sqlite_db import execute_query_dict
     rows = execute_query_dict(
         "SELECT user_id, username, email FROM users WHERE user_id = %s",
         (LOCAL_USER_ID,),

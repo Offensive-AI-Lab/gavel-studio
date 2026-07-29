@@ -6,22 +6,23 @@
 #
 # From a fresh clone to a running app. Idempotent — safe to re-run.
 #
-#   1. Ensures Python 3.12+, Node 20+, and a running PostgreSQL server
-#      (auto-installs the missing ones via apt/dnf/pacman/zypper/brew; on
-#      Windows it prints install links and stops).
+#   1. Ensures Python 3.12+ and Node 20+ (auto-installs the missing ones via
+#      apt/dnf/pacman/zypper/brew; on Windows it prints install links and
+#      stops). There is no database server to install — storage is a SQLite
+#      file (backend/db/gavel.sqlite3) the backend creates on first boot.
 #   2. Asks for an optional OpenAI key (AI rule/CE generation). Publishing to
 #      the HF registry is optional too — add a write-scope HF_TOKEN to
 #      backend/.env by hand to enable it; everything else works without one.
 #   3. Installs Python deps for the backend and Node deps for the frontend
 #      ("downloads everything he needs").
-#   4. Creates the backend database (gavel_db) via psycopg2 — no psql CLI
-#      required — resolving a superuser that works on your machine
-#      (Homebrew uses your account; Linux gets a role bootstrapped for you).
-#   5. Writes backend/.env, then launches the backend + frontend and streams
+#   4. Writes backend/.env, then launches the backend + frontend and streams
 #      their logs. Ctrl+C stops them.
 #
 # Open http://localhost:5173 when it's up. There is no login — the app serves
 # one local operator.
+#
+# Clean slate: delete backend/db/gavel.sqlite3 — the public library re-syncs
+# from HuggingFace on the next boot.
 #
 # Needs: an internet connection. The FIRST run downloads the ML stack
 # (torch, transformers, ...), so it can take several minutes.
@@ -42,13 +43,7 @@ ok()   { echo "${C_GREEN}✓ $*${C_OFF}"; }
 warn() { echo "${C_YEL}! $*${C_OFF}"; }
 die()  { echo "${C_RED}✗ $*${C_OFF}" >&2; exit 1; }
 
-# --- config (override via env: e.g. DB_PORT=5433 ./run.sh) ------------------
-DB_HOST="${DB_HOST:-127.0.0.1}"
-DB_PORT="${DB_PORT:-5432}"
-DB_USER="${DB_USER:-postgres}"
-DB_PASSWORD="${DB_PASSWORD:-}"
-DB_MAINT="${DB_MAINT:-postgres}"
-BACKEND_DB="${BACKEND_DB:-gavel_db}"
+# --- config (override via env: e.g. BACKEND_PORT=8001 ./run.sh) --------------
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 LOG_DIR="$ROOT/logs"; mkdir -p "$LOG_DIR"
@@ -78,28 +73,28 @@ install_hint() {
   case "$OS" in
     linux)   echo "  sudo apt-get install -y $1   (or your distro's package manager)" ;;
     macos)   echo "  brew install $1   (Homebrew: https://brew.sh)" ;;
-    windows) echo "  Install $1 and reopen Git Bash (python.org / nodejs.org / postgresql.org)." ;;
+    windows) echo "  Install $1 and reopen Git Bash (python.org / nodejs.org)." ;;
     *)       echo "  Install $1 and re-run." ;;
   esac
 }
 
-pkg_install() { # generic: python | node | postgres
+pkg_install() { # generic: python | node
   local tool="$1" p=""
   case "$PKG" in
     brew)
-      case "$tool" in python) p="python@3.12";; node) p="node";; postgres) p="postgresql@16";; esac
+      case "$tool" in python) p="python@3.12";; node) p="node";; esac
       brew install $p ;;
     apt)
-      case "$tool" in python) p="python3 python3-venv python3-pip";; node) p="nodejs npm";; postgres) p="postgresql postgresql-contrib";; esac
+      case "$tool" in python) p="python3 python3-venv python3-pip";; node) p="nodejs npm";; esac
       $SUDO apt-get update -y && $SUDO apt-get install -y $p ;;
     dnf|yum)
-      case "$tool" in python) p="python3 python3-pip";; node) p="nodejs npm";; postgres) p="postgresql-server postgresql";; esac
+      case "$tool" in python) p="python3 python3-pip";; node) p="nodejs npm";; esac
       $SUDO "$PKG" install -y $p ;;
     pacman)
-      case "$tool" in python) p="python python-pip";; node) p="nodejs npm";; postgres) p="postgresql";; esac
+      case "$tool" in python) p="python python-pip";; node) p="nodejs npm";; esac
       $SUDO pacman -Sy --noconfirm $p ;;
     zypper)
-      case "$tool" in python) p="python3 python3-pip";; node) p="nodejs npm";; postgres) p="postgresql-server postgresql";; esac
+      case "$tool" in python) p="python3 python3-pip";; node) p="nodejs npm";; esac
       $SUDO zypper install -y $p ;;
     *) return 1 ;;
   esac
@@ -145,37 +140,8 @@ open(path, "w", encoding="utf-8", newline="\n").write("\n".join(out) + "\n")
 PYEOF
 }
 
-# TCP reachability test (no psql needed) — uses the system Python.
-tcp_open() {
-  "$PY" - "$1" "$2" <<'PYEOF'
-import socket, sys
-try:
-    socket.create_connection((sys.argv[1], int(sys.argv[2])), 3).close()
-except OSError:
-    raise SystemExit(1)
-PYEOF
-}
-
-start_postgres() {
-  step "starting PostgreSQL…"
-  case "$PKG" in
-    brew)
-      local f; f="$(brew list --formula 2>/dev/null | grep -m1 '^postgresql' || echo postgresql)"
-      brew services start "$f" >/dev/null 2>&1 || true ;;
-    *)
-      if   have systemctl;     then $SUDO systemctl enable --now postgresql >/dev/null 2>&1 || true
-      elif have service;       then $SUDO service postgresql start >/dev/null 2>&1 || true
-      elif have pg_ctlcluster; then $SUDO pg_ctlcluster "$(ls /etc/postgresql 2>/dev/null | head -1)" main start >/dev/null 2>&1 || true
-      fi
-      if ! tcp_open "$DB_HOST" "$DB_PORT" && have postgresql-setup; then
-        $SUDO postgresql-setup --initdb >/dev/null 2>&1 || true
-        $SUDO systemctl enable --now postgresql >/dev/null 2>&1 || true
-      fi ;;
-  esac
-}
-
 ###############################################################################
-# 1. Prerequisites: Python, Node, a running PostgreSQL server
+# 1. Prerequisites: Python and Node (no database server — SQLite is built in)
 ###############################################################################
 step "Checking prerequisites (OS: $OS${PKG:+, package manager: $PKG})"
 
@@ -192,17 +158,7 @@ NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 
 [ "$NODE_MAJOR" -ge 18 ] 2>/dev/null || warn "Node $(node --version) is old; the frontend wants 20+. If 'npm run dev' fails, upgrade Node (e.g. via nvm)."
 ok "node: $(node --version)   npm: $(npm --version)"
 
-step "Checking PostgreSQL server at $DB_HOST:$DB_PORT"
-if ! tcp_open "$DB_HOST" "$DB_PORT"; then
-  warn "PostgreSQL not reachable — attempting to install/start it."
-  have psql || have pg_ctl || ensure_tool psql postgres "PostgreSQL" || true
-  start_postgres
-  i=0; while [ "$i" -lt 20 ]; do tcp_open "$DB_HOST" "$DB_PORT" && break; sleep 1; i=$((i+1)); done
-  tcp_open "$DB_HOST" "$DB_PORT" || die "Could not reach PostgreSQL at $DB_HOST:$DB_PORT. Start it manually:
-  macOS:  brew services start postgresql
-  Linux:  sudo systemctl start postgresql"
-fi
-ok "PostgreSQL server is up"
+ok "database: SQLite file (backend/db/gavel.sqlite3) — created automatically, nothing to install"
 
 ###############################################################################
 # 2. Optional credentials (so the rest runs unattended)
@@ -231,91 +187,12 @@ step "Installing frontend Node deps"
 ok "frontend deps installed"
 
 ###############################################################################
-# 4. Databases (via psycopg2 from the backend venv — no psql CLI needed)
-###############################################################################
-# Try to connect + create both DBs as one of several candidate superusers.
-# Prints "OK <user> <maint>" or "AUTHFAIL". Homebrew makes your account the
-# superuser (no 'postgres' role), so we try that too.
-db_bootstrap() {
-  "$BACKEND_PY" - "$DB_HOST" "$DB_PORT" "$DB_USER" "$DB_PASSWORD" "$DB_MAINT" \
-                 "$BACKEND_DB" "$(id -un 2>/dev/null || echo '')" <<'PYEOF'
-import sys
-import psycopg2
-from psycopg2 import sql
-host, port, user, pw, maint, bdb, osuser = sys.argv[1:8]
-pw = pw or None
-cand_users  = [u for u in dict.fromkeys([user, osuser, "postgres"]) if u]
-cand_maints = [m for m in dict.fromkeys([maint, "postgres", "template1"]) if m]
-conn = used_u = used_m = None
-for u in cand_users:
-    for m in cand_maints:
-        try:
-            conn = psycopg2.connect(host=host, port=int(port), user=u, password=pw, dbname=m, connect_timeout=5)
-            used_u, used_m = u, m; break
-        except Exception:
-            conn = None
-    if conn: break
-if not conn:
-    print("AUTHFAIL"); sys.exit(0)
-conn.autocommit = True
-cur = conn.cursor()
-for db in (bdb,):
-    cur.execute("SELECT 1 FROM pg_database WHERE datname=%s", (db,))
-    if not cur.fetchone():
-        cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(db)))
-print("OK", used_u, used_m)
-PYEOF
-}
-
-# On a default Linux install no role can connect over TCP without a password.
-# Bootstrap one (matching your account) with a generated password, via the
-# 'postgres' OS account's peer auth. Sets DB_USER/DB_PASSWORD on success.
-linux_role_bootstrap() {
-  have psql && have sudo || return 1
-  local me genpw; me="$(id -un)"; genpw="$("$PY" -c 'import secrets;print(secrets.token_urlsafe(16))')"
-  local exists; exists="$($SUDO -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$me'" 2>/dev/null || true)"
-  if [ "$exists" = "1" ]; then
-    $SUDO -u postgres psql -c "ALTER ROLE \"$me\" WITH LOGIN SUPERUSER PASSWORD '$genpw'" >/dev/null 2>&1 || return 1
-  else
-    $SUDO -u postgres psql -c "CREATE ROLE \"$me\" WITH LOGIN SUPERUSER PASSWORD '$genpw'" >/dev/null 2>&1 || return 1
-  fi
-  DB_USER="$me"; DB_PASSWORD="$genpw"
-}
-
-# Reuse the DB password a previous run already saved (an explicit DB_PASSWORD
-# env var still wins, because we only fill it when empty).
-[ -z "$DB_PASSWORD" ] && DB_PASSWORD="$(get_env backend/.env DB_PASSWORD)"
-FILE_USER="$(get_env backend/.env DB_USER)"; [ -n "$FILE_USER" ] && DB_USER="$FILE_USER"
-
-step "Ensuring database ($BACKEND_DB) exists"
-RES="$(db_bootstrap)"
-if [ "${RES%% *}" = "AUTHFAIL" ]; then
-  if [ "$OS" = "linux" ] && linux_role_bootstrap; then
-    RES="$(db_bootstrap)"
-  fi
-fi
-if [ "${RES%% *}" = "AUTHFAIL" ] && [ -t 0 ]; then
-  printf "  %sPostgreSQL password for user '%s' (Enter if none): %s" "$C_DIM" "$DB_USER" "$C_OFF"
-  read -rs DB_PASSWORD; echo
-  RES="$(db_bootstrap)"
-fi
-case "$RES" in
-  OK\ *) set -- $RES; DB_USER="$2"; DB_MAINT="$3"; ok "databases ready (connected as '$DB_USER')" ;;
-  *)     die "Cannot authenticate to PostgreSQL at $DB_HOST:$DB_PORT. Set DB_PASSWORD and re-run, or check pg_hba.conf." ;;
-esac
-
-###############################################################################
-# 5. Environment file
+# 4. Environment file
 ###############################################################################
 step "Configuring environment files"
 [ -f backend/.env ]  || { cp backend/.env.example backend/.env; ok "created backend/.env"; }
 [ -f frontend/.env ] || { cp frontend/.env.example frontend/.env 2>/dev/null || :; }
 
-set_env backend/.env DB_HOST "$DB_HOST"
-set_env backend/.env DB_PORT "$DB_PORT"
-set_env backend/.env DB_USER "$DB_USER"
-set_env backend/.env DB_PASSWORD "$DB_PASSWORD"
-set_env backend/.env DB_NAME "$BACKEND_DB"
 set_env backend/.env ALLOWED_ORIGINS "http://localhost:${FRONTEND_PORT}"
 set_env backend/.env FRONTEND_URL "http://localhost:${FRONTEND_PORT}"
 set_env backend/.env OPENAI_API_KEY "$OPENAI_VAL"
@@ -327,7 +204,7 @@ set_env backend/.env OPENAI_API_KEY "$OPENAI_VAL"
 ok "environment configured"
 
 ###############################################################################
-# 6. Launch (backend → frontend), streaming logs; Ctrl+C stops all
+# 5. Launch (backend → frontend), streaming logs; Ctrl+C stops all
 ###############################################################################
 wait_http() { # url, label, max_seconds
   local url="$1" label="$2" max="${3:-60}" i=0

@@ -33,7 +33,7 @@ def _insert_draft_rule(name: str) -> int:
     Mirrors the pattern used by test_aux_datasets.py. `rules` is tracked by
     the integration conftest, so the row is removed on test teardown.
     """
-    from utils.PostgreSQL import execute_query_dict
+    from utils.sqlite_db import execute_query_dict
     rows = execute_query_dict(
         """
         INSERT INTO rules (name, predicate, description, categories, is_ready, public_id, is_local_draft)
@@ -48,7 +48,7 @@ def _insert_default_dataset(rule_id: int, dataset_type: str, status: str) -> int
     """Insert a default (is_default=TRUE, user_id NULL) test_datasets row in a
     given status, so we can drive the rolled-up status state machine without
     running generation. Tracked table -> auto-cleaned."""
-    from utils.PostgreSQL import execute_query_dict
+    from utils.sqlite_db import execute_query_dict
     rows = execute_query_dict(
         """
         INSERT INTO test_datasets
@@ -64,7 +64,7 @@ def _insert_default_dataset(rule_id: int, dataset_type: str, status: str) -> int
 def _insert_custom_dataset(rule_id: int, user_id: int, dataset_type: str,
                            scenario_name: str, status: str = "ready") -> int:
     """Insert a private custom test_datasets row owned by user_id."""
-    from utils.PostgreSQL import execute_query_dict
+    from utils.sqlite_db import execute_query_dict
     rows = execute_query_dict(
         """
         INSERT INTO test_datasets

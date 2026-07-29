@@ -4,7 +4,7 @@ are removed from HF. Covers routes.user._local_published_counts.
 """
 import time
 
-from utils.PostgreSQL import execute_query
+from utils.sqlite_db import execute_query
 from routes.user import _local_published_counts
 
 

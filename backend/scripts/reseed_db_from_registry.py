@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND_DIR))
 
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 from utils.DButils import drop_all_tables, init_database, normalize_and_upsert_categories
 from utils.embedding_utils import trigger_embedding
 
@@ -281,7 +281,7 @@ def main():
         )
         local_ce_id = upsert_ce_from_hf(ce_record)
         upsert_excitation_from_hf(local_ce_id, excitation)
-        # Trigger embedding + tsvector update for hybrid search.
+        # Trigger embedding for hybrid search (FTS index updates via triggers).
         try:
             trigger_embedding("ce", local_ce_id, ce_record["name"], ce_record.get("definition", ""))
         except Exception as e:

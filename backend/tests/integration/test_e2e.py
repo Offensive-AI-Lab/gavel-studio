@@ -1,44 +1,46 @@
-"""End-to-end tests: full user workflows from registration through evaluation."""
+"""End-to-end tests: full user workflows from first contact through evaluation."""
 import pytest
 import time
 
 
 class TestFullUserWorkflow:
-    """E2E: Register -> Create Model -> Create Classifier -> Add Rules -> Check Status."""
+    """E2E: Identify -> Create Model -> Create Classifier -> Add Rules -> Check Status."""
 
     def test_complete_setup_workflow(self, client):
-        """Test the entire setup flow a new user would follow."""
+        """Test the entire setup flow a new operator would follow.
+
+        There is no register/login anymore — the app serves one fixed local
+        user, so the flow starts at /user/me and every request is implicitly
+        that user (headers stay empty)."""
         suffix = int(time.time() * 1000) % 1000000
+        headers = {}
 
-        # 1. Register
-        reg_res = client.post("/user/register", json={
-            "username": f"e2e_user_{suffix}",
-            "email": f"e2e_{suffix}@test.com",
-            "password": "E2EPassword123!",
-        })
-        assert reg_res.status_code == 200, f"Registration failed: {reg_res.text}"
-        user_data = reg_res.json()
-        user_id = user_data["user_id"]
-
-        # Login to get token (register may not return one)
-        login_res = client.post("/user/login", json={"email": f"e2e_{suffix}@test.com", "password": "E2EPassword123!"})
-        token = login_res.json().get("token")
-        assert token, "Login did not return token"
-        headers = {"Authorization": f"Bearer {token}"}
-
-        # 2. Verify authenticated access
+        # 1. The local identity is available immediately — no registration.
         me_res = client.get("/user/me", headers=headers)
         assert me_res.status_code == 200
+        user_id = me_res.json()["user_id"]
 
-        # 3. Create model (using GPT-2 as a lightweight public model)
+        # 3. Create model (a lightweight public model). The session fixtures
+        # register the same HF repo, and a model source can only be registered
+        # once — on 409 reuse the already-registered model, which exercises the
+        # same "user has a usable model" outcome.
         model_res = client.post("/models/create", json={
             "user_id": user_id,
             "name": f"E2EModel_{suffix}",
             "storage_path": "HuggingFaceTB/SmolLM2-360M-Instruct",
         }, headers=headers)
-        assert model_res.status_code == 200, f"Model creation failed: {model_res.text}"
-        model_data = model_res.json()
-        model_id = model_data.get("model", model_data).get("model_id") or model_data.get("model_id")
+        assert model_res.status_code in (200, 409), f"Model creation failed: {model_res.text}"
+        if model_res.status_code == 200:
+            model_data = model_res.json()
+            model_id = model_data.get("model", model_data).get("model_id") or model_data.get("model_id")
+        else:
+            listing = client.get(f"/models/{user_id}", headers=headers)
+            assert listing.status_code == 200
+            listing_data = listing.json()
+            models_list = listing_data.get("models", listing_data) if isinstance(listing_data, dict) else listing_data
+            matches = [m for m in models_list if m.get("storage_path") == "HuggingFaceTB/SmolLM2-360M-Instruct"]
+            assert matches, "409 said the model exists but it is not in the listing"
+            model_id = matches[0]["model_id"]
 
         # 4. List models
         models_res = client.get(f"/models/{user_id}", headers=headers)
@@ -98,23 +100,23 @@ class TestCEWorkflow:
             assert res.status_code == 200
             ce_ids.append(res.json()["ce_id"])
 
-        # 2. These are LOCAL draft CEs (no public_id yet), so bookmarking them
-        #    is correctly rejected with 400 — bookmarks live on the central
-        #    server keyed by public_id, so an asset must be published first.
+        # 2. Bookmarks are local rows again (the central server is gone), so
+        #    bookmarking a DRAFT works — a draft has a perfectly good local id.
         for ce_id in ce_ids:
             bm_res = client.post("/cognitive/bookmark", json={
                 "user_id": uid,
                 "ce_id": ce_id,
             }, headers=auth_headers)
-            assert bm_res.status_code == 400
+            assert bm_res.status_code == 200
 
-        # 3. The bookmark-list endpoint still answers (proxies central server)
-        #    and returns a list shape regardless.
+        # 3. The bookmark list must now contain both drafts.
         bm_list = client.get(f"/cognitive/bookmarks/{uid}", headers=auth_headers)
         assert bm_list.status_code == 200
         bm_data = bm_list.json()
         bm_items = bm_data.get("bookmarks", bm_data) if isinstance(bm_data, dict) else bm_data
         assert isinstance(bm_items, list)
+        bookmarked_ids = {b.get("ce_id") for b in bm_items if isinstance(b, dict)}
+        assert set(ce_ids).issubset(bookmarked_ids)
 
         # 4. Search library
         search_res = client.get("/library/search", params={
@@ -139,8 +141,10 @@ class TestDashboard:
             assert isinstance(stats[key], int)
 
     def test_dashboard_nonexistent_user(self, client, auth_headers):
+        # Dashboard is strictly single-operator: any user_id other than the
+        # local user is rejected with 403.
         res = client.get("/dashboard/99999", headers=auth_headers)
-        assert res.status_code in (200, 404)
+        assert res.status_code == 403
 
 
 class TestLibrarySearch:

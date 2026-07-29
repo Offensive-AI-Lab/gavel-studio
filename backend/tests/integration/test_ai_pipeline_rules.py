@@ -21,7 +21,7 @@ cleans them up automatically. Names are uniquified per test to avoid 409s.
 import time
 
 import pytest
-from utils.PostgreSQL import execute_query_dict
+from utils.sqlite_db import execute_query_dict
 
 
 def _uniq(prefix: str) -> str:

@@ -1,4 +1,4 @@
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 from utils.embedding_utils import trigger_embedding
 from utils.DButils import normalize_and_upsert_categories
 
@@ -105,14 +105,16 @@ def get_user_ces():
     """
     query = """
         SELECT ce.ce_id, ce.name, ce.definition, ce.category,
-               (SELECT array_agg(c.name) FROM categories c WHERE c.category_id = ANY(ce.categories)) as categories,
+               (SELECT json_group_array(c.name) FROM categories c
+                WHERE c.category_id IN (SELECT value FROM json_each(ce.categories))
+               ) as "categories [JSONB]",
                ce.created_at,
                ce.is_local_draft,
                ce.created_by_username,
                ce.public_id,
                ce.examples,
                ed.dataset_id,
-               CASE WHEN ed.dataset_id IS NOT NULL THEN true ELSE false END as has_training_data
+               CASE WHEN ed.dataset_id IS NOT NULL THEN true ELSE false END as "has_training_data [BOOLEAN]"
         FROM cognitive_elements ce
         LEFT JOIN excitation_datasets ed ON ce.ce_id = ed.ce_id
         WHERE ce.is_ready = TRUE
@@ -241,14 +243,16 @@ def get_all_public_rules():
     """Fetches templates for the community browsing feature."""
     query = """
         SELECT
-            r.rule_id, r.name, r.predicate, r.description, r.type, r.created_at, r.embedding,
+            r.rule_id, r.name, r.predicate, r.description, r.type, r.created_at,
             r.is_local_draft,
             r.created_by_username,
             r.public_id,
-            (SELECT array_agg(c.name) FROM categories c WHERE c.category_id = ANY(r.categories)) as categories,
+            (SELECT json_group_array(c.name) FROM categories c
+             WHERE c.category_id IN (SELECT value FROM json_each(r.categories))
+            ) as "categories [JSONB]",
             COALESCE(
-                json_agg(
-                    json_build_object(
+                json_group_array(
+                    json_object(
                         'ce_id', ce.ce_id,
                         'name', ce.name,
                         'role', COALESCE(rl.role, 'necessary'),
@@ -256,8 +260,8 @@ def get_all_public_rules():
                     )
                 ) FILTER (WHERE ce.ce_id IS NOT NULL),
                 '[]'
-            ) as active_ces,
-            COALESCE(json_agg(ce.name) FILTER (WHERE ce.ce_id IS NOT NULL), '[]') as required_ces
+            ) as "active_ces [JSONB]",
+            COALESCE(json_group_array(ce.name) FILTER (WHERE ce.ce_id IS NOT NULL), '[]') as "required_ces [JSONB]"
         FROM rules r
         LEFT JOIN rule_ce_link rl ON r.rule_id = rl.rule_id
         LEFT JOIN cognitive_elements ce ON rl.ce_id = ce.ce_id
@@ -280,18 +284,27 @@ def get_all_public_rule_sets():
         SELECT
             rs.rule_set_id, rs.name, rs.description, rs.created_at,
             rs.is_local_draft, rs.created_by_username, rs.public_id,
-            (SELECT array_agg(c.name) FROM categories c WHERE c.category_id = ANY(rs.categories)) AS categories,
+            (SELECT json_group_array(c.name) FROM categories c
+             WHERE c.category_id IN (SELECT value FROM json_each(rs.categories))
+            ) AS "categories [JSONB]",
             COALESCE((
-                SELECT json_agg(json_build_object(
-                           'rule_id', r.rule_id,
-                           'name', r.name,
-                           'public_id', r.public_id,
-                           'position', rsm.position
-                       ) ORDER BY rsm.position)
-                FROM rule_set_member rsm
-                JOIN rules r ON r.rule_id = rsm.rule_id
-                WHERE rsm.rule_set_id = rs.rule_set_id
-            ), '[]') AS member_rules
+                -- Aggregate over a pre-ordered subquery: SQLite (< 3.44) has
+                -- no ORDER BY inside aggregates, and it feeds rows to the
+                -- aggregate in scan order, which the inner ORDER BY fixes.
+                SELECT json_group_array(json_object(
+                           'rule_id', m.rule_id,
+                           'name', m.name,
+                           'public_id', m.public_id,
+                           'position', m.position
+                       ))
+                FROM (
+                    SELECT r.rule_id, r.name, r.public_id, rsm.position
+                    FROM rule_set_member rsm
+                    JOIN rules r ON r.rule_id = rsm.rule_id
+                    WHERE rsm.rule_set_id = rs.rule_set_id
+                    ORDER BY rsm.position
+                ) m
+            ), '[]') AS "member_rules [JSONB]"
         FROM rule_sets rs
         WHERE rs.is_ready = TRUE AND rs.is_local_draft = FALSE
         ORDER BY rs.created_at DESC
@@ -307,7 +320,9 @@ def get_rule_set_detail(public_id: str):
         """
         SELECT rs.rule_set_id, rs.name, rs.description, rs.created_at,
                rs.is_local_draft, rs.created_by_username, rs.public_id,
-               (SELECT array_agg(c.name) FROM categories c WHERE c.category_id = ANY(rs.categories)) AS categories
+               (SELECT json_group_array(c.name) FROM categories c
+                WHERE c.category_id IN (SELECT value FROM json_each(rs.categories))
+               ) AS "categories [JSONB]"
         FROM rule_sets rs
         WHERE rs.public_id = %s AND rs.is_local_draft = FALSE
         """,
@@ -321,8 +336,8 @@ def get_rule_set_detail(public_id: str):
         SELECT rsm.position, r.rule_id, r.name, r.predicate, r.description,
                r.public_id, r.created_by_username,
                COALESCE(
-                   json_agg(
-                       json_build_object(
+                   json_group_array(
+                       json_object(
                            'ce_id', ce.ce_id,
                            'name', ce.name,
                            'role', COALESCE(rl.role, 'necessary'),
@@ -330,7 +345,7 @@ def get_rule_set_detail(public_id: str):
                        )
                    ) FILTER (WHERE ce.ce_id IS NOT NULL),
                    '[]'
-               ) AS active_ces
+               ) AS "active_ces [JSONB]"
         FROM rule_set_member rsm
         JOIN rules r ON r.rule_id = rsm.rule_id
         LEFT JOIN rule_ce_link rl ON rl.rule_id = r.rule_id

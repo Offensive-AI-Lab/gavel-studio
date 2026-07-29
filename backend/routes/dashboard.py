@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from sql_scripts.user_scripts import get_user_by_id
 from pydantic import BaseModel
 from typing import List, Dict
-from utils.PostgreSQL import execute_query_dict
+from utils.sqlite_db import execute_query_dict
 from utils.auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,7 @@ def get_dashboard_data(user_id: int, current_user: int = Depends(get_current_use
                  JOIN setup_ce_link scl ON rs2.setup_id = scl.setup_id
                  WHERE rs2.classifier_id = c.classifier_id) AS ce_count,
                 (SELECT MAX(er2.created_at) FROM evaluation_results er2
-                 WHERE er2.classifier_id = c.classifier_id) AS last_evaluation
+                 WHERE er2.classifier_id = c.classifier_id) AS "last_evaluation [TIMESTAMPTZ]"
             FROM classifiers c
             LEFT JOIN target_models tm ON c.model_id = tm.model_id
             WHERE c.user_id = %s

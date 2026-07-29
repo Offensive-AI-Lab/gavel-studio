@@ -220,7 +220,7 @@ def _resolve_model_token(model_name_or_path):
     if there's no DB (e.g. cluster context), no match, or any error — the
     load then proceeds anonymously (fine for public models)."""
     try:
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
         rows = execute_query_dict(
             "SELECT hf_token FROM target_models "
             "WHERE storage_path = %s AND hf_token IS NOT NULL LIMIT 1",

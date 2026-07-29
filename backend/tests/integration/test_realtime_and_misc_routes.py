@@ -364,9 +364,10 @@ class TestDashboard:
         assert isinstance(data["classifier_summary"], list)
         assert data["user_info"].get("username") == test_user["username"]
 
-    def test_dashboard_nonexistent_user_404(self, client):
+    def test_dashboard_nonexistent_user_403(self, client):
+        # Single-operator app: any user_id other than the local user is 403.
         res = client.get("/dashboard/99999999")
-        assert res.status_code == 404
+        assert res.status_code == 403
 
     def test_dashboard_non_integer_user_id_422(self, client):
         """user_id path param is typed int -> 422 for a non-numeric value."""

@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from typing import List
 from utils.auth import get_current_user
-from utils.PostgreSQL import execute_query_dict
+from utils.sqlite_db import execute_query_dict
 from sql_scripts.definition_scripts import (
     get_user_ces,
     create_ce,

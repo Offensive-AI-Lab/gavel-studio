@@ -23,7 +23,7 @@ from sql_scripts.junction_scripts import (
     compute_rule_fingerprint_from_links,
     find_existing_rule_by_fingerprint,
 )
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 from utils.text_safety import clean_text
 
 # Same BookmarkService used by routes/cognitive.py — see services/bookmarks.py.
@@ -276,19 +276,19 @@ def check_rule_duplicate(req: CheckDuplicateRequest):
             """
             SELECT rs.setup_id, rs.custom_name,
                    COALESCE(
-                       json_agg(
-                           json_build_object(
+                       json_group_array(
+                           json_object(
                                'ce_id', scl.ce_id,
                                'role', scl.role,
                                'fallback_group', scl.fallback_group
                            )
                        ) FILTER (WHERE scl.ce_id IS NOT NULL),
-                       '[]'::json
-                   ) AS links
+                       '[]'
+                   ) AS "links [JSONB]"
             FROM rule_setup rs
             LEFT JOIN setup_ce_link scl ON scl.setup_id = rs.setup_id
             WHERE rs.classifier_id = %s
-              AND (%s::int IS NULL OR rs.setup_id <> %s::int)
+              AND (%s IS NULL OR rs.setup_id <> %s)
             GROUP BY rs.setup_id, rs.custom_name
             """,
             (req.classifier_id, req.exclude_setup_id, req.exclude_setup_id),

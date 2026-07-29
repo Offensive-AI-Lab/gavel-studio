@@ -81,7 +81,7 @@ class StuckTrainingRecovery(RecoveryStrategy):
     safe_before_warmup = True
 
     def run(self) -> None:
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
 
         # Join target_models for user_id so the on-disk workdir
         # (trained_classifiers/<user_id>/classifier_<id>/) is locatable WITHOUT
@@ -150,7 +150,7 @@ class StuckTestGenerationRecovery(RecoveryStrategy):
     safe_before_warmup = True  # DB-only; clears a phantom "Generating…" marker
 
     def run(self) -> None:
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
 
         stuck = execute_query_dict(
             "SELECT dataset_id FROM test_datasets WHERE status = 'generating'"
@@ -184,7 +184,7 @@ class StuckEvaluationRecovery(RecoveryStrategy):
     safe_before_warmup = True  # DB-only (+ light cluster_direct); clears phantom "Running…"
 
     def run(self) -> None:
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
 
         stuck = execute_query_dict(
             "SELECT eval_id, classifier_id, eval_type, plots FROM evaluation_results "
@@ -248,7 +248,7 @@ class IncompletePipelineRecovery(RecoveryStrategy):
     safe_before_warmup = True
 
     def run(self) -> None:
-        from utils.PostgreSQL import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query, execute_query_dict
 
         ce_rows = execute_query_dict(
             "SELECT ce_id, name FROM cognitive_elements WHERE is_ready = FALSE"
@@ -303,7 +303,7 @@ class OrphanedClassifierDirRecovery(RecoveryStrategy):
     name = "orphan-cleanup"
 
     def run(self) -> None:
-        from utils.PostgreSQL import execute_query_dict
+        from utils.sqlite_db import execute_query_dict
 
         if not os.path.isdir(TRAINED_MODELS_DIR):
             return

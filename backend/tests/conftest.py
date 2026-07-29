@@ -9,5 +9,5 @@ import os
 import sys
 
 # Ensure backend/ root is on sys.path so `from main import app`,
-# `from utils.PostgreSQL import ...` etc. resolve correctly.
+# `from utils.sqlite_db import ...` etc. resolve correctly.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

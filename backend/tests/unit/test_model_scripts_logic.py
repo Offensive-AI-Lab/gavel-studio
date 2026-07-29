@@ -4,7 +4,7 @@
 NO database or network is available in this environment, so every DB seam is
 monkeypatched. `execute_query` / `execute_query_dict` are imported INTO
 `model_scripts` at module load time, so we patch them on the `model_scripts`
-module namespace (NOT on `utils.PostgreSQL`). The draft-creation path imports
+module namespace (NOT on `utils.sqlite_db`). The draft-creation path imports
 `upsert_rule_with_links` at call time from `gavel_pipeline.db_access`, so we
 patch it there.
 

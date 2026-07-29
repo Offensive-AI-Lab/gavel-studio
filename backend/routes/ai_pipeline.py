@@ -42,7 +42,7 @@ from sql_scripts.definition_scripts import (
     create_ce, get_excitation_dataset, save_excitation_dataset,
     get_calibration_dataset, save_calibration_dataset,
 )
-from utils.PostgreSQL import execute_query, execute_query_dict
+from utils.sqlite_db import execute_query, execute_query_dict
 from utils.embedding_utils import trigger_embedding
 from utils.auth import get_current_user
 from utils.ownership import require_classifier_owner
@@ -687,29 +687,23 @@ async def discard_pipeline_resources(req: DiscardPipelineRequest):
                 skipped += 1
 
         # CEs: filter to ids whose row is_local_draft=TRUE before deleting.
+        # `= ANY(%s)` takes a Python list and covers the 1-id and N-id cases
+        # uniformly (the old psycopg2 `IN %s` tuple idiom is not portable, and
+        # its single-id branch was missing the `=` operator entirely).
         if req.ce_ids:
-            ids_tuple = tuple(req.ce_ids)
-            placeholder = "%s" if len(ids_tuple) == 1 else "IN %s"
-            params = (ids_tuple[0],) if len(ids_tuple) == 1 else (ids_tuple,)
             draft_rows = execute_query_dict(
-                f"SELECT ce_id FROM cognitive_elements WHERE ce_id {placeholder} AND is_local_draft = TRUE",
-                params,
+                "SELECT ce_id FROM cognitive_elements "
+                "WHERE ce_id = ANY(%s) AND is_local_draft = TRUE",
+                (list(req.ce_ids),),
             ) or []
             draft_ids = [r["ce_id"] for r in draft_rows]
             skipped += len(req.ce_ids) - len(draft_ids)
 
             if draft_ids:
-                draft_tuple = tuple(draft_ids)
-                if len(draft_tuple) == 1:
-                    execute_query(
-                        "DELETE FROM cognitive_elements WHERE ce_id = %s",
-                        (draft_tuple[0],),
-                    )
-                else:
-                    execute_query(
-                        "DELETE FROM cognitive_elements WHERE ce_id IN %s",
-                        (draft_tuple,),
-                    )
+                execute_query(
+                    "DELETE FROM cognitive_elements WHERE ce_id = ANY(%s)",
+                    (draft_ids,),
+                )
                 deleted_ces = len(draft_ids)
 
         return {
@@ -2104,8 +2098,8 @@ def preview_rule_test_sets(rule_id: int, user_id: int = Depends(get_current_user
     # Custom — counts + one sample dialogue per bucket, grouped by scenario_name.
     custom_rows = execute_query_dict(
         """SELECT dataset_id, dataset_type, status, scenario_name,
-                  COALESCE(jsonb_array_length(conversations), 0) AS count,
-                  (conversations -> 0) AS sample
+                  COALESCE(json_array_length(conversations), 0) AS count,
+                  (conversations -> 0) AS "sample [JSONB]"
            FROM test_datasets
            WHERE rule_id = %s AND is_default = FALSE AND user_id = %s
            ORDER BY created_at DESC""",
@@ -2655,7 +2649,7 @@ async def get_test_set_status(dataset_id: int):
     conv_count = 0
     if row.get("status") == "ready":
         count_result = execute_query_dict(
-            "SELECT jsonb_array_length(conversations) as count FROM test_datasets WHERE dataset_id = %s",
+            "SELECT json_array_length(conversations) as count FROM test_datasets WHERE dataset_id = %s",
             (dataset_id,),
         )
         conv_count = count_result[0]["count"] if count_result else 0
