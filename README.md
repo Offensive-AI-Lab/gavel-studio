@@ -12,7 +12,7 @@ GAVEL Studio Beta is an interactive web platform for building intent-aware, rule
 
 Rather than relying on surface-text moderation, GAVEL Studio works at the activation level. The platform brings the full GAVEL workflow into one UI: rule design, CE generation, classifier training, live monitoring, and access to a public registry of reusable rules and Cognitive Elements.
 
-- **Backend:** FastAPI + SQLite (a single file at `backend/db/gavel.sqlite3` — no database server)
+- **Backend:** FastAPI + SQLite (all data lives in a single file at `backend/db/gavel.sqlite3`)
 - **Frontend:** React 19 + Vite
 - **Public registry:** the [gavel-rules](https://github.com/Offensive-AI-Lab/gavel-rules) GitHub repository (rules + CEs), read-synced into the app; contributions go by pull request
 
@@ -127,10 +127,10 @@ GITHUB_TOKEN=
 
 **There are no database settings.** The backend stores everything in
 `backend/db/gavel.sqlite3` (override the path with `DB_PATH` if you want it
-elsewhere). No host, no credentials, no server to run.
+elsewhere).
 
-The frontend's `VITE_API_URL` already defaults to `http://localhost:8000`,
-so no separate `frontend/.env` is needed for the Docker workflow.
+No separate `frontend/.env` is needed — the frontend reaches the backend
+automatically in both the Docker and native workflows.
 
 ---
 
@@ -228,8 +228,8 @@ you and your code), you can run everything natively. You'll need:
 | Python      | 3.12+    |
 | Node.js     | 20+      |
 
-No database server — the backend creates `backend/db/gavel.sqlite3` on first
-boot.
+The backend keeps all its data in a single SQLite file,
+`backend/db/gavel.sqlite3`, created automatically on first boot.
 
 ```bash
 # Backend natively
@@ -335,7 +335,7 @@ Software Design and Development
 We thank everyone who has contributed code, bug reports, testing, documentation, and feature suggestions.
 
 ---
-## 9. Acknowledgment
+## 10. Acknowledgment
 
 This work was funded by the European Union, supported by ERC grant: (AGI-Safety, 101222135).
 Views and opinions expressed are however those of the author(s) only and do not necessarily reflect
