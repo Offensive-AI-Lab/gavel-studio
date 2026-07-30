@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { FiChevronDown, FiChevronUp, FiPlus, FiMinus, FiUpload, FiTrash2, FiFileText } from 'react-icons/fi';
+import { prettyName } from '../../utils/ruleLogic';
 import './CognitiveElementCard.css';
 
 const CognitiveElementCard = ({
@@ -11,18 +12,11 @@ const CognitiveElementCard = ({
     onBookmark,
     isBookmarked,
     bookmarkLabel,
-    onPublish,
     onDelete,
 }) => {
-    // CE is publishable when it's still a local draft. Symmetric with the
-    // RuleCard publish button so AI-pipeline-created CEs no longer auto-push
-    // and the user gets to choose when to share.
-    const canPublish = ce?.is_local_draft === true && typeof onPublish === 'function';
-    // In-flight guard: disable Publish while a publish is running so a
-    // double/rage-click can't fire two concurrent publishes for the same draft
-    // (the second would race the first's HF commit). onPublish returns a
-    // promise; we await it and re-enable in finally.
-    const [publishing, setPublishing] = React.useState(false);
+    // Drafts show a DISABLED Publish button: publishing from Studio is gone —
+    // library contributions now go through gavel-rules pull requests.
+    const isDraftCe = ce?.is_local_draft === true;
     // The definition can be long and the header only shows a one-line preview
     // (clamped next to the action buttons), so the full text lives in the
     // expanded body — mirroring RuleCard's "What this rule detects" block, with
@@ -30,23 +24,40 @@ const CognitiveElementCard = ({
     const [defExpanded, setDefExpanded] = React.useState(false);
     const definition = (ce?.definition || '').trim();
     const defIsLong = definition.length > 180;
-    const handlePublishClick = async () => {
-        if (publishing) return;
-        setPublishing(true);
-        try { await onPublish(ce); }
-        finally { setPublishing(false); }
-    };
     // Show the delete affordance only when the caller wires it up (currently
     // the Drafts page). Keeps Browse / Bookmarks untouched.
     const canDelete = typeof onDelete === 'function';
+    // v2 CEs carry a closed-enum role (directive_to_user / llm_task /
+    // llm_behavior / topic) — the primary badge — plus an optional human
+    // title (display name) and free-form tags.
+    const role = (ce?.role || '').trim();
+    const displayName = (ce?.title || '').trim() || ce?.name;
+    const tags = Array.isArray(ce?.tags) ? ce.tags.filter(Boolean) : [];
     return (
         <div className={`ce-card ${isOpen ? 'expanded' : ''}`}>
             <div className="ce-header" onClick={() => onToggle(ce.ce_id)}>
                 <div className="ce-info">
                     <div className="ce-icon">CE</div>
                     <div className="ce-title">
-                        <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            {ce.name}
+                        <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }} title={ce.name}>
+                            {displayName}
+                            {role && (
+                                // Primary badge: the CE's v2 role (closed enum,
+                                // underscores pretty-printed for display).
+                                <span className="ce-role-pill" style={{
+                                    fontSize: '0.65rem',
+                                    fontWeight: 800,
+                                    textTransform: 'uppercase',
+                                    letterSpacing: '0.05em',
+                                    padding: '3px 10px',
+                                    borderRadius: '999px',
+                                    color: '#c7d2fe',
+                                    background: 'rgba(99, 102, 241, 0.18)',
+                                    border: '1px solid rgba(129, 140, 248, 0.40)',
+                                }}>
+                                    {prettyName(role)}
+                                </span>
+                            )}
                             {typeof ce.is_local_draft === 'boolean' && (
                                 // Match RuleCard's badge style — see RuleCard.jsx
                                 // for design rationale.
@@ -83,6 +94,17 @@ const CognitiveElementCard = ({
                                     ))}
                                 </div>
                             )}
+                            {tags.length > 0 && (
+                                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                                    {tags.map((t) => (
+                                        <span key={t} style={{
+                                            fontSize: '0.72rem', padding: '2px 8px', borderRadius: '999px',
+                                            color: '#94a3b8', background: 'rgba(148, 163, 184, 0.10)',
+                                            border: '1px solid rgba(148, 163, 184, 0.24)',
+                                        }}>#{t}</span>
+                                    ))}
+                                </div>
+                            )}
                             {/* Author link. Only renders for CEs that flow
                               * through the publish pipeline (created_by_username
                               * is populated). Drafts and legacy rows without an
@@ -116,16 +138,15 @@ const CognitiveElementCard = ({
                             {bookmarkLabel || (isBookmarked ? 'Remove' : 'Save')}
                         </button>
                     )}
-                    {canPublish && (
+                    {isDraftCe && (
                         <button
                             className="bookmark-btn publish-btn"
-                            onClick={handlePublishClick}
-                            disabled={publishing}
-                            aria-label="Publish CE to library"
-                            title="Push this draft to the public registry"
+                            disabled
+                            aria-label="Publish CE to library (coming soon)"
+                            title="Library contributions move to gavel-rules pull requests — submission from Studio coming soon"
                         >
                             <FiUpload />
-                            {publishing ? 'Publishing…' : 'Publish'}
+                            Publish
                         </button>
                     )}
                     {canDelete && (

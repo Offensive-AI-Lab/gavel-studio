@@ -139,8 +139,8 @@ export default function Step2ARule({ run, classifierId, onPatchStep, setRun, onA
                 <div style={card}>
                     <p style={{ marginTop: 0, color: '#cbd5e1' }}>
                         The reasoning model will analyze your scenario, propose a rule
-                        (necessary + any-of + supporting CEs), and identify any new CEs
-                        that need to be created.
+                        (named CE groups + a firing condition over them), and identify
+                        any new CEs that need to be created.
                     </p>
                     <button onClick={generate} disabled={generating} style={primaryBtn}>
                         {generating ? <><FiCpu /> Generating…</> : <><FiPlay /> Generate Rule</>}
@@ -178,21 +178,27 @@ export default function Step2ARule({ run, classifierId, onPatchStep, setRun, onA
                             </>
                         )}
 
-                        <div style={{ marginTop: 10, ...muted, fontSize: 12 }}>Predicate</div>
-                        <pre style={preStyle}>{proposal.predicate}</pre>
-
-                        <div style={{ marginTop: 12, ...muted, fontSize: 12 }}>CE Roles</div>
-                        <div style={{ display: 'grid', gap: 6 }}>
-                            {(proposal.necessary || []).length > 0 && (
-                                <div><strong>Necessary:</strong> {proposal.necessary.join(', ')}</div>
-                            )}
-                            {(proposal.fallback || []).map((group, gi) => (
-                                <div key={gi}><strong>Any of G{gi + 1}:</strong> {group.join(' OR ')}</div>
-                            ))}
-                            {(proposal.sufficient || []).length > 0 && (
-                                <div><strong>Supporting:</strong> {proposal.sufficient.join(', ')}</div>
-                            )}
-                        </div>
+                        {(proposal.groups && Object.keys(proposal.groups).length > 0) ? (
+                            <>
+                                <div style={{ marginTop: 12, ...muted, fontSize: 12 }}>CE Groups</div>
+                                <div style={{ display: 'grid', gap: 6 }}>
+                                    {Object.entries(proposal.groups).map(([gname, members]) => (
+                                        <div key={gname}>
+                                            <strong style={{ fontFamily: 'monospace' }}>{gname}:</strong>{' '}
+                                            {(members || []).join(', ')}
+                                        </div>
+                                    ))}
+                                </div>
+                                <div style={{ marginTop: 10, ...muted, fontSize: 12 }}>Firing condition</div>
+                                <pre style={preStyle}>{proposal.condition || proposal.predicate}</pre>
+                            </>
+                        ) : (
+                            <>
+                                {/* Fallback for older responses without groups */}
+                                <div style={{ marginTop: 10, ...muted, fontSize: 12 }}>Predicate</div>
+                                <pre style={preStyle}>{proposal.predicate}</pre>
+                            </>
+                        )}
                     </div>
 
                     {(proposal.new_ces || []).length > 0 && (

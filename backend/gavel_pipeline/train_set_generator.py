@@ -91,7 +91,7 @@ def load_reference_examples():
     # Best-effort prefetch — never block the cache build on HF problems.
     try:
         from utils.sqlite_db import execute_query_dict
-        from services.hf_sync import ensure_excitation
+        from services.library_sync import ensure_excitation
         from concurrent.futures import ThreadPoolExecutor
 
         # Cap so a registry with thousands of CEs doesn't pay every

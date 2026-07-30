@@ -44,15 +44,19 @@ const runWithScenario = (overrides = {}) => {
     };
 };
 
-// A complete proposal payload as returned by generateGavelPipeline.
+// A complete proposal payload as returned by generateGavelPipeline
+// (v2 shape: named CE groups + a firing condition over them).
 const fullProposal = {
     rule_id: 55,
     name: 'My Rule',
     predicate: 'A AND B',
     categories: ['Safety', 'Harm'],
-    necessary: ['ce_nec'],
-    fallback: [['ce_f1', 'ce_f2'], ['ce_f3']],
-    sufficient: ['ce_suf'],
+    groups: {
+        required: ['ce_nec'],
+        option_1: ['ce_f1', 'ce_f2'],
+        supporting: ['ce_suf'],
+    },
+    condition: 'all of required and 1 of option_1',
     new_ces: [
         { ce_id: 1, ce_name: 'New CE One', definition: 'def one' },
         { ce_id: 2, ce_name: 'New CE Two', definition: 'def two' },
@@ -318,30 +322,30 @@ describe('Step2ARule — generate error handling', () => {
 });
 
 describe('Step2ARule — proposal rendering variants', () => {
-    it('renders name, predicate, categories, all CE roles, and new CEs', () => {
+    it('renders name, groups, condition, categories, and new CEs', () => {
         const run = runWithScenario({
             steps: { '2A': { status: 'completed', data: { proposal: fullProposal } } },
         });
         renderStep({ run });
 
         expect(screen.getByText('My Rule')).toBeInTheDocument();
-        expect(screen.getByText('A AND B')).toBeInTheDocument();
         expect(screen.getByText('Safety')).toBeInTheDocument();
         expect(screen.getByText('Harm')).toBeInTheDocument();
-        // CE roles.
-        expect(screen.getByText('Necessary:')).toBeInTheDocument();
+        // CE groups by name + members.
+        expect(screen.getByText('required:')).toBeInTheDocument();
         expect(screen.getByText(/ce_nec/)).toBeInTheDocument();
-        expect(screen.getByText('Any of G1:')).toBeInTheDocument();
-        expect(screen.getByText(/ce_f1 OR ce_f2/)).toBeInTheDocument();
-        expect(screen.getByText('Any of G2:')).toBeInTheDocument();
-        expect(screen.getByText('Supporting:')).toBeInTheDocument();
+        expect(screen.getByText('option_1:')).toBeInTheDocument();
+        expect(screen.getByText(/ce_f1, ce_f2/)).toBeInTheDocument();
+        expect(screen.getByText('supporting:')).toBeInTheDocument();
+        // Condition verbatim.
+        expect(screen.getByText('all of required and 1 of option_1')).toBeInTheDocument();
         // New CEs.
         expect(screen.getByText('New Cognitive Elements (2)')).toBeInTheDocument();
         expect(screen.getByText('New CE One')).toBeInTheDocument();
         expect(screen.getByText('def two')).toBeInTheDocument();
     });
 
-    it('omits role rows and category pills when those arrays are empty/absent', () => {
+    it('falls back to the predicate when the proposal has no groups', () => {
         const minimal = {
             rule_id: 9,
             name: 'Minimal',
@@ -354,9 +358,8 @@ describe('Step2ARule — proposal rendering variants', () => {
         renderStep({ run });
 
         expect(screen.getByText('Minimal')).toBeInTheDocument();
-        expect(screen.queryByText('Necessary:')).not.toBeInTheDocument();
-        expect(screen.queryByText('Sufficient:')).not.toBeInTheDocument();
-        expect(screen.queryByText(/Fallback G/)).not.toBeInTheDocument();
+        expect(screen.getByText('X')).toBeInTheDocument();
+        expect(screen.queryByText('CE Groups')).not.toBeInTheDocument();
         // Empty new_ces => no "New Cognitive Elements" header.
         expect(screen.queryByText(/New Cognitive Elements/)).not.toBeInTheDocument();
     });

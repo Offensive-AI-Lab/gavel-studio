@@ -846,7 +846,7 @@ def start_training(
 
     # Lazy-load any HF-synced CE excitations that aren't cached locally yet.
     try:
-        from services.hf_sync import ensure_excitations_for_classifier
+        from services.library_sync import ensure_excitations_for_classifier
         ensure_excitations_for_classifier(classifier_id)
     except Exception as lazy_err:
         print(f"[train] lazy excitation prefetch failed: {lazy_err}")
@@ -1001,7 +1001,7 @@ def download_classifier(classifier_id: int, _: int = Depends(get_current_user)):
 
 
 # ---------------------------------------------------------------------------
-# Guardrail bundle: export (preflight → publish policy → download) + import
+# Guardrail bundle: export (preflight → build → download) + import
 # ---------------------------------------------------------------------------
 
 @router.get("/{classifier_id}/export/preflight", dependencies=[Depends(require_classifier_owner)])
@@ -1010,7 +1010,8 @@ def export_preflight(classifier_id: int, _: int = Depends(get_current_user)):
 
     The UI uses this to decide whether to show the Export button (only when the
     guardrail is trained AND its policy hasn't drifted), which tiers are
-    offerable, and which draft rules still need publishing first.
+    offerable, and which policy rules aren't in the public library yet (those
+    need a gavel-rules pull request + re-sync — there is no in-studio publish).
     """
     from services import classifier_bundle
     try:
@@ -1039,10 +1040,10 @@ def export_start(
 ):
     """Kick off an export as a background job and return its job_id immediately.
 
-    The job publishes any draft rules in the policy (the user approved this by
-    starting the export), then builds the bundle. It survives the user closing
-    the modal — only a backend crash ends it. Poll GET /classifiers/bundle-jobs/
-    {job_id}; download from .../download when status is 'done'.
+    The whole policy must already be in the public library (see preflight);
+    the job just builds the bundle. It survives the user closing the modal —
+    only a backend crash ends it. Poll GET /classifiers/bundle-jobs/{job_id};
+    download from .../download when status is 'done'.
     """
     from services import classifier_bundle, bundle_jobs
     try:

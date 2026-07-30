@@ -7,10 +7,10 @@
 // and "Add CE to Rule" modals, per-rule delete, CE add/remove, predicate
 // edit/save (fork vs in-place), training trigger and download.
 //
-// We mock the network (../api), the CE-removal service, the publish
-// service, the confirm-dialog helpers, sweetalert2 and the Sidebar (which
-// Layout renders and which has its own fetches). predicateLogic is a pure
-// util, left real. Router useNavigate/useParams come from a real
+// We mock the network (../api), the CE-removal service,
+// the confirm-dialog helpers, sweetalert2 and the Sidebar (which
+// Layout renders and which has its own fetches).
+// Router useNavigate/useParams come from a real
 // MemoryRouter route so classifierId reads a value.
 
 import React from 'react';
@@ -58,8 +58,6 @@ vi.mock('../../src/services/CEService', () => ({
     }),
 }));
 
-// ---- publish service ----
-vi.mock('../../src/services/RuleService', () => ({ publishDraftRule: vi.fn(() => Promise.resolve()) }));
 
 // ---- confirm dialog helpers, controllable per test ----
 const mockConfirm = vi.fn(() => Promise.resolve(true));
@@ -79,7 +77,6 @@ vi.mock('../../src/components/Sidebar/Sidebar', () => ({ default: () => <aside d
 import RulesManager from '../../src/pages/RulesManager';
 import * as api from '../../src/api';
 import * as CEService from '../../src/services/CEService';
-import * as RuleService from '../../src/services/RuleService';
 
 const setUser = () => {
     sessionStorage.setItem('token', 'tok');
@@ -97,6 +94,10 @@ const renderPage = (classifierId = '5') =>
         </TutorialProvider>,
     );
 
+// Mirrors a get_classifier_rules row: v2 logic nested under `logic`
+// ({groups: {gname: [{ce_id, name}]}, condition, predicate}) plus a flat
+// membership-only `active_ces` list ([{ce_id, name}] — no roles). The base
+// fixture is a legacy row (empty groups → predicate-string display).
 const ruleFixture = (over = {}) => ({
     setup_id: 1,
     rule_id: 100,
@@ -104,9 +105,10 @@ const ruleFixture = (over = {}) => ({
     custom_name: 'Rule Alpha',
     predicate: 'A AND B',
     is_local_draft: true,
+    logic: { groups: {}, condition: '', predicate: 'A AND B' },
     active_ces: [
-        { ce_id: 11, name: 'CE One', role: 'necessary', fallback_group: 0 },
-        { ce_id: 12, name: 'CE Two', role: 'sufficient', fallback_group: 0 },
+        { ce_id: 11, name: 'CE One' },
+        { ce_id: 12, name: 'CE Two' },
     ],
     ...over,
 });
@@ -521,13 +523,71 @@ describe('RulesManager — delete rule', () => {
 });
 
 describe('RulesManager — publish & test-set entry points', () => {
-    it('publishes a draft rule via RuleService.publishDraftRule', async () => {
+    it('shows a DISABLED Publish button on a draft rule (PR-based contributions)', async () => {
         api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture({ is_local_draft: true })] } });
         renderPage();
         await screen.findByText('Rule Alpha');
-        fireEvent.click(screen.getByRole('button', { name: 'Publish rule to library' }));
-        expect(RuleService.publishDraftRule).toHaveBeenCalledTimes(1);
-        expect(RuleService.publishDraftRule.mock.calls[0][1]).toBe(7);
+        const btn = screen.getByRole('button', { name: 'Publish rule to library (coming soon)' });
+        expect(btn).toBeDisabled();
+        expect(btn).toHaveAttribute('title', expect.stringContaining('gavel-rules pull requests'));
+    });
+
+    it('opens the in-place logic editor (groups + condition) and saves via saveEditedRule', async () => {
+        api.getClassifierRules.mockResolvedValue({
+            data: {
+                rules: [ruleFixture({
+                    logic: {
+                        groups: { required: [{ ce_id: 11, name: 'CE One' }, { ce_id: 12, name: 'CE Two' }] },
+                        condition: 'all of required',
+                        predicate: 'CE One AND CE Two',
+                    },
+                })],
+            },
+        });
+        renderPage();
+        await screen.findByText('Rule Alpha');
+        fireEvent.click(screen.getByRole('button', { name: "Edit this rule's groups and condition in place" }));
+        // Modal shows the group editor prefilled with the rule's condition.
+        const conditionInput = await screen.findByLabelText('Firing condition');
+        expect(conditionInput).toHaveValue('all of required');
+        fireEvent.change(conditionInput, { target: { value: '1 of required' } });
+        fireEvent.click(screen.getByRole('button', { name: /Save logic/ }));
+        await waitFor(() => expect(api.saveEditedRule).toHaveBeenCalledTimes(1));
+        expect(api.saveEditedRule).toHaveBeenCalledWith(1, {
+            groups: { required: [11, 12] },
+            condition: '1 of required',
+            new_name: null,
+        });
+        // Duplicate probe ran against the same shape, excluding this setup.
+        expect(api.checkRuleDuplicate).toHaveBeenCalledWith({
+            groups: { required: [11, 12] },
+            condition: '1 of required',
+            classifier_id: 5,
+            exclude_setup_id: 1,
+        });
+    });
+
+    it('surfaces the backend 409 detail when saving edited logic fails', async () => {
+        api.getClassifierRules.mockResolvedValue({
+            data: {
+                rules: [ruleFixture({
+                    logic: {
+                        groups: { required: [{ ce_id: 11, name: 'CE One' }] },
+                        condition: 'all of required',
+                        predicate: 'CE One',
+                    },
+                })],
+            },
+        });
+        api.saveEditedRule.mockRejectedValue({ response: { data: { detail: 'name already taken' } } });
+        renderPage();
+        await screen.findByText('Rule Alpha');
+        fireEvent.click(screen.getByRole('button', { name: "Edit this rule's groups and condition in place" }));
+        await screen.findByLabelText('Firing condition');
+        fireEvent.click(screen.getByRole('button', { name: /Save logic/ }));
+        await waitFor(() => expect(mockAlert).toHaveBeenCalledWith(expect.objectContaining({
+            message: 'name already taken',
+        })));
     });
 
     it('navigates to the rule page for test-set generation using source_rule_id', async () => {

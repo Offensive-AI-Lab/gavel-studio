@@ -1,4 +1,3 @@
-import collections
 import json
 from typing import Dict, List
 
@@ -63,7 +62,7 @@ def fetch_reference_datasets() -> Dict[str, List]:
                 pass
 
         # Unwrap the {"samples": [...], "sample_count": N} envelope that
-        # services/hf_sync._upsert_excitation writes for HF-pulled CEs.
+        # services/library_sync.ensure_excitation writes for registry-pulled CEs.
         # load_reference_examples expects a flat list of conversations and
         # would otherwise raise KeyError(0) on every synced CE — visible as
         # the "Could not processing reference dataset for X: 0" warnings.
@@ -103,76 +102,30 @@ def fetch_ces_dict() -> Dict[str, dict]:
 
 
 def fetch_rules_dict() -> Dict[str, dict]:
-    """Return rules dict shaped like legacy JSON: {name: {necessary, fallback, sufficient, predicate}}.
+    """Return rules keyed by name, each with its v2 logic straight from the
+    rules columns: {name: {ce_groups, condition, predicate, description}}.
 
-    Skips is_ready=FALSE rows for the same reason fetch_ces_dict does.
+    ce_groups is {group_name: [CE names]} and condition is the v2 grammar
+    string over those group names (utils/rule_condition.py); predicate is the
+    derived display string. Skips is_ready=FALSE rows for the same reason
+    fetch_ces_dict does.
     """
     rule_rows = execute_query_dict(
         """
-        SELECT rule_id, name, predicate
+        SELECT name, ce_groups, condition, predicate, description
         FROM rules
         WHERE is_ready = TRUE
         ORDER BY name
         """
     ) or []
-    if not rule_rows:
-        return {}
 
-    link_rows = execute_query_dict(
-        """
-        SELECT r.rule_id,
-               r.name AS rule_name,
-               ce.name AS ce_name,
-               link.role,
-               link.fallback_group
-        FROM rule_ce_link link
-        JOIN rules r ON r.rule_id = link.rule_id
-        JOIN cognitive_elements ce ON ce.ce_id = link.ce_id
-        ORDER BY r.rule_id, link.role, link.fallback_group, ce.name
-        """
-    ) or []
-
-    rules: Dict[int, dict] = {row["rule_id"]: {
-        "name": row["name"], 
-        "predicate": row.get("predicate", ""),
-        "necessary": [], 
-        "fallback": [], 
-        "sufficient": []
-    } for row in rule_rows}
-
-    fallback_groups: Dict[int, Dict[int, List[str]]] = collections.defaultdict(lambda: collections.defaultdict(list))
-
-    for row in link_rows:
-        rid = row["rule_id"]
-        ce_name = row["ce_name"]
-        role = row.get("role", "necessary")
-        group = row.get("fallback_group", 0) or 0
-
-        if rid not in rules:
-            continue
-
-        if role == "necessary":
-            rules[rid]["necessary"].append(ce_name)
-        elif role == "sufficient":
-            rules[rid]["sufficient"].append(ce_name)
-        elif role == "fallback":
-            fallback_groups[rid][group].append(ce_name)
-
-    # materialize fallback groups ordered by group id
-    for rid, groups in fallback_groups.items():
-        ordered = []
-        for gid in sorted(groups.keys()):
-            ordered.append(groups[gid])
-        rules[rid]["fallback"] = ordered
-
-    # convert to name-keyed dict
     named_rules: Dict[str, dict] = {}
-    for rid, payload in rules.items():
-        named_rules[payload["name"]] = {
-            "necessary": payload.get("necessary", []),
-            "fallback": payload.get("fallback", []),
-            "sufficient": payload.get("sufficient", []),
-            "predicate": payload.get("predicate", "")
+    for row in rule_rows:
+        named_rules[row["name"]] = {
+            "ce_groups": row.get("ce_groups") or {},
+            "condition": row.get("condition") or "",
+            "predicate": row.get("predicate") or "",
+            "description": row.get("description") or "",
         }
     return named_rules
 
@@ -215,7 +168,30 @@ def upsert_ces(new_ces: Dict[str, dict]) -> List[int]:
 
 
 def upsert_rule_with_links(rule_data: dict, mark_pending: bool = False) -> int:
-    """Insert/update rule + CE links using role/fallback_group semantics. Returns rule_id.
+    """Insert/update a rule and its membership links from v2 logic. Returns rule_id.
+
+    THE single writer for the `rules` table + `rule_ce_link` membership rows.
+    `rule_data` = {
+        "rule_name":   str,
+        "description": str,
+        "ce_groups":   {group_name: [CE NAMES]},
+        "condition":   str (v2 grammar over the group names),
+        "categories":  optional [category names],
+    }
+
+    Steps:
+      1. Validate (ce_groups, condition) via rule_condition.validate_condition
+         — raises ValueError listing the problems.
+      2. Structural dedup via compute_rule_fingerprint_v2: a rule whose firing
+         logic matches an existing rule under a DIFFERENT name is a functional
+         duplicate even though no name conflict fires. `exclude_name` lets the
+         same rule be re-saved (the AI pipeline updates description on retry).
+      3. Derive predicate = render_predicate(parse(condition), ce_groups) —
+         the stored predicate is a DISPLAY string only, never evaluated.
+      4. Upsert the rules row (ce_groups/condition are the logic source of
+         truth) and rebuild rule_ce_link as pure membership rows from the
+         union of group members. Unknown CE names raise ValueError.
+      5. Trigger embedding over name + predicate + member CE definitions.
 
     `mark_pending=True` is used by the AI pipeline to mark the rule as
     is_ready=FALSE so it doesn't appear in any user-facing list until
@@ -227,123 +203,100 @@ def upsert_rule_with_links(rule_data: dict, mark_pending: bool = False) -> int:
     alone — we don't want to silently un-publish or un-finish a row that
     was already complete.
     """
+    from utils.rule_condition import parse, render_predicate, validate_condition
+    from sql_scripts.junction_scripts import (
+        compute_rule_fingerprint_v2,
+        find_existing_rule_by_fingerprint_v2,
+    )
+
     rule_name = rule_data["rule_name"]
     description = rule_data.get("description", "")
-    # Predicate may not exist yet; store description as placeholder if missing.
-    predicate = rule_data.get("predicate") or description or ""
+    ce_groups = {
+        gname: list(members or [])
+        for gname, members in (rule_data.get("ce_groups") or {}).items()
+    }
+    condition = (rule_data.get("condition") or "").strip()
 
-    # Structural-dedup: a rule with the same role/fallback shape as an
-    # existing rule under a DIFFERENT name is a functional duplicate
-    # even though no name conflict fires. Catch it here so AI-generated
-    # and manually-created rules both get checked at the single choke
-    # point. `exclude_name=rule_name` lets the same rule be re-saved
-    # (the AI pipeline updates predicate/description on retry runs).
-    from sql_scripts.junction_scripts import (
-        compute_rule_fingerprint_from_names,
-        find_existing_rule_by_fingerprint,
-    )
-    new_fp = compute_rule_fingerprint_from_names(
-        rule_data.get("necessary") or [],
-        rule_data.get("fallback") or [],
-        rule_data.get("sufficient") or [],
-    )
-    duplicate = find_existing_rule_by_fingerprint(new_fp, exclude_name=rule_name)
+    # 1. Validate the logic pair before anything touches the DB.
+    problems = validate_condition(condition, ce_groups)
+    if problems:
+        raise ValueError(
+            f"Invalid rule logic for '{rule_name}': " + "; ".join(problems)
+        )
+
+    # 2. Structural dedup at the single choke point (AI-generated and
+    # manually-created rules both funnel through here).
+    new_fp = compute_rule_fingerprint_v2(ce_groups, condition)
+    duplicate = find_existing_rule_by_fingerprint_v2(new_fp, exclude_name=rule_name)
     if duplicate is not None:
         existing_name = duplicate.get("name") or "(unnamed)"
         raise ValueError(
             f"A rule with the same structure already exists as "
-            f"'{existing_name}'. Two rules with identical CEs in "
-            f"identical roles and fallback groups are functionally the "
-            f"same — bookmark or fork the existing rule, or change the "
-            f"new rule's logic."
+            f"'{existing_name}'. Two rules with identical CE groups and an "
+            f"equivalent firing condition are functionally the same — "
+            f"bookmark or fork the existing rule, or change the new rule's "
+            f"logic."
         )
+
+    # 3. Derived display predicate.
+    predicate = render_predicate(parse(condition), ce_groups)
+
+    # Resolve member CE names -> ids up front so a typo'd/unknown name fails
+    # loudly instead of silently dropping a membership row.
+    all_ce_names = sorted({m for members in ce_groups.values() for m in members})
+    name_to_id: Dict[str, int] = {}
+    ce_defs: List[str] = []
+    if all_ce_names:
+        rows = execute_query_dict(
+            "SELECT ce_id, name, definition FROM cognitive_elements WHERE name = ANY(%s)",
+            (all_ce_names,),
+        ) or []
+        name_to_id = {r["name"]: r["ce_id"] for r in rows}
+        ce_defs = [r["definition"] for r in rows if r.get("definition")]
+        missing = [n for n in all_ce_names if n not in name_to_id]
+        if missing:
+            raise ValueError(
+                f"Rule '{rule_name}' references unknown CE(s): "
+                + ", ".join(missing)
+            )
 
     raw_categories = rule_data.get("categories") or []
     categories = normalize_and_upsert_categories(raw_categories, allow_new=True)
 
+    # 4. Upsert the rules row + rebuild membership links.
     rule_row = execute_query_dict(
         """
-        INSERT INTO rules (name, predicate, description, categories, is_ready)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO rules (name, predicate, description, categories, ce_groups, condition, is_ready)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (name)
         DO UPDATE SET predicate = EXCLUDED.predicate,
                       description = EXCLUDED.description,
-                      categories = EXCLUDED.categories
+                      categories = EXCLUDED.categories,
+                      ce_groups = EXCLUDED.ce_groups,
+                      condition = EXCLUDED.condition
         RETURNING rule_id
         """,
-        (rule_name, predicate, description, categories, not mark_pending),
+        (rule_name, predicate, description, categories, ce_groups, condition,
+         not mark_pending),
     )
     rule_id = rule_row[0]["rule_id"] if isinstance(rule_row[0], dict) else rule_row[0][0]
 
-    # Clear existing links for this rule_id
+    # Membership = union of group members (pure membership rows; the logic
+    # itself lives in ce_groups/condition on the rules row).
     execute_query("DELETE FROM rule_ce_link WHERE rule_id = %s", (rule_id,))
-
-    # Necessary
-    for ce_name in rule_data.get("necessary", []) or []:
+    for ce_name in all_ce_names:
         execute_query(
             """
-            INSERT INTO rule_ce_link (rule_id, ce_id, role, fallback_group)
-            SELECT %s, ce_id, 'necessary', 0 FROM cognitive_elements WHERE name = %s
+            INSERT INTO rule_ce_link (rule_id, ce_id)
+            VALUES (%s, %s)
             ON CONFLICT DO NOTHING
             """,
-            (rule_id, ce_name),
+            (rule_id, name_to_id[ce_name]),
         )
 
-    # Sufficient
-    for ce_name in rule_data.get("sufficient", []) or []:
-        execute_query(
-            """
-            INSERT INTO rule_ce_link (rule_id, ce_id, role, fallback_group)
-            SELECT %s, ce_id, 'sufficient', 0 FROM cognitive_elements WHERE name = %s
-            ON CONFLICT DO NOTHING
-            """,
-            (rule_id, ce_name),
-        )
-
-    # Fallback groups
-    fallback = rule_data.get("fallback", []) or []
-    for idx, group in enumerate(fallback, start=1):
-        for ce_name in group:
-            execute_query(
-                """
-                INSERT INTO rule_ce_link (rule_id, ce_id, role, fallback_group)
-                SELECT %s, ce_id, 'fallback', %s FROM cognitive_elements WHERE name = %s
-                ON CONFLICT DO NOTHING
-                """,
-                (rule_id, idx, ce_name),
-            )
-
-    # --- Auto-Embed Rule ---
+    # 5. Auto-embed (best-effort; embedding failure must not fail the write).
     try:
-        all_ce_names = set(rule_data.get("necessary", []) or [])
-        all_ce_names.update(rule_data.get("sufficient", []) or [])
-        for group in rule_data.get("fallback", []) or []:
-            all_ce_names.update(group)
-            
-        ce_defs_str = ""
-        if all_ce_names:
-            # Postgres IN clause requires tuple
-            names_tuple = tuple(all_ce_names)
-            if len(names_tuple) == 1:
-                # tuple('str') is ('s','t','r'), need ('str',)
-                # execute_query_dict handles params better but let's build dynamic query carefully or just iterate?
-                # Using ANY is cleaner
-                rows = execute_query_dict(
-                    "SELECT definition FROM cognitive_elements WHERE name = ANY(%s)",
-                    (list(all_ce_names),)
-                )
-            else:
-                rows = execute_query_dict(
-                    "SELECT definition FROM cognitive_elements WHERE name = ANY(%s)",
-                    (list(all_ce_names),)
-                )
-            
-            if rows:
-                ce_defs = [row['definition'] for row in rows if row.get('definition')]
-                ce_defs_str = " ".join(ce_defs)
-
-        trigger_embedding("rule", rule_id, rule_name, predicate, ce_defs_str)
-
+        trigger_embedding("rule", rule_id, rule_name, predicate, " ".join(ce_defs))
     except Exception as e:
         print(f"[!] Embedding trigger failed for rule {rule_name}: {e}")
 

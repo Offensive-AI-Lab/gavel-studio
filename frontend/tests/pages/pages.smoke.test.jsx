@@ -11,7 +11,7 @@
 // These don't simulate user interaction. They catch the easy regressions:
 // missing imports, undefined-prop crashes, broken lazy data assumptions
 // like `(data.rules || []).map(...)`. Behavior tests for the highest-
-// leverage flows (RuleService) live in their own files.
+// leverage flows live in their own files.
 
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -60,21 +60,15 @@ vi.mock('../../src/api', () => {
         trainClassifier: vi.fn(() => empty()),
         // Rules
         getPublicRules: vi.fn(() => empty({ rules: [] })),
-        createPublicRule: vi.fn(() => empty({ rule_id: 1 })),
         addRuleBookmark: vi.fn(() => empty()),
         getRuleBookmarks: vi.fn(() => list('bookmarks')),
         removeRuleBookmark: vi.fn(() => empty()),
-        createManualRule: vi.fn(() => empty()),
-        createAIRule: vi.fn(() => empty()),
+        checkRuleDuplicate: vi.fn(() => empty({ exists: false })),
+        saveEditedRule: vi.fn(() => empty()),
         // Library
         searchLibrary: vi.fn(() => empty({ results: [], total: 0 })),
         getAllCategories: vi.fn(() => empty({ categories: [] })),
         syncLibrary: vi.fn(() => empty()),
-        publishCE: vi.fn(() => empty()),
-        publishRule: vi.fn(() => empty()),
-        checkLibraryName: vi.fn(() => empty({ exists: false })),
-        getPublicRecord: vi.fn(() => empty()),
-        cleanupLocalDrafts: vi.fn(() => empty()),
         listLocalDrafts: vi.fn(() => empty({ rules: [], ces: [] })),
         deleteDraftRule: vi.fn(() => empty()),
         deleteDraftCE: vi.fn(() => empty()),

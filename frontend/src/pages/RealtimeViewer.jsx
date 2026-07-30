@@ -9,6 +9,7 @@ import {
     endRealtimeSessionUnload, sessionAnalyzeStored, sessionAnalyzeLive,
 } from '../api';
 import { useTutorialContent } from '../contexts/TutorialContext';
+import { groupProgressLabel } from '../utils/ruleLogic';
 import '../css/RealtimeViewer.css';
 
 // Elapsed-time formatter (M:SS) for the first-time model-load notice.
@@ -593,10 +594,29 @@ export default function RealtimeViewer() {
                                                 {rt.fired ? 'FIRED' : 'NOT FIRED'}
                                             </span>
                                         </div>
-                                        {!rt.fired && (
+                                        {rt.condition && (
+                                            <div style={{ fontSize: 10, color: '#64748b', marginTop: 4, fontFamily: 'monospace' }} title="Firing condition over the rule's CE groups">
+                                                {rt.condition}
+                                            </div>
+                                        )}
+                                        {/* Per-group progress: hits vs. what the condition
+                                          * demands (e.g. "2/3 of solicited_action"). Groups
+                                          * not referenced by the condition are supporting-
+                                          * only and skipped here. */}
+                                        {Object.entries(rt.groups || {}).filter(([, info]) => info?.quantifier != null).length > 0 && (
+                                            <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 4, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                                {Object.entries(rt.groups || {})
+                                                    .filter(([, info]) => info?.quantifier != null)
+                                                    .map(([gname, info]) => (
+                                                        <span key={gname} style={{ color: info.satisfied ? '#4ade80' : '#94a3b8' }}>
+                                                            {info.satisfied ? '✓' : '○'} {groupProgressLabel(gname, info)}
+                                                        </span>
+                                                    ))}
+                                            </div>
+                                        )}
+                                        {!rt.fired && (rt.groups_unmet?.length || 0) > 0 && (
                                             <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 4 }}>
-                                                {!rt.all_required_satisfied && 'missing required CEs · '}
-                                                {(rt.any_of_groups_unmet?.length || 0) > 0 && `${rt.any_of_groups_unmet.length} Any-of group(s) had no hit`}
+                                                {rt.groups_unmet.length} group{rt.groups_unmet.length === 1 ? '' : 's'} unmet
                                             </div>
                                         )}
                                     </div>
@@ -942,10 +962,11 @@ function RuleTriggersStrip({ rules }) {
         <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 6, paddingTop: 8, borderTop: '1px solid rgba(148, 163, 184, 0.12)' }}>
             {rules.map(rt => (
                 <span key={rt.rule_name}
-                    title={rt.fired ? 'Rule predicate satisfied' : `Not fired · ${[
-                        !rt.all_required_satisfied && 'missing required CEs',
-                        (rt.any_of_groups_unmet?.length || 0) > 0 && `${rt.any_of_groups_unmet.length} Any-of group(s) had no hit`,
-                    ].filter(Boolean).join(' · ') || 'no CE triggers'}`}
+                    title={rt.fired
+                        ? `Condition satisfied${rt.condition ? ` · ${rt.condition}` : ''}`
+                        : `Not fired · ${(rt.groups_unmet || [])
+                            .map((g) => groupProgressLabel(g, (rt.groups || {})[g]))
+                            .join(' · ') || 'no CE triggers'}`}
                     style={{
                         padding: '2px 8px', fontSize: 10, fontWeight: 600, letterSpacing: '0.03em', borderRadius: 999,
                         background: rt.fired ? 'rgba(34, 197, 94, 0.18)' : 'rgba(148, 163, 184, 0.12)',

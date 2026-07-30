@@ -113,7 +113,7 @@ const VizShip = () => (
         <span className="viz-ship-divider">·</span>
         <div className="viz-ship-publish">
             <FiUploadCloud size={22} />
-            Publish to library
+            Contribute via PR
         </div>
     </div>
 );
@@ -161,7 +161,7 @@ const SLIDES = [
                 <strong>Generate via AI</strong>: describe a scenario and let
                 it propose a rule. Or <strong>build manually</strong> from
                 your bookmarked CEs. Anything you create lands in{' '}
-                <strong>My Drafts</strong> until you publish.
+                <strong>My Drafts</strong> — local to this Studio.
             </>
         ),
         viz: <VizSources />,
@@ -187,9 +187,9 @@ const SLIDES = [
             <>
                 <strong>Real-time monitoring</strong> runs your trained
                 rule set on live conversations and shows you which CEs
-                activate. <strong>Publish your rules</strong> back to the
-                library so other users can reuse them. Then start the next
-                scenario.
+                activate. <strong>Contribute your rules</strong> to the shared
+                library via a gavel-rules pull request so other users can
+                reuse them. Then start the next scenario.
             </>
         ),
         viz: <VizShip />,

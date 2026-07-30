@@ -8,8 +8,9 @@ three `test_datasets` rows tagged `is_default = TRUE` and keyed by
     * negative             — hard-negative test bucket
     * positive_calibration — usecase-level calibration bucket
 
-These are the canonical, shared sets that get pushed to Hugging Face when
-the rule is published (services/hf_publish.py). A user who wants different
+These are the canonical, shared sets; library rules ship theirs in the
+gavel-rules registry (rules/<name>/tests/, pulled lazily by
+services/library_sync.py). A user who wants different
 coverage generates their own *private* set instead (is_default = FALSE,
 user_id set) via the existing /ai/test-set/generate path.
 

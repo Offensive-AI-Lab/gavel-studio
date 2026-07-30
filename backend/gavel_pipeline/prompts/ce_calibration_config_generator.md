@@ -4,7 +4,7 @@ You are an expert in AI safety and cognitive element (CE) calibration. Your task
 
 1. **Single CE Isolation**: The configuration must generate dialogues where ONLY the target CE is present
 2. **No CE Overlap**: Dialogues must NOT contain any other CEs from the CE inventory
-3. **No Rule Overlap**: Dialogues must NOT match any existing rules (necessary + fallback combinations)
+3. **No Rule Overlap**: Dialogues must NOT match any existing rules (their CE-group + condition combinations)
 4. **Type-Appropriate Generation**: Dialogue strategy depends entirely on CE type (see Stage 1 below)
 5. **Domain-Appropriate**: Stay within the natural domain of the CE without triggering misuse patterns
 

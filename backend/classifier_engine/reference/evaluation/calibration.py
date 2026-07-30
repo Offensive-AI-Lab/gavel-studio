@@ -22,92 +22,85 @@ logger = logging.getLogger(__name__)
 
 def update_label_level_stats(
     triggers: torch.Tensor,  # bool/int tensor [L]
-    all_required_labels: torch.Tensor,  # bool/int tensor [L]
-    supporting_labels: torch.Tensor,  # bool/int tensor [L]
-    any_of_conditions: dict[str, list[torch.Tensor]],
+    ruleset_logic: dict,
     use_case: str,
     labels_statistics: list[dict],
 ) -> None:
-    """Update label-level statistics based on rule-based ground truth.
+    """Update per-label statistics from a rule's groups+condition logic.
 
-    Args:
-        triggers: Predicted trigger vector
-        all_required_labels: Labels that must trigger
-        supporting_labels: Labels that are supporting alone
-        any_of_conditions: Any-of condition groups
-        use_case: Name of the use case
-        labels_statistics: List of stat dicts to update
+    For a calibration dialogue belonging to `use_case`, each label lands in
+    exactly one bucket per dialogue:
+
+      * member of an `all of` selector      -> fired TP, unfired FN
+      * member of a `k of` selector          -> fired TP; unfired: TN when the
+        selector was satisfied anyway, FN when it wasn't
+      * member of a defined-but-unreferenced group (e.g. the migrated
+        'supporting' bucket)                 -> fired TP, unfired TN
+      * member only under `not`, or not part of the rule at all (irrelevant)
+        -> fired FP, unfired TN
+
+    A label appearing in several selectors takes the strongest reading
+    (required > k-of > supporting). This generalizes the retired
+    all_required/any_of/supporting bucketing to the full condition grammar.
     """
+    entry = ruleset_logic.get(use_case)
     pred = triggers.bool()
-    req = all_required_labels.bool()
-    supp = supporting_labels.bool()
-
     L = pred.numel()
+    pred_set = set(pred.nonzero(as_tuple=True)[0].tolist())
 
-    def idxs_to_mask(idxs: torch.Tensor) -> torch.Tensor:
-        m = torch.zeros(L, dtype=torch.bool, device=pred.device)
-        if idxs.numel() > 0:
-            m[idxs] = True
-        return m
+    required: set = set()
+    negated: set = set()
+    anyof_groups: list = []  # (member_set, k)
+    all_members: set = set()
 
-    any_of_groups_idx = any_of_conditions.get(use_case, []) or []
-    any_of_groups = [idxs_to_mask(g) for g in any_of_groups_idx]
+    if entry is not None:
+        all_members = set(
+            (entry["member_labels"] == 1).nonzero(as_tuple=True)[0].tolist()
+        )
+        if entry["ast"] is not None:
+            def walk(node, neg: bool):
+                kind = node[0]
+                if kind in ("and", "or"):
+                    for c in node[1]:
+                        walk(c, neg)
+                elif kind == "not":
+                    walk(node[1], not neg)
+                else:
+                    _, quant, name = node
+                    idxs = entry["groups_idx"].get(name)
+                    if idxs is None or idxs.numel() == 0:
+                        return
+                    mset = set(idxs.tolist())
+                    if neg:
+                        negated.update(mset)
+                    elif quant == "all":
+                        required.update(mset)
+                    else:
+                        anyof_groups.append((mset, int(quant)))
 
-    any_of_union = torch.zeros_like(pred, dtype=torch.bool)
-    for g in any_of_groups:
-        any_of_union |= g
+            walk(entry["ast"], False)
 
-    if (req & any_of_union).any() or (supp & any_of_union).any():
-        raise ValueError("A label appears in both any_of and all_required/supporting.")
-    if (req & supp).any():
-        raise ValueError("A label is marked both all_required and supporting.")
-    if len(any_of_groups) > 1:
-        stacked = torch.stack(any_of_groups, dim=0)
-        overlaps = stacked.sum(dim=0) > 1
-        if overlaps.any():
-            raise ValueError("A label appears in multiple any_of groups.")
+    anyof_members = {m for ms, _ in anyof_groups for m in ms}
+    supporting = all_members - required - anyof_members - negated
 
-    allowed = req | supp | any_of_union
-    irrelevant = ~allowed
-
-    tp_req = pred & req
-    fn_req = (~pred) & req
-
-    tp_supp = pred & supp
-    tn_supp = (~pred) & supp
-
-    tp_any = torch.zeros_like(pred)
-    tn_any = torch.zeros_like(pred)
-    fn_any = torch.zeros_like(pred)
-    for g in any_of_groups:
-        any_fired = bool((pred & g).any())
-        if any_fired:
-            tp_any |= pred & g
-            tn_any |= (~pred) & g
+    for i in range(L):
+        fired = i in pred_set
+        if i in required:
+            bucket = "true_positive" if fired else "false_negative"
+        elif i in anyof_members:
+            if fired:
+                bucket = "true_positive"
+            else:
+                satisfied = any(
+                    len(ms & pred_set) >= k for ms, k in anyof_groups if i in ms
+                )
+                bucket = "true_negative" if satisfied else "false_negative"
+        elif i in supporting:
+            bucket = "true_positive" if fired else "true_negative"
         else:
-            fn_any |= g
-
-    fp_irr = pred & irrelevant
-    tn_irr = (~pred) & irrelevant
-
-    tp = tp_req | tp_supp | tp_any
-    fp = fp_irr
-    tn = tn_supp | tn_any | tn_irr
-    fn = fn_req | fn_any
-
-    assert (tp | fp | tn | fn).all(), "Every label must land in a bucket."
-    assert not ((tp & fp) | (tp & tn) | (tp & fn) | (fp & tn) | (fp & fn) | (tn & fn)).any(), (
-        "Label landed in multiple buckets."
-    )
-
-    def _bump(mask: torch.Tensor, field: str) -> None:
-        for i in mask.nonzero(as_tuple=True)[0].tolist():
-            labels_statistics[i][field] += 1
-
-    _bump(tp, "true_positive")
-    _bump(fp, "false_positive")
-    _bump(tn, "true_negative")
-    _bump(fn, "false_negative")
+            # negated members and labels outside the rule: must stay silent.
+            bucket = "false_positive" if fired else "true_negative"
+        labels_statistics[i][bucket] += 1
 
 
 def plot_calibration_curves(
@@ -272,13 +265,9 @@ def load_calibration_dialogues(
         logger: Optional logger
 
     Returns:
-        List of dialogue data dicts with logits, gt_req, gt_supp, etc.
+        List of dialogue data dicts with logits, gt_uc_name, split, etc.
     """
     from gavel.utils.io import iter_dialogue_files
-    from gavel.evaluation.metrics import convert_labels_to_tensors
-
-    malicious_use_cases_ruleset = convert_labels_to_tensors(unified_ruleset, labels)
-    num_topics = len(labels)
 
     dialogue_data_cache = []
     for meta_path, npy_path, meta in iter_dialogue_files(logits_root):
@@ -291,22 +280,17 @@ def load_calibration_dialogues(
         dialogue_id = meta.get("dialogue_id", meta_path.stem)
 
         if split == "usecase_level":
-            if gt_uc_name not in malicious_use_cases_ruleset:
+            if gt_uc_name not in unified_ruleset:
                 if logger:
                     logger.warning(f"Unknown usecase '{gt_uc_name}' — skipping")
                 continue
-            gt_req = malicious_use_cases_ruleset[gt_uc_name]["all_required_labels"]
-            gt_supp = malicious_use_cases_ruleset[gt_uc_name]["supporting_labels"]
         else:
-            # CE_level: UC name is a topic label
-            idx = labels.get(gt_uc_name, None)
-            if idx is None:
+            # CE_level: UC name is a topic label (unused by the sweep; kept
+            # for completeness of the cache)
+            if gt_uc_name not in labels:
                 if logger:
                     logger.warning(f"Unknown label '{gt_uc_name}' — skipping")
                 continue
-            gt_req = torch.zeros(num_topics, dtype=torch.float32)
-            gt_req[idx] = 1.0
-            gt_supp = torch.zeros(num_topics, dtype=torch.float32)
 
         logits_np = np.load(npy_path)
         dialogue_logits = torch.from_numpy(logits_np).float()
@@ -314,8 +298,6 @@ def load_calibration_dialogues(
         dialogue_data_cache.append(
             {
                 "logits": dialogue_logits,
-                "gt_req": gt_req,
-                "gt_supp": gt_supp,
                 "gt_uc_name": gt_uc_name,
                 "dialogue_name": dialogue_id,
                 "split": split,
@@ -331,7 +313,7 @@ def load_calibration_dialogues(
 def run_threshold_sweep(
     dialogue_cache: List[dict],
     labels: Dict[str, int],
-    any_of_conditions: dict,
+    ruleset_logic: dict,
     thresholds: np.ndarray = None,
     patience_values: List[int] = None,
     show_progress: bool = True,
@@ -341,7 +323,7 @@ def run_threshold_sweep(
     Args:
         dialogue_cache: List of dialogue data from load_calibration_dialogues
         labels: Label name to index mapping
-        any_of_conditions: Any-of condition groups
+        ruleset_logic: parsed rule logic from metrics.build_ruleset_logic
         thresholds: Array of threshold values to try (default: 0.05 to 1.0 step 0.05)
         patience_values: List of patience values to try (default: [1])
         show_progress: Show progress bar
@@ -379,10 +361,8 @@ def run_threshold_sweep(
                 if data["split"] == "usecase_level":
                     update_label_level_stats(
                         triggers=triggers,
-                        all_required_labels=data["gt_req"],
-                        supporting_labels=data["gt_supp"],
+                        ruleset_logic=ruleset_logic,
                         use_case=data["gt_uc_name"],
-                        any_of_conditions=any_of_conditions,
                         labels_statistics=topic_stats,
                     )
 
@@ -446,7 +426,7 @@ def calibrate(
     Raises:
         ValueError: If neither or both of dialogue_data/logits_root are provided
     """
-    from gavel.evaluation.metrics import convert_labels_to_tensors, load_any_of_conditions
+    from gavel.evaluation.metrics import build_ruleset_logic
 
     # Validate inputs
     if dialogue_data is None and logits_root is None:
@@ -457,8 +437,8 @@ def calibrate(
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(os.path.join(output_dir, "topic_plots"), exist_ok=True)
 
-    # Load any-of conditions
-    any_of_conditions = load_any_of_conditions(unified_ruleset, labels)
+    # Parse every rule's groups+condition once for the whole sweep.
+    ruleset_logic = build_ruleset_logic(unified_ruleset, labels)
 
     # Build dialogue cache from either source
     if logits_root is not None:
@@ -470,9 +450,6 @@ def calibrate(
         # In-memory mode: convert to internal format
         if logger:
             logger.info("Processing in-memory calibration dialogues...")
-        malicious_use_cases_ruleset = convert_labels_to_tensors(unified_ruleset, labels)
-        num_topics = len(labels)
-
         dialogue_cache = []
         for dialogue in dialogue_data:
             meta = dialogue["metadata"]
@@ -486,22 +463,16 @@ def calibrate(
             dialogue_id = meta.get("dialogue_id", "")
 
             if split == "usecase_level":
-                if gt_uc_name not in malicious_use_cases_ruleset:
+                if gt_uc_name not in unified_ruleset:
                     if logger:
                         logger.warning(f"Unknown usecase '{gt_uc_name}' — skipping")
                     continue
-                gt_req = malicious_use_cases_ruleset[gt_uc_name]["all_required_labels"]
-                gt_supp = malicious_use_cases_ruleset[gt_uc_name]["supporting_labels"]
             else:
                 # CE_level: UC name is a topic label
-                idx = labels.get(gt_uc_name, None)
-                if idx is None:
+                if gt_uc_name not in labels:
                     if logger:
                         logger.warning(f"Unknown label '{gt_uc_name}' — skipping")
                     continue
-                gt_req = torch.zeros(num_topics, dtype=torch.float32)
-                gt_req[idx] = 1.0
-                gt_supp = torch.zeros(num_topics, dtype=torch.float32)
 
             # Convert logits to tensor if numpy
             logits = dialogue["logits"]
@@ -511,8 +482,6 @@ def calibrate(
             dialogue_cache.append(
                 {
                     "logits": logits,
-                    "gt_req": gt_req,
-                    "gt_supp": gt_supp,
                     "gt_uc_name": gt_uc_name,
                     "dialogue_name": dialogue_id,
                     "split": split,
@@ -526,7 +495,7 @@ def calibrate(
     if logger:
         logger.info("Running threshold sweep...")
     df_results = run_threshold_sweep(
-        dialogue_cache, labels, any_of_conditions, thresholds, patience_values, show_progress
+        dialogue_cache, labels, ruleset_logic, thresholds, patience_values, show_progress
     )
 
     # Compute optimal parameters

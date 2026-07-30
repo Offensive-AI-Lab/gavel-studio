@@ -116,7 +116,7 @@ const BrowseRuleSets = () => {
             {
                 heading: 'Right now',
                 bullets: ruleSets.length === 0
-                    ? ['No public rule sets yet, or still syncing. Share one from your Rule Sets page with "Share".']
+                    ? ['No public rule sets yet, or still syncing. Rule sets arrive with library sync from the gavel-rules repository.']
                     : [
                         `${ruleSets.length} rule set${ruleSets.length === 1 ? '' : 's'} available. Search by name or filter by category.`,
                         'Open a card to see its member rules. Bookmark a set, then fork it from your Rule Sets page.',
@@ -171,7 +171,7 @@ const BrowseRuleSets = () => {
                             <h2 style={{ fontSize: '1.4rem', marginBottom: '10px', color: '#cbd5e1' }}>No public rule sets</h2>
                             <p style={{ marginBottom: '20px' }}>
                                 {ruleSets.length === 0
-                                    ? 'Nothing shared yet. Publish one from your Rule Sets page with "Publish to Community".'
+                                    ? 'Nothing shared yet. Public rule sets arrive with library sync from the gavel-rules repository.'
                                     : 'No rule sets match your filters.'}
                             </p>
                             <button className="primary-btn" onClick={() => navigate('/guardrails')}>Go to my Rule Sets</button>

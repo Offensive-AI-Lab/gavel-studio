@@ -386,7 +386,7 @@ class TestIncompletePipelineRecovery:
     def _link_ce_to_rule(rule_id: int, ce_id: int):
         from utils.sqlite_db import execute_query
         execute_query(
-            "INSERT INTO rule_ce_link (rule_id, ce_id, role, fallback_group) VALUES (%s, %s, 'necessary', 0)",
+            "INSERT INTO rule_ce_link (rule_id, ce_id) VALUES (%s, %s)",
             (rule_id, ce_id),
         )
 

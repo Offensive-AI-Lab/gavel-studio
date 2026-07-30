@@ -113,19 +113,44 @@ describe('RulePage — breadcrumb navigation', () => {
     });
 });
 
-describe('RulePage — predicate block', () => {
-    it('renders the boolean logic when a predicate exists', async () => {
-        getRuleDetail.mockResolvedValue({ data: { name: 'R', predicate: 'A AND B' } });
+describe('RulePage — firing logic block', () => {
+    it('renders groups + condition when the rule carries them', async () => {
+        // GET /rules/{id}/detail nests the v2 logic under `logic`.
+        getRuleDetail.mockResolvedValue({ data: {
+            name: 'R',
+            predicate: 'A AND B',
+            logic: {
+                groups: { required: [{ ce_id: 1, name: 'A' }], option_1: [{ ce_id: 2, name: 'B' }] },
+                condition: 'all of required and 1 of option_1',
+                predicate: 'A AND B',
+            },
+        } });
         renderRule('3');
-        expect(await screen.findByText('Boolean Logic')).toBeInTheDocument();
+        expect(await screen.findByText('Firing Logic')).toBeInTheDocument();
+        expect(screen.getByText('required')).toBeInTheDocument();
+        expect(screen.getByText('option_1')).toBeInTheDocument();
+        expect(screen.getByText('all of required and 1 of option_1')).toBeInTheDocument();
+        // Raw predicate is hidden when groups exist.
+        expect(screen.queryByText('A AND B')).not.toBeInTheDocument();
+    });
+
+    it('falls back to the predicate string for legacy rows without groups', async () => {
+        // Legacy rows come back with logic.groups = {} — predicate display only.
+        getRuleDetail.mockResolvedValue({ data: {
+            name: 'R',
+            predicate: 'A AND B',
+            logic: { groups: {}, condition: '', predicate: 'A AND B' },
+        } });
+        renderRule('3');
+        expect(await screen.findByText('Firing Logic')).toBeInTheDocument();
         expect(screen.getByText('A AND B')).toBeInTheDocument();
     });
 
-    it('omits the boolean logic block when no predicate', async () => {
+    it('omits the firing-logic block when neither groups nor predicate exist', async () => {
         getRuleDetail.mockResolvedValue({ data: { name: 'R' } });
         renderRule('3');
         await screen.findByRole('heading', { name: 'R' });
-        expect(screen.queryByText('Boolean Logic')).not.toBeInTheDocument();
+        expect(screen.queryByText('Firing Logic')).not.toBeInTheDocument();
     });
 });
 
@@ -137,25 +162,35 @@ describe('RulePage — cognitive elements', () => {
         expect(screen.getByText('Cognitive Elements (0)')).toBeInTheDocument();
     });
 
-    it('lists CEs with their count and role chip', async () => {
+    it('lists CEs with their count and group-membership chips', async () => {
         getRuleDetail.mockResolvedValue({
             data: {
                 name: 'R',
+                logic: {
+                    groups: {
+                        required: [{ ce_id: 1, name: 'CE Alpha' }],
+                        option_1: [{ ce_id: 2, name: 'CE Beta' }],
+                    },
+                    condition: 'all of required and 1 of option_1',
+                    predicate: 'CE Alpha AND CE Beta',
+                },
+                // Detail `ces` rows carry their group memberships too.
                 ces: [
-                    { ce_id: 1, name: 'CE Necessary', definition: 'd1' },
-                    { ce_id: 2, name: 'CE Sufficient', role: 'sufficient' },
-                    { ce_id: 3, name: 'CE Fallback', role: 'fallback', fallback_group: 2 },
+                    { ce_id: 1, name: 'CE Alpha', definition: 'd1', groups: ['required'] },
+                    { ce_id: 2, name: 'CE Beta', groups: ['option_1'] },
+                    { ce_id: 3, name: 'CE Ungrouped', groups: [] },
                 ],
             },
         });
         renderRule('3');
         expect(await screen.findByText('Cognitive Elements (3)')).toBeInTheDocument();
-        expect(screen.getByText('CE Necessary')).toBeInTheDocument();
-        // Default role label.
-        expect(screen.getByText('Necessary')).toBeInTheDocument();
-        expect(screen.getByText('Supporting')).toBeInTheDocument();
-        // Fallback shows its group suffix.
-        expect(screen.getByText(/Any of · G3/)).toBeInTheDocument();
+        // Member names render in both the Firing Logic chips and the CE list.
+        expect(screen.getAllByText('CE Alpha').length).toBeGreaterThanOrEqual(2);
+        expect(screen.getByText('CE Ungrouped')).toBeInTheDocument();
+        // Each CE row shows the group(s) it belongs to (chips render in the
+        // logic block too, hence getAllByText).
+        expect(screen.getAllByText('required').length).toBeGreaterThanOrEqual(2);
+        expect(screen.getAllByText('option_1').length).toBeGreaterThanOrEqual(2);
     });
 
     it('expands a CE to reveal definition and examples, then collapses', async () => {

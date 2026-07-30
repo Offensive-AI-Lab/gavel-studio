@@ -18,14 +18,20 @@ finalizes a real rule (which would trigger a real embedding) is marked slow.
 All DB rows are created through the API so the conftest snapshot/restore
 cleans them up automatically. Names are uniquified per test to avoid 409s.
 """
+import itertools
 import time
 
 import pytest
 from utils.sqlite_db import execute_query_dict
 
+_seq = itertools.count()
+
 
 def _uniq(prefix: str) -> str:
-    return f"{prefix}_{int(time.time())}_{id(object())}"
+    # A process-wide counter: id(object()) is NOT unique (CPython reuses the
+    # freed address), and the v2 endpoint counts DISTINCT CEs — two CEs
+    # accidentally sharing a name collapse to one and trip the >=2 guard.
+    return f"{prefix}_{int(time.time())}_{next(_seq)}"
 
 
 def _make_ce(client, auth_headers, test_user, name=None):
@@ -66,10 +72,8 @@ class TestCreateRuleFromBookmarkedCEs:
             "/ai/rules/from-bookmarked-ce",
             json={
                 "name": _uniq("aipl_draft_rule"),
-                "ce_links": [
-                    {"ce_id": ce1, "role": "necessary", "fallback_group": 0},
-                    {"ce_id": ce2, "role": "necessary", "fallback_group": 0},
-                ],
+                "groups": {"required": [ce1, ce2]},
+                "condition": "all of required",
                 "categories": [],
             },
             headers=auth_headers,
@@ -89,19 +93,47 @@ class TestCreateRuleFromBookmarkedCEs:
             "/ai/rules/from-bookmarked-ce",
             json={
                 "name": _uniq("aipl_one_ce"),
-                "ce_links": [{"ce_id": ce1, "role": "necessary"}],
+                "groups": {"required": [ce1]},
+                "condition": "all of required",
             },
             headers=auth_headers,
         )
         assert res.status_code == 400
         assert "2 cognitive elements" in res.json()["detail"]
 
-    def test_empty_ce_links_rejected_400(self, client, auth_headers, test_user):
-        """Empty ce_links fails the >= 2 guard before reaching the
-        empty-ce_roles ValueError; either way a deterministic 400."""
+    def test_empty_groups_rejected_400(self, client, auth_headers, test_user):
+        """Empty groups fail the >= 2 distinct-CEs guard — a deterministic 400."""
         res = client.post(
             "/ai/rules/from-bookmarked-ce",
-            json={"name": _uniq("aipl_empty"), "ce_links": []},
+            json={"name": _uniq("aipl_empty"), "groups": {},
+                  "condition": "all of required"},
+            headers=auth_headers,
+        )
+        assert res.status_code == 400
+
+    def test_bad_group_name_rejected_400(self, client, auth_headers, test_user):
+        """Group names must be [a-z][a-z0-9_]* and not a grammar keyword."""
+        ce1 = _make_ce(client, auth_headers, test_user)
+        ce2 = _make_ce(client, auth_headers, test_user)
+        res = client.post(
+            "/ai/rules/from-bookmarked-ce",
+            json={"name": _uniq("aipl_badgroup"),
+                  "groups": {"Bad Group!": [ce1, ce2]},
+                  "condition": "all of required"},
+            headers=auth_headers,
+        )
+        assert res.status_code == 400
+        assert "group name" in res.json()["detail"].lower()
+
+    def test_invalid_condition_rejected_400(self, client, auth_headers, test_user):
+        """A condition referencing an undefined group is a validation 400."""
+        ce1 = _make_ce(client, auth_headers, test_user)
+        ce2 = _make_ce(client, auth_headers, test_user)
+        res = client.post(
+            "/ai/rules/from-bookmarked-ce",
+            json={"name": _uniq("aipl_badcond"),
+                  "groups": {"required": [ce1, ce2]},
+                  "condition": "all of some_other_group"},
             headers=auth_headers,
         )
         assert res.status_code == 400
@@ -113,10 +145,8 @@ class TestCreateRuleFromBookmarkedCEs:
         res = client.post(
             "/ai/rules/from-bookmarked-ce",
             json={
-                "ce_links": [
-                    {"ce_id": ce1},
-                    {"ce_id": ce2},
-                ]
+                "groups": {"required": [ce1, ce2]},
+                "condition": "all of required",
             },
             headers=auth_headers,
         )
@@ -130,7 +160,8 @@ class TestCreateRuleFromBookmarkedCEs:
             "/ai/rules/from-bookmarked-ce",
             json={
                 "name": "",
-                "ce_links": [{"ce_id": ce1}, {"ce_id": ce2}],
+                "groups": {"required": [ce1, ce2]},
+                "condition": "all of required",
             },
             headers=auth_headers,
         )
@@ -139,7 +170,8 @@ class TestCreateRuleFromBookmarkedCEs:
     def test_requires_auth(self, client):
         res = client.post(
             "/ai/rules/from-bookmarked-ce",
-            json={"name": "x", "ce_links": [{"ce_id": 1}, {"ce_id": 2}]},
+            json={"name": "x", "groups": {"required": [1, 2]},
+                  "condition": "all of required"},
         )
         assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
@@ -182,7 +214,8 @@ class TestFinalizeDraftRule:
             "/ai/rules/from-bookmarked-ce",
             json={
                 "name": _uniq("aipl_finalize_rule"),
-                "ce_links": [{"ce_id": ce1}, {"ce_id": ce2}],
+                "groups": {"required": [ce1, ce2]},
+                "condition": "all of required",
             },
             headers=auth_headers,
         )
@@ -232,7 +265,8 @@ class TestDiscardUnreadyRule:
             "/ai/rules/from-bookmarked-ce",
             json={
                 "name": _uniq("aipl_discard_rule"),
-                "ce_links": [{"ce_id": ce1}, {"ce_id": ce2}],
+                "groups": {"required": [ce1, ce2]},
+                "condition": "all of required",
             },
             headers=auth_headers,
         )

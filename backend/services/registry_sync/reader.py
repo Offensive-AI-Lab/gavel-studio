@@ -1,12 +1,14 @@
 """RegistryReader — the backend's read-side port for the public library.
 
-The backend reads the registry (manifest, record files, neutral corpus) through
+The backend reads the registry (index.json, rule/CE dataset files) through
 THIS interface, never a storage SDK directly. So the storage backend is a
 swappable detail behind one adapter — zero changes to the sync logic
 (Open/Closed + Dependency Inversion).
 
-Bulk downloads still stream straight from the storage CDN to this backend;
-nothing is proxied through, or stored on, the central server.
+The active adapter targets the gavel-rules GitHub repository. Reads are
+anonymous once the repo is public; while it is private, GITHUB_TOKEN in
+backend/.env authenticates them. This adapter READS ONLY — the studio never
+writes to the repo (contributions go by pull request, outside the studio).
 """
 from __future__ import annotations
 
@@ -26,8 +28,8 @@ class RegistryNotFound(RegistryReadError):
 
 class RegistryReader(abc.ABC):
     """Read-only access to the public library, addressed by repo-relative path
-    (e.g. 'manifest.json', 'public_rules/<id>.json',
-    'neutral/<category>/conversations.json'). An adapter implements two methods;
+    (e.g. 'index.json', 'ces/<name>/excitation.json',
+    'rules/<name>/tests/positive.json'). An adapter implements two methods;
     `fetch_json` is provided for free."""
 
     name: str = "registry"
@@ -47,44 +49,68 @@ class RegistryReader(abc.ABC):
 
 
 # --------------------------------------------------------------------------- #
-# The concrete reader. Bytes stream straight from the storage CDN to this
-# backend (not via the central server). Reads are anonymous (public repo).
+# The concrete reader: GitHub. head_version() is the branch HEAD commit SHA
+# (one cheap API call — the freshness probe the poller runs every few
+# minutes); file fetches pin to a revision so one sync run reads a
+# consistent snapshot even if the branch advances mid-sync.
 # --------------------------------------------------------------------------- #
-class HuggingFaceReader(RegistryReader):
-    name = "huggingface"
+class GitHubReader(RegistryReader):
+    name = "github"
 
-    def __init__(self, repo_id: str, repo_type: str = "dataset",
-                 *, token: Optional[str] = None):
-        self.repo_id = repo_id
-        self.repo_type = repo_type
-        self._token = token            # None = anonymous public read
+    API = "https://api.github.com"
+
+    def __init__(self, repo: str, ref: str = "main", *, token: Optional[str] = None):
+        self.repo = repo            # "owner/name"
+        self.ref = ref              # branch, tag, or commit SHA
+        self._token = token         # None = anonymous (public repo)
+
+    def _headers(self, accept: str) -> dict:
+        headers = {
+            "Accept": accept,
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "gavel-studio-sync",
+        }
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        return headers
 
     def head_version(self) -> str:
-        from huggingface_hub import HfApi
+        import requests
         try:
-            return HfApi(token=self._token).repo_info(
-                repo_id=self.repo_id, repo_type=self.repo_type).sha
+            resp = requests.get(
+                f"{self.API}/repos/{self.repo}/commits/{self.ref}",
+                headers=self._headers("application/vnd.github+json"),
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()["sha"]
         except Exception as e:
             raise RegistryReadError(f"HEAD read failed: {e}") from e
 
     def fetch_bytes(self, path: str, *, revision: Optional[str] = None) -> bytes:
-        from huggingface_hub import hf_hub_download
+        import requests
+        ref = revision or self.ref
         try:
-            local = hf_hub_download(
-                repo_id=self.repo_id, repo_type=self.repo_type,
-                filename=path, revision=revision, token=self._token)
+            resp = requests.get(
+                f"{self.API}/repos/{self.repo}/contents/{path}",
+                params={"ref": ref},
+                headers=self._headers("application/vnd.github.raw"),
+                timeout=120,
+            )
         except Exception as e:
-            if _is_not_found(e):
-                raise RegistryNotFound(path) from e
             raise RegistryReadError(f"reading '{path}' failed: {e}") from e
-        with open(local, "rb") as f:
-            return f.read()
-
-
-def _is_not_found(exc: Exception) -> bool:
-    msg = str(exc)
-    return ("404" in msg or "EntryNotFound" in type(exc).__name__
-            or "not found" in msg.lower())
+        if resp.status_code == 404:
+            # GitHub also answers 404 for a private repo without (valid)
+            # credentials — surface that hint, it is the #1 setup mistake.
+            raise RegistryNotFound(
+                f"{path} (404 — file missing at {ref}, or the repo is "
+                f"private and GITHUB_TOKEN is absent/invalid)"
+            )
+        if resp.status_code != 200:
+            raise RegistryReadError(
+                f"reading '{path}' failed: HTTP {resp.status_code} {resp.text[:200]}"
+            )
+        return resp.content
 
 
 # --------------------------------------------------------------------------- #
@@ -94,11 +120,15 @@ def _is_not_found(exc: Exception) -> bool:
 def build_reader() -> RegistryReader:
     """The registry reader the backend uses.
 
-    The repo ref is resolved at build time (not import time) with the same
-    HF_REPO_ID / HF_REPO_TYPE overrides as hf_sync.REPO_ID — reads and writes
-    must always target the SAME registry. (Not imported from hf_sync because
-    hf_sync imports this module.)"""
-    return HuggingFaceReader(
-        os.getenv("HF_REPO_ID", "GavelPublicData/public-library"),
-        os.getenv("HF_REPO_TYPE", "dataset"),
+    Env (all optional once the repo is public):
+      GAVEL_RULES_REPO  owner/name of the registry repo
+      GAVEL_RULES_REF   branch/tag/SHA to sync from (default main)
+      GITHUB_TOKEN      read access while the repo is private; also lifts the
+                        anonymous API rate limit (60/h -> 5000/h)
+    """
+    token = (os.getenv("GITHUB_TOKEN") or "").strip() or None
+    return GitHubReader(
+        os.getenv("GAVEL_RULES_REPO", "Offensive-AI-Lab/gavel-rules").strip(),
+        (os.getenv("GAVEL_RULES_REF") or "main").strip() or "main",
+        token=token,
     )

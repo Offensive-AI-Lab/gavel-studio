@@ -113,8 +113,10 @@ def _repair_rule_json(raw_response: str, ces_dict: Dict[str, Dict]):
         "content": (
             "You convert a model's noisy response into a strict JSON object for a GAVEL rule. "
             "Output JSON only. Fields: rule_name (string), description (string), "
-            "necessary (list of CE names), fallback (list of CE-name lists), "
-            "sufficient (list), new_ces (object mapping CE name to {definition, assigned_categories, new_category, examples}), "
+            "groups (object mapping a lowercase snake_case group name to a list of CE names), "
+            "condition (string over the group names using ONLY the grammar "
+            "'all of <group>' / '<K> of <group>' joined by 'and'/'or', parentheses allowed, never 'not'), "
+            "new_ces (object mapping CE name to {definition, assigned_categories, new_category, examples}), "
             "assigned_categories (list of integers/IDs for existing categories, or objects {name, description, is_new: true} for new ones), "
             "conversational_context (string, optional), instructional_context (string, optional). "
             "Use only CE names you see in the response or from available_ces. "
@@ -330,9 +332,9 @@ class NewCEInfo(BaseModel):
 
 class NameConflict(BaseModel):
     """Set when the AI generated a name that already exists in the public
-    registry. The frontend uses this to show the user the existing record
-    BEFORE they invest minutes in training-data generation that would fail
-    at publish anyway.
+    library (a locally-synced gavel-rules record, i.e. a row carrying a
+    public_id). The frontend uses this to show the user the existing record
+    BEFORE they invest minutes in training-data generation.
     """
     kind: str                       # "rule" or "ce"
     name: str                       # the colliding name
@@ -349,16 +351,16 @@ class RuleGenerationResponse(BaseModel):
     # reasoning model. Shown in the approval step, on the rule page and card.
     description: Optional[str] = None
     new_ces: List[NewCEInfo]
-    necessary: List[str]
-    fallback: Optional[List[List[str]]] = None
-    sufficient: Optional[List[str]] = None
+    # Rule logic: named CE groups + the v2-grammar firing condition over them.
+    groups: Dict[str, List[str]] = {}
+    condition: str = ""
     reasoning: Optional[str] = None
     validation_issues: List[str] = []
     error: Optional[str] = None
     categories: List[str] = []
     # Set if the AI's proposed rule name OR any new CE name collides with
-    # something already in the registry. The frontend uses these to show
-    # the user a "this exists, what do you want to do?" modal.
+    # something already in the public library. The frontend uses these to
+    # show the user a "this exists, what do you want to do?" modal.
     rule_name_conflict: Optional[NameConflict] = None
     ce_name_conflicts: List[NameConflict] = []
 
@@ -370,7 +372,7 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
     This endpoint:
     1. Takes a misuse scenario description
     2. Calls the thinking model (o3-mini) for deep CE analysis
-    3. Returns a structured rule with necessary/fallback/sufficient CEs
+    3. Returns a structured rule: named CE groups + a v2-grammar firing condition
     4. Creates new CEs in database if o3 identifies gaps
     5. Identifies which new CEs need excitation datasets
     """
@@ -479,52 +481,41 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
                 is_created_recently=created_ce.get('is_new', False)
             ))
         
-        # Build predicate string that preserves role semantics.
-        # Check against existing rules to prevent unnecessary predicate changes.
+        # Rule logic is named CE groups + a v2-grammar condition. The display
+        # predicate is DERIVED from them (render_predicate); the condition/groups
+        # pair is the source of truth persisted on the rules row.
+        from utils.rule_condition import ConditionError, parse, render_predicate
+        from sql_scripts.junction_scripts import compute_rule_fingerprint_v2
+
         existing_rules = fetch_rules_dict()
         proposed_name = rule_data.get('rule_name', '')
-        
-        # Calculate new predicate first to see what Logic mandates
-        necessary_items = rule_data.get('necessary') or []
-        fallback_groups = rule_data.get('fallback') or []
-        sufficient_items = rule_data.get('sufficient') or []
 
-        core_parts = []
-        if necessary_items:
-            core_parts.append(" AND ".join(necessary_items))
-        for group in fallback_groups:
-            if group:
-                core_parts.append(f"({' OR '.join(group)})")
-        core_expr = " AND ".join(core_parts)
+        ce_groups = {
+            str(gname): [m for m in (members or []) if isinstance(m, str)]
+            for gname, members in (rule_data.get('groups') or {}).items()
+        }
+        condition = (rule_data.get('condition') or '').strip()
 
-        # The boolean logic is the firing predicate ONLY (necessary AND fallback
-        # groups), matching the reference detection (detect_uc = has_all_required
-        # AND passes_any_of). 'sufficient' CEs are HELPFUL signals — they raise
-        # confidence but never trigger a rule on their own — so they are NOT part
-        # of the predicate. (sufficient_items is still persisted via the CE role
-        # links so the UI can show them as "Helpful".)
-        predicate = core_expr if core_expr else "TRUE"
+        try:
+            predicate = render_predicate(parse(condition), ce_groups) if condition else "TRUE"
+        except (ConditionError, KeyError):
+            # Malformed logic — already surfaced in validation_issues; the
+            # upsert below will reject it with a clear error.
+            predicate = condition or "TRUE"
 
-        # If rule exists and CEs are identical, conserve the original predicate
+        # If a rule with this name exists and the logic is structurally
+        # identical (canonical fingerprint over member names — group names and
+        # and/or order don't matter), keep the stored predicate string so a
+        # retry run doesn't churn the display rendering.
         if proposed_name in existing_rules:
             existing = existing_rules[proposed_name]
-            
-            # Normalize for comparison (sets of strings)
-            ex_nec = set(existing.get('necessary', []))
-            ex_suff = set(existing.get('sufficient', []))
-            
-            # Sort inner lists for fallback comparison
-            ex_fall = sorted([sorted(g) for g in existing.get('fallback', [])])
-            new_fall = sorted([sorted(g) for g in fallback_groups])
-            
-            new_nec = set(necessary_items)
-            new_suff = set(sufficient_items)
-            
-            if (ex_nec == new_nec) and (ex_suff == new_suff) and (ex_fall == new_fall):
-                # Structure is identical, keep existing predicate!
-                predicate = existing.get('predicate', predicate)
+            existing_fp = compute_rule_fingerprint_v2(
+                existing.get('ce_groups'), existing.get('condition')
+            )
+            if existing_fp == compute_rule_fingerprint_v2(ce_groups, condition):
+                predicate = existing.get('predicate') or predicate
                 print(f"[INFO] Rule '{proposed_name}' structure unchanged. Preserving existing predicate.")
-        
+
         # Save Rule to DB for persistence (embeddings are deferred)
         rule_data['predicate'] = predicate
         # ensure description is present
@@ -558,8 +549,19 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
 
         # mark_pending=True: the rule is invisible until /ai/embed-resources
         # confirms training+embeddings are done. Recovery wipes it if the
-        # pipeline doesn't finish.
-        rule_id = upsert_rule_with_links(rule_data, mark_pending=True)
+        # pipeline doesn't finish. upsert_rule_with_links validates the
+        # (ce_groups, condition) pair, dedups structurally, derives the stored
+        # predicate, and rebuilds the membership links.
+        rule_id = upsert_rule_with_links(
+            {
+                "rule_name": proposed_name,
+                "description": rule_data.get("description", ""),
+                "ce_groups": ce_groups,
+                "condition": condition,
+                "categories": category_names,
+            },
+            mark_pending=True,
+        )
 
         # The misuse description (request.scenario) is carried in the
         # response so the frontend can hand it to /ai/embed-resources,
@@ -568,25 +570,27 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
         # table — the scenario ends up inside the generated set's config.
 
         # ----- Early name-conflict detection -----
-        # Probe the registry's manifest for the AI-proposed names. Anything
-        # that collides gets attached to the response so the frontend can
-        # show a "this exists" modal BEFORE the user invests minutes in
-        # training-data generation that would fail at publish.
+        # The public library is mirrored into the local DB by the gavel-rules
+        # sync, so "name exists in the library" is simply a local row carrying
+        # a public_id. Probe the AI-proposed names against those rows so the
+        # frontend can show a "this exists" modal BEFORE the user invests
+        # minutes in training-data generation. (The upsert above may have
+        # merged into a synced row of the same name — matching by name still
+        # finds it, which is exactly the collision we want to surface.)
         rule_name_conflict = None
         ce_name_conflicts: list = []
         try:
-            from services.hf_publish import _resolve_token, _fetch_head_sha_and_manifest
             from routes.library import _lookup_conflict_summary as _summary_lookup
 
-            hf_token = _resolve_token()
-            if hf_token:
-                _sha, _manifest = _fetch_head_sha_and_manifest()
-                rule_names_idx = _manifest.get("rule_names", {}) or {}
-                ce_names_idx = _manifest.get("ce_names", {}) or {}
-
-                proposed_rule_name = rule_data.get("rule_name")
-                if proposed_rule_name and proposed_rule_name in rule_names_idx:
-                    existing_pid = rule_names_idx[proposed_rule_name]
+            proposed_rule_name = rule_data.get("rule_name")
+            if proposed_rule_name:
+                rows = execute_query_dict(
+                    "SELECT public_id FROM rules "
+                    "WHERE name = %s AND public_id IS NOT NULL",
+                    (proposed_rule_name,),
+                ) or []
+                if rows:
+                    existing_pid = rows[0]["public_id"]
                     rule_name_conflict = NameConflict(
                         kind="rule",
                         name=proposed_rule_name,
@@ -594,18 +598,22 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
                         existing_summary=_summary_lookup("rule", existing_pid),
                     )
 
-                for new_ce in new_ces_info:
-                    if new_ce.ce_name in ce_names_idx:
-                        existing_pid = ce_names_idx[new_ce.ce_name]
-                        ce_name_conflicts.append(NameConflict(
-                            kind="ce",
-                            name=new_ce.ce_name,
-                            existing_public_id=existing_pid,
-                            existing_summary=_summary_lookup("ce", existing_pid),
-                        ))
+            for new_ce in new_ces_info:
+                rows = execute_query_dict(
+                    "SELECT public_id FROM cognitive_elements "
+                    "WHERE name = %s AND public_id IS NOT NULL",
+                    (new_ce.ce_name,),
+                ) or []
+                if rows:
+                    existing_pid = rows[0]["public_id"]
+                    ce_name_conflicts.append(NameConflict(
+                        kind="ce",
+                        name=new_ce.ce_name,
+                        existing_public_id=existing_pid,
+                        existing_summary=_summary_lookup("ce", existing_pid),
+                    ))
         except Exception as e:
-            # Conflict probing failure is non-fatal — fall back to
-            # publish-time detection. Just log and move on.
+            # Conflict probing failure is non-fatal — just log and move on.
             print(f"[!] [Pipeline] Early name-conflict probe failed: {e}")
 
         # Return structured response
@@ -616,9 +624,8 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
             predicate=predicate,
             description=rule_data.get('description', ''),
             new_ces=new_ces_info,
-            necessary=rule_data.get('necessary', []),
-            fallback=rule_data.get('fallback'),
-            sufficient=rule_data.get('sufficient', []),
+            groups=ce_groups,
+            condition=condition,
             reasoning=result.get('reasoning', '')[:2000],  # Truncate for response size
             validation_issues=result.get('validation_issues', []),
             error=None,
@@ -716,16 +723,6 @@ async def discard_pipeline_resources(req: DiscardPipelineRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-class RenameCERequest(BaseModel):
-    ce_id: int
-    new_name: str = Field(..., max_length=120)
-
-
-class RenameRuleRequest(BaseModel):
-    rule_id: int
-    new_name: str = Field(..., max_length=120)
-
-
 # Parked-pipeline endpoints (/park-pipeline, /parked-pipelines,
 # /parked-pipeline/{rule_id}) were removed in Phase 3. The 8-step
 # RuleWizard owns its state via the `pipeline_runs` table now; the user
@@ -734,60 +731,9 @@ class RenameRuleRequest(BaseModel):
 # longer written. They're left in the schema for safety (a future Phase
 # 6 cleanup pass can drop them once we're confident nothing reads them).
 
-
-@router.post("/rename-ce")
-async def rename_local_ce(req: RenameCERequest, _: int = Depends(get_current_user)):
-    """Rename a local-draft CE. Used by the conflict-resolution flow when
-    the user chose 'use a different name' for a CE that collided with a
-    registry record. Refuses to rename a CE that is no longer a draft —
-    once published, names are immutable on HF and we won't try to update
-    them locally either."""
-    new_name = (req.new_name or "").strip()
-    if not new_name:
-        raise HTTPException(status_code=400, detail="new_name is required")
-    rows = execute_query_dict(
-        "SELECT is_local_draft FROM cognitive_elements WHERE ce_id = %s",
-        (req.ce_id,),
-    )
-    if not rows:
-        raise HTTPException(status_code=404, detail="CE not found")
-    if not rows[0].get("is_local_draft", True):
-        raise HTTPException(status_code=400, detail="CE is already published; cannot rename")
-    try:
-        execute_query(
-            "UPDATE cognitive_elements SET name = %s WHERE ce_id = %s",
-            (new_name, req.ce_id),
-        )
-    except Exception as e:
-        # Most likely cause: name collides with another local row. Surface
-        # the underlying message; frontend will already have probed via
-        # check-name but races are possible.
-        raise HTTPException(status_code=409, detail=f"Could not rename: {e}")
-    return {"status": "renamed", "ce_id": req.ce_id, "name": new_name}
-
-
-@router.post("/rename-rule")
-async def rename_local_rule(req: RenameRuleRequest, _: int = Depends(get_current_user)):
-    """Rename a local-draft rule. Same constraints as rename_local_ce."""
-    new_name = (req.new_name or "").strip()
-    if not new_name:
-        raise HTTPException(status_code=400, detail="new_name is required")
-    rows = execute_query_dict(
-        "SELECT is_local_draft FROM rules WHERE rule_id = %s",
-        (req.rule_id,),
-    )
-    if not rows:
-        raise HTTPException(status_code=404, detail="Rule not found")
-    if not rows[0].get("is_local_draft", True):
-        raise HTTPException(status_code=400, detail="Rule is already published; cannot rename")
-    try:
-        execute_query(
-            "UPDATE rules SET name = %s WHERE rule_id = %s",
-            (new_name, req.rule_id),
-        )
-    except Exception as e:
-        raise HTTPException(status_code=409, detail=f"Could not rename: {e}")
-    return {"status": "renamed", "rule_id": req.rule_id, "name": new_name}
+# /ai/rename-ce and /ai/rename-rule were removed with the publish flow —
+# they existed solely for the publish-time name-conflict resolution modal.
+# Library contributions now go through gavel-rules PRs.
 
 
 class EmbedResourcesRequest(BaseModel):
@@ -1328,7 +1274,7 @@ async def get_ce_training_dataset(ce_id: int):
         # whose dataset wasn't pulled at sync time. No-op when the row is
         # already cached locally; one HF round-trip on a miss.
         try:
-            from services.hf_sync import ensure_excitation
+            from services.library_sync import ensure_excitation
             ensure_excitation(ce_id)
         except Exception as lazy_err:
             print(f"[ce-training] lazy excitation fetch failed: {lazy_err}")
@@ -1793,21 +1739,29 @@ def generate_negative_config(req: NegativeConfigRequest, _: int = Depends(get_cu
 # ---------------------------------------------------------------------------
 
 def _load_rule_context(rule_id: int) -> dict:
-    """Fetch a rule's name, predicate, and CEs (name + definition + role)
-    for the scenario-derivation prompt. Raises if the rule is missing."""
+    """Fetch a rule's name, predicate, logic (ce_groups + condition) and its
+    member CEs (name + definition) for the scenario-derivation prompt.
+    Raises if the rule is missing."""
     rule_rows = execute_query_dict(
-        "SELECT rule_id, name, predicate, description FROM rules WHERE rule_id = %s",
+        "SELECT rule_id, name, predicate, description, ce_groups, condition "
+        "FROM rules WHERE rule_id = %s",
         (rule_id,),
     )
     if not rule_rows:
         raise HTTPException(status_code=404, detail=f"Rule {rule_id} not found")
     rule = rule_rows[0]
+    ce_groups = rule.get("ce_groups") or {}
+    if isinstance(ce_groups, str):
+        try:
+            ce_groups = json.loads(ce_groups)
+        except Exception:
+            ce_groups = {}
     ce_rows = execute_query_dict(
-        """SELECT ce.name, ce.definition, rcl.role, rcl.fallback_group
+        """SELECT ce.name, ce.definition
            FROM rule_ce_link rcl
            JOIN cognitive_elements ce ON ce.ce_id = rcl.ce_id
            WHERE rcl.rule_id = %s
-           ORDER BY rcl.role, rcl.fallback_group""",
+           ORDER BY ce.name""",
         (rule_id,),
     ) or []
     return {
@@ -1815,6 +1769,8 @@ def _load_rule_context(rule_id: int) -> dict:
         "name": rule.get("name"),
         "predicate": rule.get("predicate"),
         "description": rule.get("description"),
+        "ce_groups": ce_groups if isinstance(ce_groups, dict) else {},
+        "condition": rule.get("condition"),
         "ces": ce_rows,
     }
 
@@ -1832,8 +1788,16 @@ def _derive_scenario_from_rule(rule_context: dict) -> str:
     with open(template_path, "r", encoding="utf-8") as f:
         template = f.read()
 
+    # Annotate each CE with the group(s) it belongs to so the prompt sees the
+    # rule's structure (which CEs travel together / are alternatives).
+    groups_of: Dict[str, list] = {}
+    for gname, members in (rule_context.get("ce_groups") or {}).items():
+        for member in members or []:
+            groups_of.setdefault(member, []).append(gname)
     ce_lines = "\n".join(
-        f"- {c['name']} (role: {c.get('role', 'necessary')}): {c.get('definition', '')}"
+        f"- {c['name']}"
+        + (f" (groups: {', '.join(groups_of[c['name']])})" if c.get('name') in groups_of else "")
+        + f": {c.get('definition', '')}"
         for c in rule_context.get("ces", [])
     ) or "(no cognitive elements linked)"
 
@@ -1938,15 +1902,12 @@ def discard_unready_rule(rule_id: int, _: int = Depends(get_current_user)):
     return {"success": True, "deleted": True}
 
 
-class CeRoleLink(BaseModel):
-    ce_id: int
-    role: str = "necessary"
-    fallback_group: int = 0
-
-
 class CreateRuleFromCEsRequest(BaseModel):
     name: str = Field(..., min_length=1)
-    ce_links: list[CeRoleLink]
+    # Rule logic: named groups of bookmarked ce_ids + a v2-grammar condition
+    # over the group names. The backend resolves ids -> CE names for storage.
+    groups: Dict[str, List[int]]
+    condition: str = Field(..., min_length=1)
     categories: list[str] = []
     # Optional user-written explanation of what the rule detects. The manual
     # build-from-CEs flow has no AI to generate one, so the user can supply it.
@@ -1957,7 +1918,8 @@ class CreateRuleFromCEsRequest(BaseModel):
 def create_rule_from_bookmarked_ces(
     req: CreateRuleFromCEsRequest, _: int = Depends(get_current_user)
 ):
-    """Create a GUARDRAIL-AGNOSTIC draft rule from bookmarked CEs with roles.
+    """Create a GUARDRAIL-AGNOSTIC draft rule from bookmarked CEs arranged
+    into named groups + a firing condition.
 
     The rule is created is_ready=FALSE and stays hidden until the build-from-CEs
     wizard finalizes it (after its default test/calibration set is generated).
@@ -1965,16 +1927,55 @@ def create_rule_from_bookmarked_ces(
     /classifiers/{id}/rules/bookmarked-ce endpoint. Returns the new rule_id.
     """
     from sql_scripts.model_scripts import create_draft_rule_from_bookmarked
+    from utils.rule_condition import GROUP_NAME_RE, KEYWORDS, validate_condition
 
-    if len(req.ce_links) < 2:
+    all_ce_ids = {ce_id for members in req.groups.values() for ce_id in (members or [])}
+    if len(all_ce_ids) < 2:
         raise HTTPException(
             status_code=400,
             detail="A rule needs at least 2 cognitive elements so the rule set can distinguish between them.",
         )
+
+    for gname in req.groups:
+        if gname in KEYWORDS or not GROUP_NAME_RE.match(gname):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Bad group name '{gname}': must be lowercase snake_case "
+                    f"([a-z][a-z0-9_]*) and not a keyword (all/of/and/or/not)."
+                ),
+            )
+
+    # Resolve ce_ids -> names (storage speaks CE names).
+    rows = execute_query_dict(
+        "SELECT ce_id, name FROM cognitive_elements WHERE ce_id = ANY(%s)",
+        (list(all_ce_ids),),
+    ) or []
+    name_of = {r["ce_id"]: r["name"] for r in rows}
+    missing = sorted(all_ce_ids - set(name_of))
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Unknown CE ids: {missing}")
+
+    ce_groups = {
+        gname: [name_of[ce_id] for ce_id in (members or [])]
+        for gname, members in req.groups.items()
+    }
+
+    problems = validate_condition(req.condition, ce_groups)
+    if problems:
+        raise HTTPException(status_code=400, detail="; ".join(problems))
+
     try:
-        ce_roles = [link.model_dump() for link in req.ce_links]
+        # create_draft_rule_from_bookmarked speaks the EDITOR shape
+        # ({group_name: [ce_id]}) and resolves ids -> names itself via
+        # resolve_editor_logic; the ce_groups name resolution above is only
+        # a pre-flight so validate_condition can give a clean 400 first.
         rule_id, predicate = create_draft_rule_from_bookmarked(
-            req.name.strip(), ce_roles, req.categories, (req.description or "").strip()
+            req.name.strip(),
+            req.groups,
+            req.condition.strip(),
+            req.categories,
+            (req.description or "").strip(),
         )
         return {"success": True, "rule_id": rule_id, "predicate": predicate}
     except ValueError as e:
@@ -2031,7 +2032,7 @@ def get_rule_defaults(rule_id: int, _: int = Depends(get_current_user)):
     the sets from HF first if the rule is public and they aren't local yet.
     """
     try:
-        from services.hf_sync import ensure_rule_defaults
+        from services.library_sync import ensure_rule_defaults
         ensure_rule_defaults(rule_id)
     except Exception as e:
         print(f"[!] [defaults] ensure_rule_defaults({rule_id}) failed: {e}")
@@ -2058,7 +2059,7 @@ def preview_rule_test_sets(rule_id: int, user_id: int = Depends(get_current_user
     Lazily pulls the default from HF first if the rule is public.
     """
     try:
-        from services.hf_sync import ensure_rule_defaults
+        from services.library_sync import ensure_rule_defaults
         ensure_rule_defaults(rule_id)
     except Exception as e:
         print(f"[!] [preview] ensure_rule_defaults({rule_id}) failed: {e}")

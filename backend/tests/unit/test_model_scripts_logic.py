@@ -1,30 +1,28 @@
-"""Pure unit tests for the policy/fingerprint logic in
+"""Pure unit tests for the policy/fingerprint/editor-logic helpers in
 `sql_scripts.model_scripts`, complementing `test_policy_drift.py`.
 
 NO database or network is available in this environment, so every DB seam is
 monkeypatched. `execute_query` / `execute_query_dict` are imported INTO
 `model_scripts` at module load time, so we patch them on the `model_scripts`
-module namespace (NOT on `utils.sqlite_db`). The draft-creation path imports
-`upsert_rule_with_links` at call time from `gavel_pipeline.db_access`, so we
-patch it there.
+module namespace (NOT on `utils.sqlite_db`).
 
-The pure, DB-free helper `compute_rule_fingerprint_from_links`
+The pure, DB-free helper `compute_rule_fingerprint_v2`
 (`sql_scripts.junction_scripts`) is exercised for real — it is deterministic,
 and using the real one keeps the equivalence/determinism assertions honest.
 
 Functions covered here (with an emphasis on edge cases / properties NOT already
 asserted in test_policy_drift.py):
-  * compute_rule_fingerprint_from_links  (determinism, role/order/grouping)
-  * compute_classifier_policy_fingerprint (composite-key grouping, malformed rows)
-  * reconcile_classifier_status           (state-machine boundaries)
-  * create_draft_rule_from_bookmarked     (role mapping, fallback ordering)
+  * compute_classifier_policy_fingerprint_v2 (composite hashing, malformed rows)
+  * reconcile_classifier_status              (state-machine boundaries)
+  * resolve_editor_logic                     (ids->names, validation, predicate)
+  * _build_logic_payload                     (the read-contract shape)
 """
 import hashlib
 
 import pytest
 
 from sql_scripts import model_scripts
-from sql_scripts.junction_scripts import compute_rule_fingerprint_from_links
+from sql_scripts.junction_scripts import compute_rule_fingerprint_v2
 
 
 # ---------------------------------------------------------------------------
@@ -59,184 +57,73 @@ class _Writer:
 
 
 # ===========================================================================
-# compute_rule_fingerprint_from_links  (the pure structural fingerprint)
-# ===========================================================================
-
-
-class TestRuleFingerprintFromLinks:
-    def test_empty_links_is_stable_canonical_form(self):
-        # Both [] and None route through `ce_links or []` to the same string.
-        empty = "N:()|F:[]|S:()"
-        assert compute_rule_fingerprint_from_links([]) == empty
-        assert compute_rule_fingerprint_from_links(None) == empty
-
-    def test_order_independent_over_necessary(self):
-        a = compute_rule_fingerprint_from_links(
-            [{"ce_id": 3, "role": "necessary"}, {"ce_id": 1, "role": "necessary"}]
-        )
-        b = compute_rule_fingerprint_from_links(
-            [{"ce_id": 1, "role": "necessary"}, {"ce_id": 3, "role": "necessary"}]
-        )
-        assert a == b
-
-    def test_deterministic_same_content_same_hash(self):
-        links = [
-            {"ce_id": 5, "role": "necessary"},
-            {"ce_id": 9, "role": "sufficient"},
-        ]
-        assert compute_rule_fingerprint_from_links(
-            list(links)
-        ) == compute_rule_fingerprint_from_links(list(links))
-
-    def test_role_distinguishes_fingerprint(self):
-        # Same ce_id, different role -> different fingerprint.
-        as_nec = compute_rule_fingerprint_from_links([{"ce_id": 1, "role": "necessary"}])
-        as_suf = compute_rule_fingerprint_from_links([{"ce_id": 1, "role": "sufficient"}])
-        assert as_nec != as_suf
-
-    def test_none_ce_id_links_are_dropped(self):
-        # A link with ce_id None must be ignored, leaving the canonical empty form.
-        out = compute_rule_fingerprint_from_links(
-            [{"ce_id": None, "role": "necessary"}]
-        )
-        assert out == "N:()|F:[]|S:()"
-
-    def test_missing_role_defaults_to_necessary(self):
-        no_role = compute_rule_fingerprint_from_links([{"ce_id": 7}])
-        explicit = compute_rule_fingerprint_from_links(
-            [{"ce_id": 7, "role": "necessary"}]
-        )
-        assert no_role == explicit
-
-    def test_role_case_insensitive(self):
-        upper = compute_rule_fingerprint_from_links([{"ce_id": 1, "role": "NECESSARY"}])
-        lower = compute_rule_fingerprint_from_links([{"ce_id": 1, "role": "necessary"}])
-        assert upper == lower
-
-    def test_fallback_grouping_normalized_within_group(self):
-        # Members within a fallback group are sorted, so member order in a group
-        # doesn't matter.
-        a = compute_rule_fingerprint_from_links(
-            [
-                {"ce_id": 2, "role": "fallback", "fallback_group": 1},
-                {"ce_id": 1, "role": "fallback", "fallback_group": 1},
-            ]
-        )
-        b = compute_rule_fingerprint_from_links(
-            [
-                {"ce_id": 1, "role": "fallback", "fallback_group": 1},
-                {"ce_id": 2, "role": "fallback", "fallback_group": 1},
-            ]
-        )
-        assert a == b
-
-    def test_fallback_group_numbering_irrelevant_only_partition_matters(self):
-        # The fingerprint sorts groups as tuples, so the actual group *number*
-        # is irrelevant — only the partition of ce_ids into groups matters.
-        groups_1_2 = compute_rule_fingerprint_from_links(
-            [
-                {"ce_id": 1, "role": "fallback", "fallback_group": 1},
-                {"ce_id": 2, "role": "fallback", "fallback_group": 2},
-            ]
-        )
-        groups_5_9 = compute_rule_fingerprint_from_links(
-            [
-                {"ce_id": 1, "role": "fallback", "fallback_group": 5},
-                {"ce_id": 2, "role": "fallback", "fallback_group": 9},
-            ]
-        )
-        assert groups_1_2 == groups_5_9
-
-    def test_distinct_partitions_differ(self):
-        # {1},{2} (two singleton groups) vs {1,2} (one group) must differ.
-        two_groups = compute_rule_fingerprint_from_links(
-            [
-                {"ce_id": 1, "role": "fallback", "fallback_group": 1},
-                {"ce_id": 2, "role": "fallback", "fallback_group": 2},
-            ]
-        )
-        one_group = compute_rule_fingerprint_from_links(
-            [
-                {"ce_id": 1, "role": "fallback", "fallback_group": 1},
-                {"ce_id": 2, "role": "fallback", "fallback_group": 1},
-            ]
-        )
-        assert two_groups != one_group
-
-
-# ===========================================================================
-# compute_classifier_policy_fingerprint  (composite-key grouping + hashing)
+# compute_classifier_policy_fingerprint_v2  (composite hashing)
 # ===========================================================================
 
 
 class TestPolicyFingerprintComposite:
-    def test_rows_grouped_by_setup_id_then_hashed(self, monkeypatch):
-        # Two distinct setups; verify the result equals the sha256 of the sorted
-        # per-rule fingerprints joined by ';'.
+    def test_setup_rows_hashed_via_v2_rule_fingerprints(self, monkeypatch):
         rows = [
-            {"setup_id": 1, "ce_id": 5, "role": "necessary", "fallback_group": 0},
-            {"setup_id": 2, "ce_id": 9, "role": "sufficient", "fallback_group": 0},
+            {"ce_groups": {"g": ["A"]}, "condition": "all of g"},
+            {"ce_groups": {"g": ["B", "C"]}, "condition": "1 of g"},
         ]
         monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows)
-        result = model_scripts.compute_classifier_policy_fingerprint(1)
+        result = model_scripts.compute_classifier_policy_fingerprint_v2(1)
 
-        fp1 = compute_rule_fingerprint_from_links(
-            [{"ce_id": 5, "role": "necessary", "fallback_group": 0}]
-        )
-        fp2 = compute_rule_fingerprint_from_links(
-            [{"ce_id": 9, "role": "sufficient", "fallback_group": 0}]
-        )
+        fp1 = compute_rule_fingerprint_v2({"g": ["A"]}, "all of g")
+        fp2 = compute_rule_fingerprint_v2({"g": ["B", "C"]}, "1 of g")
         canonical = ";".join(sorted([fp1, fp2]))
         expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         assert result == expected
 
-    def test_multiple_links_in_one_setup_collected(self, monkeypatch):
-        # Several rows sharing a setup_id form ONE rule with multiple CEs.
-        rows = [
-            {"setup_id": 7, "ce_id": 1, "role": "necessary", "fallback_group": 0},
-            {"setup_id": 7, "ce_id": 2, "role": "necessary", "fallback_group": 0},
-        ]
-        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows)
-        result = model_scripts.compute_classifier_policy_fingerprint(1)
-
-        rule_fp = compute_rule_fingerprint_from_links(
-            [
-                {"ce_id": 1, "role": "necessary", "fallback_group": 0},
-                {"ce_id": 2, "role": "necessary", "fallback_group": 0},
-            ]
-        )
-        expected = hashlib.sha256(rule_fp.encode("utf-8")).hexdigest()
-        assert result == expected
-
-    def test_same_content_split_across_setups_changes_hash(self, monkeypatch):
-        # Two CEs in ONE setup vs the SAME two CEs split into two setups are
+    def test_same_logic_split_across_setups_changes_hash(self, monkeypatch):
+        # Two groups in ONE setup vs the SAME groups split into two setups are
         # structurally different policies -> different overall fingerprint.
         single = [
-            {"setup_id": 1, "ce_id": 1, "role": "necessary", "fallback_group": 0},
-            {"setup_id": 1, "ce_id": 2, "role": "necessary", "fallback_group": 0},
+            {"ce_groups": {"p": ["A"], "q": ["B"]}, "condition": "all of p and all of q"},
         ]
         split = [
-            {"setup_id": 1, "ce_id": 1, "role": "necessary", "fallback_group": 0},
-            {"setup_id": 2, "ce_id": 2, "role": "necessary", "fallback_group": 0},
+            {"ce_groups": {"p": ["A"]}, "condition": "all of p"},
+            {"ce_groups": {"q": ["B"]}, "condition": "all of q"},
         ]
         monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: single)
-        fp_single = model_scripts.compute_classifier_policy_fingerprint(1)
+        fp_single = model_scripts.compute_classifier_policy_fingerprint_v2(1)
         monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: split)
-        fp_split = model_scripts.compute_classifier_policy_fingerprint(1)
+        fp_split = model_scripts.compute_classifier_policy_fingerprint_v2(1)
         assert fp_single != fp_split
 
     def test_classifier_id_threaded_into_query_params(self, monkeypatch):
         db = _QueuedDictDB([[]])
         monkeypatch.setattr(model_scripts, "execute_query_dict", db)
-        model_scripts.compute_classifier_policy_fingerprint(424242)
+        model_scripts.compute_classifier_policy_fingerprint_v2(424242)
         assert db.calls[0][1] == (424242,)
 
+    def test_query_targets_active_setup_logic_columns(self, monkeypatch):
+        # The fingerprint must read the per-setup logic copy, not the junctions.
+        db = _QueuedDictDB([[]])
+        monkeypatch.setattr(model_scripts, "execute_query_dict", db)
+        model_scripts.compute_classifier_policy_fingerprint_v2(1)
+        sql = db.calls[0][0]
+        assert "ce_groups" in sql and "condition" in sql
+        assert "rule_setup" in sql and "is_active" in sql
+        assert "setup_ce_link" not in sql
+
     def test_result_is_hex_sha256_when_non_empty(self, monkeypatch):
-        rows = [{"setup_id": 1, "ce_id": 5, "role": "necessary", "fallback_group": 0}]
+        rows = [{"ce_groups": {"g": ["A"]}, "condition": "all of g"}]
         monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows)
-        out = model_scripts.compute_classifier_policy_fingerprint(1)
+        out = model_scripts.compute_classifier_policy_fingerprint_v2(1)
         assert len(out) == 64
         int(out, 16)  # raises ValueError if not valid hex
+
+    def test_condition_less_setup_still_counts_membership(self, monkeypatch):
+        # A setup with members but a NULL condition contributes its
+        # membership-only fingerprint (legacy no-logic rule) — it is part of
+        # the trained policy, not invisible.
+        rows = [{"ce_groups": {"g": ["A"]}, "condition": None}]
+        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows)
+        out = model_scripts.compute_classifier_policy_fingerprint_v2(1)
+        rule_fp = compute_rule_fingerprint_v2({"g": ["A"]}, None)
+        assert out == hashlib.sha256(rule_fp.encode("utf-8")).hexdigest()
 
 
 # ===========================================================================
@@ -249,7 +136,7 @@ class TestReconcileStateMachine:
         rows = [{"status": "active", "trained_policy_fingerprint": "fp"}]
         monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows)
         monkeypatch.setattr(
-            model_scripts, "compute_classifier_policy_fingerprint", lambda cid: "fp"
+            model_scripts, "compute_classifier_policy_fingerprint_v2", lambda cid: "fp"
         )
         writer = _Writer()
         monkeypatch.setattr(model_scripts, "execute_query", writer)
@@ -260,7 +147,7 @@ class TestReconcileStateMachine:
         rows = [{"status": "active", "trained_policy_fingerprint": "trained"}]
         monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows)
         monkeypatch.setattr(
-            model_scripts, "compute_classifier_policy_fingerprint", lambda cid: "live"
+            model_scripts, "compute_classifier_policy_fingerprint_v2", lambda cid: "live"
         )
         writer = _Writer()
         monkeypatch.setattr(model_scripts, "execute_query", writer)
@@ -269,8 +156,6 @@ class TestReconcileStateMachine:
         assert writer.calls[0][1] == ("needs_retraining", 11)
 
     def test_empty_trained_fp_string_is_falsy_passthrough(self, monkeypatch):
-        # An empty-string fingerprint is falsy -> `not trained_fp` short-circuits
-        # and the status passes through WITHOUT recomputation.
         rows = [{"status": "active", "trained_policy_fingerprint": ""}]
         monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows)
 
@@ -278,7 +163,7 @@ class TestReconcileStateMachine:
             raise AssertionError("fingerprint should not be recomputed")
 
         monkeypatch.setattr(
-            model_scripts, "compute_classifier_policy_fingerprint", _boom
+            model_scripts, "compute_classifier_policy_fingerprint_v2", _boom
         )
         writer = _Writer()
         monkeypatch.setattr(model_scripts, "execute_query", writer)
@@ -294,7 +179,7 @@ class TestReconcileStateMachine:
             raise AssertionError("should not recompute for non-trainable status")
 
         monkeypatch.setattr(
-            model_scripts, "compute_classifier_policy_fingerprint", _boom
+            model_scripts, "compute_classifier_policy_fingerprint_v2", _boom
         )
         writer = _Writer()
         monkeypatch.setattr(model_scripts, "execute_query", writer)
@@ -305,7 +190,7 @@ class TestReconcileStateMachine:
         rows = [{"status": "needs_retraining", "trained_policy_fingerprint": "fp"}]
         monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows)
         monkeypatch.setattr(
-            model_scripts, "compute_classifier_policy_fingerprint", lambda cid: "fp"
+            model_scripts, "compute_classifier_policy_fingerprint_v2", lambda cid: "fp"
         )
         writer = _Writer()
         monkeypatch.setattr(model_scripts, "execute_query", writer)
@@ -324,119 +209,89 @@ class TestReconcileStateMachine:
 
 
 # ===========================================================================
-# create_draft_rule_from_bookmarked  (role mapping + fallback ordering)
+# resolve_editor_logic — the single ids->names+validate+render choke point
 # ===========================================================================
 
 
-def _patch_upsert(monkeypatch, capture, return_id=999):
-    import gavel_pipeline.db_access as dba
-
-    def fake_upsert(rule_data, mark_pending=False):
-        capture["rule_data"] = rule_data
-        capture["mark_pending"] = mark_pending
-        return return_id
-
-    monkeypatch.setattr(dba, "upsert_rule_with_links", fake_upsert)
-
-
-class TestCreateDraftFromBookmarked:
-    def test_empty_and_none_ce_roles_raise(self, monkeypatch):
-        with pytest.raises(ValueError, match="ce_roles cannot be empty"):
-            model_scripts.create_draft_rule_from_bookmarked("R", [])
-        with pytest.raises(ValueError):
-            model_scripts.create_draft_rule_from_bookmarked("R", None)
-
-    def test_mark_pending_true_and_role_buckets(self, monkeypatch):
-        ce_roles = [
-            {"ce_id": 1, "role": "necessary"},
-            {"ce_id": 2, "role": "sufficient"},
-        ]
-        name_rows = [{"ce_id": 1, "name": "A"}, {"ce_id": 2, "name": "B"}]
-        monkeypatch.setattr(
-            model_scripts, "execute_query_dict", lambda *a, **k: name_rows
-        )
-        capture = {}
-        _patch_upsert(monkeypatch, capture)
-
-        rule_id, predicate = model_scripts.create_draft_rule_from_bookmarked(
-            "Draft", ce_roles
-        )
-        assert rule_id == 999
-        assert capture["mark_pending"] is True
-        rd = capture["rule_data"]
-        assert rd["necessary"] == ["A"]
-        assert rd["sufficient"] == ["B"]
-        assert rd["fallback"] == []
-        # 'sufficient' CEs are helpful-only and excluded from the firing
-        # predicate, so only the necessary CE (A) appears.
-        assert predicate == "A"
-        assert rd["predicate"] == predicate
-
-    def test_multiple_fallback_groups_ordered_by_group_key(self, monkeypatch):
-        # Groups must be emitted in ascending group-key order regardless of the
-        # order roles appear in the input list.
-        ce_roles = [
-            {"ce_id": 3, "role": "fallback", "fallback_group": 2},
-            {"ce_id": 1, "role": "fallback", "fallback_group": 1},
-            {"ce_id": 2, "role": "fallback", "fallback_group": 1},
-        ]
-        name_rows = [
-            {"ce_id": 1, "name": "G1a"},
-            {"ce_id": 2, "name": "G1b"},
-            {"ce_id": 3, "name": "G2"},
-        ]
-        monkeypatch.setattr(
-            model_scripts, "execute_query_dict", lambda *a, **k: name_rows
-        )
-        capture = {}
-        _patch_upsert(monkeypatch, capture)
-
-        rule_id, predicate = model_scripts.create_draft_rule_from_bookmarked(
-            "D", ce_roles
-        )
-        rd = capture["rule_data"]
-        # group 1 first (two members), then group 2.
-        assert rd["fallback"] == [["G1a", "G1b"], ["G2"]]
-        assert predicate == "(G1a OR G1b) AND (G2)"
-
-    def test_duplicate_role_entries_both_kept_in_bucket(self, monkeypatch):
-        # The bucket logic does not dedupe; two necessary CEs both land in the
-        # necessary bucket and the predicate.
-        ce_roles = [
-            {"ce_id": 1, "role": "necessary"},
-            {"ce_id": 2, "role": "necessary"},
-        ]
-        name_rows = [{"ce_id": 1, "name": "A"}, {"ce_id": 2, "name": "B"}]
-        monkeypatch.setattr(
-            model_scripts, "execute_query_dict", lambda *a, **k: name_rows
-        )
-        capture = {}
-        _patch_upsert(monkeypatch, capture)
-        _, predicate = model_scripts.create_draft_rule_from_bookmarked("D", ce_roles)
-        assert capture["rule_data"]["necessary"] == ["A", "B"]
-        assert predicate == "A AND B"
-
-    def test_none_ce_id_excluded_from_lookup_params(self, monkeypatch):
-        ce_roles = [
-            {"ce_id": 1, "role": "necessary"},
-            {"role": "necessary"},  # ce_id absent
-        ]
-        db = _QueuedDictDB([[{"ce_id": 1, "name": "A"}]])
+class TestResolveEditorLogic:
+    def _patch_names(self, monkeypatch, rows):
+        db = _QueuedDictDB([rows])
         monkeypatch.setattr(model_scripts, "execute_query_dict", db)
-        capture = {}
-        _patch_upsert(monkeypatch, capture)
-        model_scripts.create_draft_rule_from_bookmarked("D", ce_roles)
-        # Only the non-None ce_id is passed to the IN(...) lookup.
-        assert db.calls[0][1] == (1,)
+        return db
 
-    def test_all_none_ce_ids_skips_db_lookup_entirely(self, monkeypatch):
-        ce_roles = [{"role": "necessary"}, {"role": "sufficient"}]
-        db = _QueuedDictDB([])  # would error on a popped call beyond default
-        monkeypatch.setattr(model_scripts, "execute_query_dict", db)
-        capture = {}
-        _patch_upsert(monkeypatch, capture)
-        rule_id, _ = model_scripts.create_draft_rule_from_bookmarked("D", ce_roles)
-        assert db.calls == []  # no name lookup attempted
-        assert rule_id == 999
-        assert capture["rule_data"]["necessary"] == []
-        assert capture["rule_data"]["sufficient"] == []
+    def test_translates_ids_to_names_and_renders(self, monkeypatch):
+        db = self._patch_names(monkeypatch, [
+            {"ce_id": 1, "name": "Alpha"},
+            {"ce_id": 2, "name": "Beta"},
+        ])
+        ce_groups, condition, predicate, ce_ids = model_scripts.resolve_editor_logic(
+            {"req": [1], "opt": [2]}, "all of req and 1 of opt")
+        assert ce_groups == {"req": ["Alpha"], "opt": ["Beta"]}
+        assert condition == "all of req and 1 of opt"
+        assert predicate == "Alpha AND Beta"
+        assert ce_ids == [1, 2]
+        # Single deduped ANY(%s) lookup over the membership union.
+        assert len(db.calls) == 1
+        assert db.calls[0][1] == ([1, 2],)
+
+    def test_string_ids_coerced_to_int(self, monkeypatch):
+        self._patch_names(monkeypatch, [{"ce_id": 5, "name": "N"}])
+        ce_groups, _, _, ce_ids = model_scripts.resolve_editor_logic(
+            {"g": ["5"]}, "all of g")
+        assert ce_groups == {"g": ["N"]}
+        assert ce_ids == [5]
+
+    def test_unknown_ce_id_raises(self, monkeypatch):
+        self._patch_names(monkeypatch, [{"ce_id": 1, "name": "Alpha"}])
+        with pytest.raises(ValueError, match="Unknown CE id"):
+            model_scripts.resolve_editor_logic({"g": [1, 77]}, "all of g")
+
+    def test_undefined_group_reference_raises(self, monkeypatch):
+        self._patch_names(monkeypatch, [{"ce_id": 1, "name": "Alpha"}])
+        with pytest.raises(ValueError, match="Invalid rule logic"):
+            model_scripts.resolve_editor_logic({"g": [1]}, "all of ghost")
+
+    def test_empty_group_raises(self, monkeypatch):
+        self._patch_names(monkeypatch, [{"ce_id": 1, "name": "Alpha"}])
+        with pytest.raises(ValueError, match="no members"):
+            model_scripts.resolve_editor_logic(
+                {"g": [1], "empty": []}, "all of g")
+
+    def test_unparseable_condition_raises(self, monkeypatch):
+        self._patch_names(monkeypatch, [{"ce_id": 1, "name": "Alpha"}])
+        with pytest.raises(ValueError, match="Invalid rule logic"):
+            model_scripts.resolve_editor_logic({"g": [1]}, "all of g and")
+
+    def test_shared_ce_across_groups_deduped_in_lookup(self, monkeypatch):
+        db = self._patch_names(monkeypatch, [{"ce_id": 3, "name": "Shared"}])
+        ce_groups, _, _, ce_ids = model_scripts.resolve_editor_logic(
+            {"a": [3], "b": [3]}, "all of a or all of b")
+        assert ce_groups == {"a": ["Shared"], "b": ["Shared"]}
+        assert ce_ids == [3]
+        assert db.calls[0][1] == ([3],)
+
+
+# ===========================================================================
+# _build_logic_payload — the read contract for rule cards / the editor
+# ===========================================================================
+
+
+class TestBuildLogicPayload:
+    def test_shapes_groups_with_ids_and_names(self):
+        membership = [{"ce_id": 1, "name": "A"}, {"ce_id": 2, "name": "B"}]
+        out = model_scripts._build_logic_payload(
+            {"g": ["A", "B"]}, "all of g", "(A AND B)", membership)
+        assert out == {
+            "groups": {"g": [{"ce_id": 1, "name": "A"}, {"ce_id": 2, "name": "B"}]},
+            "condition": "all of g",
+            "predicate": "(A AND B)",
+        }
+
+    def test_member_missing_from_membership_degrades_to_none_id(self):
+        out = model_scripts._build_logic_payload(
+            {"g": ["Ghost"]}, "all of g", "Ghost", [])
+        assert out["groups"] == {"g": [{"ce_id": None, "name": "Ghost"}]}
+
+    def test_empty_logic_yields_empty_contract(self):
+        out = model_scripts._build_logic_payload(None, None, None, [])
+        assert out == {"groups": {}, "condition": "", "predicate": ""}

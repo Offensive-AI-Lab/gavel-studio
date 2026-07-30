@@ -14,7 +14,7 @@ Rather than relying on surface-text moderation, GAVEL Studio works at the activa
 
 - **Backend:** FastAPI + SQLite (a single file at `backend/db/gavel.sqlite3` — no database server)
 - **Frontend:** React 19 + Vite
-- **Public registry:** Hugging Face datasets (rules + CEs)
+- **Public registry:** the [gavel-rules](https://github.com/Offensive-AI-Lab/gavel-rules) GitHub repository (rules + CEs), read-synced into the app; contributions go by pull request
 
 > **No login.** GAVEL Studio is a single-operator, localhost application: there
 > are no accounts, no passwords and no tokens. Every request is attributed to
@@ -50,7 +50,7 @@ cd gavel-studio-beta
 
 `setup-docker.sh` fills in `backend/.env` — the **single** config file for both
 Docker and native — prompts you for the
-optional values (`OPENAI_API_KEY`, `HF_TOKEN` — press Enter to skip any), and
+optional values (`OPENAI_API_KEY`, `GITHUB_TOKEN` — press Enter to skip any), and
 offers to run `docker compose --env-file backend/.env up --build` for you. It's
 safe to re-run; it keeps anything already set. (Prefer to do it by hand?
 `cp backend/.env.example backend/.env`, edit it, then
@@ -114,13 +114,15 @@ Then open `backend/.env`:
 # REQUIRED for AI rule / CE generation; the rest of the app works without it
 OPENAI_API_KEY=sk-...
 
-# OPTIONAL — write-scope HF token; the backend uses it to PUBLISH to the HF
-# registry. The public library READ-sync needs no token, so Browse works
-# either way. Leave blank and everything works except publishing.
-# HF_REPO_ID points publishes (and reads) at your own registry repo instead of
-# the shared public library.
-HF_TOKEN=
-# HF_REPO_ID=your-user/your-registry
+# OPTIONAL — GitHub token with READ access to the gavel-rules library repo.
+# Only needed while that repo is private (it also lifts API rate limits);
+# leave blank once it's public and the library syncs anonymously. There is no
+# in-app publishing — contribute to the library via a gavel-rules pull request.
+# GAVEL_RULES_REPO / GAVEL_RULES_REF retarget the sync (default:
+# Offensive-AI-Lab/gavel-rules @ main).
+GITHUB_TOKEN=
+# GAVEL_RULES_REPO=Offensive-AI-Lab/gavel-rules
+# GAVEL_RULES_REF=main
 ```
 
 **There are no database settings.** The backend stores everything in
@@ -259,7 +261,7 @@ docker-compose.yml      one-command bring-up of the whole stack
 backend/
   Dockerfile            python:3.12-slim base image
   routes/               FastAPI routers — one per domain (rules, library, ai, ...)
-  services/             HF publish/sync, library search, bookmark service
+  services/             gavel-rules library sync, library search, bundles, bookmarks
   classifier_engine/    GRU training + inference
   evaluation/           metrics, calibration, ruleset evaluation
   utils/                DB, local identity, embeddings, crash recovery

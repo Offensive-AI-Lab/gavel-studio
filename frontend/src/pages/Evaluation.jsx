@@ -354,7 +354,7 @@ function CalibrationTab({ results, thresholds, calibrating, onCalibrate, calibSt
                 <p style={sectionDesc}>
                     Picks a per-CE threshold by maximising Youden's J (J = TPR - FPR),
                     scored against the rules' calibration dialogues using each rule's
-                    CE roles as the ground truth.
+                    CE groups and firing condition as the ground truth.
                 </p>
 
                 {ces.length > 0 && (

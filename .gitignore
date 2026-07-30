@@ -22,6 +22,7 @@ __pycache__/
 venv/
 env/
 .venv/
+CLAUDE.md
 
 # Local-only documentation drafts (deployment notes, test-scenario
 # scratchpads, generated PDFs, MD→PDF helper). Kept out of git so
@@ -63,3 +64,5 @@ backend/mutmut.log
 #                                  referenced in routes/library.py (schema recovery)
 backend/scripts/*
 !backend/scripts/reseed_db_from_registry.py
+# gavel.sh runtime state (pidfiles + startup lock) — regenerated every run
+.run/

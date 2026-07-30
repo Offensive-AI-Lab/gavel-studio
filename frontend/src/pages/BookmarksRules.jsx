@@ -7,7 +7,6 @@ import Pagination from '../components/Pagination/Pagination';
 import { getRuleBookmarks, removeRuleBookmark, getPublicRules, searchBookmarks, listLocalDrafts, deleteDraftRule } from '../api';
 import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
 import { useTutorialContent } from '../contexts/TutorialContext';
-import { publishDraftRule } from '../services/RuleService';
 import Swal from 'sweetalert2';
 import { showAlertDialog, showConfirmDialog } from '../components/ConfirmDialog/confirmDialog';
 import { FiArrowLeft, FiInbox } from 'react-icons/fi';
@@ -373,7 +372,6 @@ const BookmarksRules = ({ embedded = false, mineOnly = false }) => {
                                             rule={rule}
                                             isExpanded={expandedRule === rule.setup_id}
                                             onToggle={() => setExpandedRule(expandedRule === rule.setup_id ? null : rule.setup_id)}
-                                            onPublish={(r) => publishDraftRule(r, user.user_id, fetchBookmarks)}
                                             onDelete={() => handleDeleteDraftRule(rule)}
                                             onRemoveCE={() => {}}
                                             onAddCE={() => {}}

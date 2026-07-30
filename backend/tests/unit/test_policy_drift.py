@@ -1,5 +1,5 @@
 """Pure unit tests for the policy-drift / retraining helpers in
-`sql_scripts.model_scripts`.
+`sql_scripts.model_scripts` under the v2 (ce_groups, condition) rule model.
 
 There is NO database in this environment, so every DB seam is monkeypatched:
 `execute_query` / `execute_query_dict` are imported INTO model_scripts at
@@ -7,22 +7,23 @@ module load, so we patch them on the `model_scripts` module namespace. The
 draft-creation path also calls `upsert_rule_with_links`, imported at call time
 from `gavel_pipeline.db_access`, so we patch it there.
 
-The real `compute_rule_fingerprint_from_links` (a pure, DB-free helper) is left
-in place — the fingerprint functions are deterministic and exercising the real
+The real `compute_rule_fingerprint_v2` (a pure, DB-free helper) is left in
+place — the fingerprint functions are deterministic and exercising the real
 one keeps the fingerprint-equivalence assertions honest.
 
 Functions covered:
-  * compute_classifier_policy_fingerprint
+  * compute_classifier_policy_fingerprint_v2
   * reconcile_classifier_status
-  * create_draft_rule_from_bookmarked
-  * _build_predicate_from_roles
+  * create_draft_rule_from_bookmarked  (v2 editor-shape signature)
+  * the derived display predicate      (utils.rule_condition.render_predicate)
 """
 import hashlib
 
 import pytest
 
 from sql_scripts import model_scripts
-from sql_scripts.junction_scripts import compute_rule_fingerprint_from_links
+from sql_scripts.junction_scripts import compute_rule_fingerprint_v2
+from utils.rule_condition import parse, render_predicate
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +36,6 @@ class _DictDB:
     return values (one per call). Lets a test assert on the SQL/params seen."""
 
     def __init__(self, returns):
-        # `returns` is a list; pop from the front for each call.
         self._returns = list(returns)
         self.calls = []
 
@@ -57,87 +57,80 @@ class _RecordingWriter:
         return None
 
 
+def _setup_row(groups, condition):
+    return {"ce_groups": groups, "condition": condition}
+
+
 # ===========================================================================
-# compute_classifier_policy_fingerprint
+# compute_classifier_policy_fingerprint_v2
 # ===========================================================================
 
 
 class TestComputeFingerprint:
-    def test_no_active_links_returns_empty_string(self, monkeypatch):
-        # The query returns no rows -> by_setup is empty -> canonical == "" -> ''.
+    def test_no_active_setups_returns_empty_string(self, monkeypatch):
         db = _DictDB([[]])
         monkeypatch.setattr(model_scripts, "execute_query_dict", db)
-        assert model_scripts.compute_classifier_policy_fingerprint(1) == ""
+        assert model_scripts.compute_classifier_policy_fingerprint_v2(1) == ""
         assert len(db.calls) == 1
-        # classifier_id should be threaded into the params.
         assert db.calls[0][1] == (1,)
 
     def test_none_rows_treated_as_empty(self, monkeypatch):
-        # `execute_query_dict(...) or []` must turn a None result into ''.
         monkeypatch.setattr(
             model_scripts, "execute_query_dict", lambda *a, **k: None
         )
-        assert model_scripts.compute_classifier_policy_fingerprint(99) == ""
+        assert model_scripts.compute_classifier_policy_fingerprint_v2(99) == ""
 
-    def test_single_rule_matches_sha256_of_fingerprint(self, monkeypatch):
-        rows = [
-            {"setup_id": 10, "ce_id": 5, "role": "necessary", "fallback_group": 0},
-        ]
-        monkeypatch.setattr(
-            model_scripts, "execute_query_dict", lambda *a, **k: rows
-        )
-        result = model_scripts.compute_classifier_policy_fingerprint(1)
+    def test_setups_without_groups_contribute_nothing(self, monkeypatch):
+        # A fresh custom setup (ce_groups {} / None) carries no logic.
+        rows = [_setup_row({}, None), _setup_row(None, "all of g")]
+        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows)
+        assert model_scripts.compute_classifier_policy_fingerprint_v2(1) == ""
 
-        rule_fp = compute_rule_fingerprint_from_links(
-            [{"ce_id": 5, "role": "necessary", "fallback_group": 0}]
-        )
+    def test_single_rule_matches_sha256_of_v2_fingerprint(self, monkeypatch):
+        rows = [_setup_row({"required": ["A"]}, "all of required")]
+        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows)
+        result = model_scripts.compute_classifier_policy_fingerprint_v2(1)
+
+        rule_fp = compute_rule_fingerprint_v2({"required": ["A"]}, "all of required")
         expected = hashlib.sha256(rule_fp.encode("utf-8")).hexdigest()
         assert result == expected
-        assert len(result) == 64  # sha256 hex digest length
+        assert len(result) == 64
 
     def test_fingerprint_independent_of_rule_order(self, monkeypatch):
-        # Two setups; the function sorts per-rule fingerprints before hashing,
-        # so swapping setup order in the rows must NOT change the result.
-        rows_a = [
-            {"setup_id": 1, "ce_id": 5, "role": "necessary", "fallback_group": 0},
-            {"setup_id": 2, "ce_id": 9, "role": "necessary", "fallback_group": 0},
-        ]
-        rows_b = [
-            {"setup_id": 2, "ce_id": 9, "role": "necessary", "fallback_group": 0},
-            {"setup_id": 1, "ce_id": 5, "role": "necessary", "fallback_group": 0},
-        ]
-        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows_a)
-        fp_a = model_scripts.compute_classifier_policy_fingerprint(1)
-        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows_b)
-        fp_b = model_scripts.compute_classifier_policy_fingerprint(1)
+        a = [_setup_row({"g": ["A"]}, "all of g"), _setup_row({"g": ["B"]}, "all of g")]
+        b = list(reversed(a))
+        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a_, **k: a)
+        fp_a = model_scripts.compute_classifier_policy_fingerprint_v2(1)
+        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a_, **k: b)
+        fp_b = model_scripts.compute_classifier_policy_fingerprint_v2(1)
         assert fp_a == fp_b
 
-    def test_fingerprint_independent_of_setup_id(self, monkeypatch):
-        # Same CE composition but different setup_ids (re-added rule mints a new
-        # setup_id) must yield the SAME fingerprint — the documented property.
-        rows_a = [
-            {"setup_id": 100, "ce_id": 5, "role": "necessary", "fallback_group": 0},
-        ]
-        rows_b = [
-            {"setup_id": 777, "ce_id": 5, "role": "necessary", "fallback_group": 0},
-        ]
-        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows_a)
-        fp_a = model_scripts.compute_classifier_policy_fingerprint(1)
-        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows_b)
-        fp_b = model_scripts.compute_classifier_policy_fingerprint(1)
+    def test_fingerprint_independent_of_group_names(self, monkeypatch):
+        # Renaming a setup's groups (same structure) must NOT drift the policy.
+        a = [_setup_row({"hook": ["A"], "act": ["B", "C"]}, "all of hook and 1 of act")]
+        b = [_setup_row({"x": ["A"], "y": ["B", "C"]}, "all of x and 1 of y")]
+        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a_, **k: a)
+        fp_a = model_scripts.compute_classifier_policy_fingerprint_v2(1)
+        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a_, **k: b)
+        fp_b = model_scripts.compute_classifier_policy_fingerprint_v2(1)
         assert fp_a == fp_b
 
     def test_different_composition_yields_different_fingerprint(self, monkeypatch):
-        rows_a = [
-            {"setup_id": 1, "ce_id": 5, "role": "necessary", "fallback_group": 0},
-        ]
-        rows_b = [
-            {"setup_id": 1, "ce_id": 6, "role": "necessary", "fallback_group": 0},
-        ]
-        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows_a)
-        fp_a = model_scripts.compute_classifier_policy_fingerprint(1)
-        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows_b)
-        fp_b = model_scripts.compute_classifier_policy_fingerprint(1)
+        a = [_setup_row({"g": ["A"]}, "all of g")]
+        b = [_setup_row({"g": ["B"]}, "all of g")]
+        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a_, **k: a)
+        fp_a = model_scripts.compute_classifier_policy_fingerprint_v2(1)
+        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a_, **k: b)
+        fp_b = model_scripts.compute_classifier_policy_fingerprint_v2(1)
+        assert fp_a != fp_b
+
+    def test_quantifier_change_registers_as_drift(self, monkeypatch):
+        a = [_setup_row({"g": ["A", "B", "C"]}, "1 of g")]
+        b = [_setup_row({"g": ["A", "B", "C"]}, "2 of g")]
+        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a_, **k: a)
+        fp_a = model_scripts.compute_classifier_policy_fingerprint_v2(1)
+        monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a_, **k: b)
+        fp_b = model_scripts.compute_classifier_policy_fingerprint_v2(1)
         assert fp_a != fp_b
 
 
@@ -152,7 +145,7 @@ class TestReconcileStatus:
         writer = _RecordingWriter()
         monkeypatch.setattr(model_scripts, "execute_query", writer)
         assert model_scripts.reconcile_classifier_status(1) == "untrained"
-        assert writer.calls == []  # no write-back
+        assert writer.calls == []
 
     def test_none_rows_returns_untrained(self, monkeypatch):
         monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: None)
@@ -177,7 +170,6 @@ class TestReconcileStatus:
         assert writer.calls == []
 
     def test_missing_fingerprint_key_passes_through(self, monkeypatch):
-        # `.get("trained_policy_fingerprint")` returns None when key absent.
         rows = [{"status": "active"}]
         monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows)
         assert model_scripts.reconcile_classifier_status(1) == "active"
@@ -188,13 +180,12 @@ class TestReconcileStatus:
         monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows)
         monkeypatch.setattr(
             model_scripts,
-            "compute_classifier_policy_fingerprint",
+            "compute_classifier_policy_fingerprint_v2",
             lambda cid: trained_fp,
         )
         writer = _RecordingWriter()
         monkeypatch.setattr(model_scripts, "execute_query", writer)
         assert model_scripts.reconcile_classifier_status(1) == "active"
-        # new_status == status -> no UPDATE.
         assert writer.calls == []
 
     def test_drift_flips_to_needs_retraining_and_writes_back(self, monkeypatch):
@@ -202,25 +193,22 @@ class TestReconcileStatus:
         monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows)
         monkeypatch.setattr(
             model_scripts,
-            "compute_classifier_policy_fingerprint",
+            "compute_classifier_policy_fingerprint_v2",
             lambda cid: "current_differs",
         )
         writer = _RecordingWriter()
         monkeypatch.setattr(model_scripts, "execute_query", writer)
         assert model_scripts.reconcile_classifier_status(7) == "needs_retraining"
-        # One write-back UPDATE with the new status + classifier_id.
         assert len(writer.calls) == 1
         sql, params = writer.calls[0]
         assert "UPDATE classifiers" in sql
         assert params == ("needs_retraining", 7)
 
     def test_drift_resolved_heals_back_to_active(self, monkeypatch):
-        # Stored status is needs_retraining but live policy now matches trained
-        # snapshot again -> self-heals to active AND writes it back.
         rows = [{"status": "needs_retraining", "trained_policy_fingerprint": "fp"}]
         monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows)
         monkeypatch.setattr(
-            model_scripts, "compute_classifier_policy_fingerprint", lambda cid: "fp"
+            model_scripts, "compute_classifier_policy_fingerprint_v2", lambda cid: "fp"
         )
         writer = _RecordingWriter()
         monkeypatch.setattr(model_scripts, "execute_query", writer)
@@ -229,12 +217,10 @@ class TestReconcileStatus:
         assert writer.calls[0][1] == ("active", 3)
 
     def test_still_needs_retraining_no_redundant_writeback(self, monkeypatch):
-        # Stored needs_retraining and still drifting -> stays needs_retraining,
-        # and since new_status == status, no write-back occurs.
         rows = [{"status": "needs_retraining", "trained_policy_fingerprint": "fp"}]
         monkeypatch.setattr(model_scripts, "execute_query_dict", lambda *a, **k: rows)
         monkeypatch.setattr(
-            model_scripts, "compute_classifier_policy_fingerprint", lambda cid: "other"
+            model_scripts, "compute_classifier_policy_fingerprint_v2", lambda cid: "other"
         )
         writer = _RecordingWriter()
         monkeypatch.setattr(model_scripts, "execute_query", writer)
@@ -243,121 +229,63 @@ class TestReconcileStatus:
 
 
 # ===========================================================================
-# _build_predicate_from_roles
+# The derived display predicate — utils.rule_condition.render_predicate
+# (replaces the retired _build_predicate_from_roles)
 # ===========================================================================
 
 
-class TestBuildPredicate:
-    def test_empty_roles_returns_empty(self):
-        assert model_scripts._build_predicate_from_roles([], {}) == ""
+class TestRenderPredicate:
+    def _render(self, groups, condition):
+        return render_predicate(parse(condition), groups)
 
-    def test_single_necessary(self):
-        roles = [{"ce_id": 1, "role": "necessary"}]
-        assert model_scripts._build_predicate_from_roles(roles, {1: "A"}) == "A"
+    def test_single_member_selector_renders_bare_name(self):
+        assert self._render({"g": ["A"]}, "all of g") == "A"
 
-    def test_multiple_necessary_joined_with_and(self):
-        roles = [
-            {"ce_id": 1, "role": "necessary"},
-            {"ce_id": 2, "role": "necessary"},
-        ]
-        out = model_scripts._build_predicate_from_roles(roles, {1: "A", 2: "B"})
-        assert out == "A AND B"
+    def test_all_of_multi_member_joined_with_and(self):
+        assert self._render({"g": ["A", "B"]}, "all of g") == "(A AND B)"
 
-    def test_default_role_is_necessary(self):
-        # No "role" key -> treated as necessary.
-        roles = [{"ce_id": 1}]
-        assert model_scripts._build_predicate_from_roles(roles, {1: "A"}) == "A"
+    def test_one_of_multi_member_joined_with_or(self):
+        assert self._render({"g": ["A", "B"]}, "1 of g") == "(A OR B)"
 
-    def test_missing_name_falls_back_to_ce_placeholder(self):
-        # name_map has no entry for ce_id 42 -> "CE_42".
-        roles = [{"ce_id": 42, "role": "necessary"}]
-        assert model_scripts._build_predicate_from_roles(roles, {}) == "CE_42"
+    def test_k_of_renders_at_least_phrase(self):
+        out = self._render({"g": ["A", "B", "C"]}, "2 of g")
+        assert out == "at least 2 of (A, B, C)"
 
-    def test_fallback_group_wrapped_in_or_parens(self):
-        roles = [
-            {"ce_id": 1, "role": "fallback", "fallback_group": 1},
-            {"ce_id": 2, "role": "fallback", "fallback_group": 1},
-        ]
-        out = model_scripts._build_predicate_from_roles(roles, {1: "A", 2: "B"})
-        assert out == "(A OR B)"
+    def test_k_equal_to_size_renders_as_and(self):
+        # 2 of a 2-member group is the same as all of it.
+        assert self._render({"g": ["A", "B"]}, "2 of g") == "(A AND B)"
 
-    def test_fallback_group_zero_grouped(self):
-        # group 0 is a valid group key (no longer promoted); both CEs share it.
-        roles = [
-            {"ce_id": 1, "role": "fallback", "fallback_group": 0},
-            {"ce_id": 2, "role": "fallback", "fallback_group": 0},
-        ]
-        out = model_scripts._build_predicate_from_roles(roles, {1: "A", 2: "B"})
-        assert out == "(A OR B)"
+    def test_and_of_selectors(self):
+        out = self._render({"req": ["A"], "opt": ["B", "C"]},
+                           "all of req and 1 of opt")
+        assert out == "A AND (B OR C)"
 
-    def test_distinct_fallback_groups_zero_and_one_stay_separate(self):
-        # Regression: the old max(fb,1) collapsed groups 0 and 1 into one.
-        roles = [
-            {"ce_id": 1, "role": "fallback", "fallback_group": 0},
-            {"ce_id": 2, "role": "fallback", "fallback_group": 1},
-        ]
-        out = model_scripts._build_predicate_from_roles(roles, {1: "A", 2: "B"})
-        assert out == "(A) AND (B)"
-
-    def test_necessary_and_fallback_combined(self):
-        roles = [
-            {"ce_id": 1, "role": "necessary"},
-            {"ce_id": 2, "role": "fallback", "fallback_group": 1},
-            {"ce_id": 3, "role": "fallback", "fallback_group": 1},
-        ]
-        out = model_scripts._build_predicate_from_roles(
-            roles, {1: "A", 2: "B", 3: "C"}
+    def test_or_children_get_parens_inside_and(self):
+        out = self._render(
+            {"p": ["A"], "q": ["B"], "r": ["C"]},
+            "all of p and (all of q or all of r)",
         )
         assert out == "A AND (B OR C)"
 
-    def test_multiple_fallback_groups_sorted(self):
-        roles = [
-            {"ce_id": 1, "role": "fallback", "fallback_group": 2},
-            {"ce_id": 2, "role": "fallback", "fallback_group": 1},
-        ]
-        out = model_scripts._build_predicate_from_roles(roles, {1: "G2", 2: "G1"})
-        # Groups iterated in sorted key order: group 1 first, then group 2.
-        assert out == "(G1) AND (G2)"
+    def test_not_renders_upper_not(self):
+        out = self._render({"g": ["A"]}, "not all of g")
+        assert out == "NOT A"
 
-    def test_sufficient_is_helpful_only_excluded_from_predicate(self):
-        # 'sufficient' CEs are HELPFUL-only: they never appear in the firing
-        # predicate (reference detect_uc ignores supporting CEs).
-        roles = [{"ce_id": 1, "role": "sufficient"}]
-        assert model_scripts._build_predicate_from_roles(roles, {1: "A"}) == ""
-
-    def test_multiple_sufficient_all_excluded(self):
-        roles = [
-            {"ce_id": 1, "role": "sufficient"},
-            {"ce_id": 2, "role": "sufficient"},
-        ]
-        out = model_scripts._build_predicate_from_roles(roles, {1: "A", 2: "B"})
-        assert out == ""
-
-    def test_base_predicate_drops_sufficient(self):
-        # necessary stays; sufficient is omitted entirely (no OR tail).
-        roles = [
-            {"ce_id": 1, "role": "necessary"},
-            {"ce_id": 2, "role": "sufficient"},
-        ]
-        out = model_scripts._build_predicate_from_roles(roles, {1: "A", 2: "B"})
-        assert out == "A"
-
-    def test_none_fallback_group_coerced_to_zero(self):
-        # fallback_group None -> int(None or 0) == 0 -> group 0 (valid key).
-        roles = [{"ce_id": 1, "role": "fallback", "fallback_group": None}]
-        out = model_scripts._build_predicate_from_roles(roles, {1: "A"})
-        assert out == "(A)"
+    def test_migrated_legacy_shape_renders_like_the_old_builder(self):
+        # necessary {A} + fallback groups {B,C} / {D} — the exact structure
+        # migration v24 produces — must render the familiar predicate.
+        groups = {"required": ["A"], "option_1": ["B", "C"], "option_2": ["D"]}
+        out = self._render(groups, "all of required and 1 of option_1 and 1 of option_2")
+        assert out == "A AND (B OR C) AND D"
 
 
 # ===========================================================================
-# create_draft_rule_from_bookmarked
+# create_draft_rule_from_bookmarked — v2 editor-shape signature
 # ===========================================================================
 
 
 class TestCreateDraftFromBookmarked:
     def _patch_upsert(self, monkeypatch, capture):
-        """Patch the call-time import target so model_scripts picks up our fake
-        upsert_rule_with_links from gavel_pipeline.db_access."""
         import gavel_pipeline.db_access as dba
 
         def fake_upsert(rule_data, mark_pending=False):
@@ -367,116 +295,86 @@ class TestCreateDraftFromBookmarked:
 
         monkeypatch.setattr(dba, "upsert_rule_with_links", fake_upsert)
 
-    def test_empty_ce_roles_raises(self, monkeypatch):
-        with pytest.raises(ValueError, match="ce_roles cannot be empty"):
-            model_scripts.create_draft_rule_from_bookmarked("R", [])
+    def _patch_names(self, monkeypatch, name_rows):
+        db = _DictDB([name_rows])
+        monkeypatch.setattr(model_scripts, "execute_query_dict", db)
+        return db
 
-    def test_none_ce_roles_raises(self, monkeypatch):
+    def test_empty_groups_raises(self, monkeypatch):
+        with pytest.raises(ValueError, match="groups cannot be empty"):
+            model_scripts.create_draft_rule_from_bookmarked("R", {}, "all of g")
+
+    def test_none_groups_raises(self, monkeypatch):
         with pytest.raises(ValueError):
-            model_scripts.create_draft_rule_from_bookmarked("R", None)
+            model_scripts.create_draft_rule_from_bookmarked("R", None, "all of g")
+
+    def test_groups_with_only_empty_members_raise(self, monkeypatch):
+        with pytest.raises(ValueError, match="groups cannot be empty"):
+            model_scripts.create_draft_rule_from_bookmarked("R", {"g": []}, "all of g")
 
     def test_happy_path_returns_rule_id_and_predicate(self, monkeypatch):
-        ce_roles = [
-            {"ce_id": 1, "role": "necessary"},
-            {"ce_id": 2, "role": "fallback", "fallback_group": 1},
-            {"ce_id": 3, "role": "fallback", "fallback_group": 1},
-            {"ce_id": 4, "role": "sufficient"},
-        ]
         name_rows = [
             {"ce_id": 1, "name": "Alpha"},
             {"ce_id": 2, "name": "Beta"},
             {"ce_id": 3, "name": "Gamma"},
-            {"ce_id": 4, "name": "Delta"},
         ]
-        db = _DictDB([name_rows])
-        monkeypatch.setattr(model_scripts, "execute_query_dict", db)
+        db = self._patch_names(monkeypatch, name_rows)
         capture = {}
         self._patch_upsert(monkeypatch, capture)
 
         rule_id, predicate = model_scripts.create_draft_rule_from_bookmarked(
-            "My Draft", ce_roles, categories=[7, 8]
+            "My Draft",
+            {"required": [1], "option_1": [2, 3]},
+            "all of required and 1 of option_1",
+            categories=[7, 8],
+            description="d",
         )
 
         assert rule_id == 4242
-        # 'Delta' is sufficient/helpful — excluded from the firing predicate,
-        # but still carried in rule_data["sufficient"] for the "Helpful" UI.
         assert predicate == "Alpha AND (Beta OR Gamma)"
         # mark_pending must be True (documented hidden-draft behavior).
         assert capture["mark_pending"] is True
         rd = capture["rule_data"]
         assert rd["rule_name"] == "My Draft"
-        assert rd["predicate"] == predicate
-        assert rd["necessary"] == ["Alpha"]
-        assert rd["sufficient"] == ["Delta"]
-        # fallback is a list of groups (ordered by group key).
-        assert rd["fallback"] == [["Beta", "Gamma"]]
+        # ce_groups stored by NAME — the identity the condition grammar speaks.
+        assert rd["ce_groups"] == {"required": ["Alpha"], "option_1": ["Beta", "Gamma"]}
+        assert rd["condition"] == "all of required and 1 of option_1"
         assert rd["categories"] == [7, 8]
-        assert rd["description"] == ""
+        assert rd["description"] == "d"
+        # The ids -> names lookup was a single ANY(%s) query over the union.
+        assert len(db.calls) == 1
+        assert db.calls[0][1] == ([1, 2, 3],)
+
+    def test_unknown_ce_id_raises(self, monkeypatch):
+        self._patch_names(monkeypatch, [{"ce_id": 1, "name": "Alpha"}])
+        capture = {}
+        self._patch_upsert(monkeypatch, capture)
+        with pytest.raises(ValueError, match="Unknown CE id"):
+            model_scripts.create_draft_rule_from_bookmarked(
+                "R", {"g": [1, 99]}, "all of g")
+
+    def test_invalid_condition_raises(self, monkeypatch):
+        self._patch_names(monkeypatch, [{"ce_id": 1, "name": "Alpha"}])
+        capture = {}
+        self._patch_upsert(monkeypatch, capture)
+        with pytest.raises(ValueError, match="Invalid rule logic"):
+            model_scripts.create_draft_rule_from_bookmarked(
+                "R", {"g": [1]}, "all of undefined_group")
+
+    def test_unsatisfiable_quantifier_raises(self, monkeypatch):
+        self._patch_names(monkeypatch, [{"ce_id": 1, "name": "Alpha"}])
+        capture = {}
+        self._patch_upsert(monkeypatch, capture)
+        with pytest.raises(ValueError, match="never be satisfied"):
+            model_scripts.create_draft_rule_from_bookmarked(
+                "R", {"g": [1]}, "2 of g")
 
     def test_categories_default_to_empty_list(self, monkeypatch):
-        ce_roles = [{"ce_id": 1, "role": "necessary"}]
-        db = _DictDB([[{"ce_id": 1, "name": "Alpha"}]])
-        monkeypatch.setattr(model_scripts, "execute_query_dict", db)
+        self._patch_names(monkeypatch, [{"ce_id": 1, "name": "Alpha"}])
         capture = {}
         self._patch_upsert(monkeypatch, capture)
-
         rule_id, predicate = model_scripts.create_draft_rule_from_bookmarked(
-            "X", ce_roles
-        )
+            "X", {"g": [1]}, "all of g")
         assert predicate == "Alpha"
         assert capture["rule_data"]["categories"] == []
-
-    def test_ce_with_no_name_row_is_skipped(self, monkeypatch):
-        # ce_id 2 has no matching name row -> dropped from buckets/predicate,
-        # but the predicate built by _build_predicate_from_roles still uses
-        # the CE_<id> placeholder. Buckets, however, skip unknown names.
-        ce_roles = [
-            {"ce_id": 1, "role": "necessary"},
-            {"ce_id": 2, "role": "necessary"},
-        ]
-        db = _DictDB([[{"ce_id": 1, "name": "Alpha"}]])
-        monkeypatch.setattr(model_scripts, "execute_query_dict", db)
-        capture = {}
-        self._patch_upsert(monkeypatch, capture)
-
-        rule_id, predicate = model_scripts.create_draft_rule_from_bookmarked(
-            "X", ce_roles
-        )
-        # Bucket only contains the named CE (unknown skipped via `if not ce_name`).
-        assert capture["rule_data"]["necessary"] == ["Alpha"]
-        # Predicate uses placeholder for the unnamed CE.
-        assert predicate == "Alpha AND CE_2"
-
-    def test_roles_with_none_ce_id_excluded_from_lookup(self, monkeypatch):
-        # ce_id None should not be added to the IN (...) lookup list.
-        ce_roles = [
-            {"ce_id": 1, "role": "necessary"},
-            {"role": "necessary"},  # no ce_id
-        ]
-        db = _DictDB([[{"ce_id": 1, "name": "Alpha"}]])
-        monkeypatch.setattr(model_scripts, "execute_query_dict", db)
-        capture = {}
-        self._patch_upsert(monkeypatch, capture)
-
-        model_scripts.create_draft_rule_from_bookmarked("X", ce_roles)
-        # The CE-name lookup params must only carry the non-None ce_id.
-        sql, params = db.calls[0]
-        assert params == (1,)
-
-    def test_no_valid_ce_ids_skips_db_lookup(self, monkeypatch):
-        # Every role has ce_id None -> ce_ids == [] -> ce_rows stays [] and NO
-        # execute_query_dict call is made (the `if ce_ids else []` branch).
-        ce_roles = [{"role": "necessary"}, {"role": "sufficient"}]
-        db = _DictDB([])  # would raise if popped, but should never be called
-        monkeypatch.setattr(model_scripts, "execute_query_dict", db)
-        capture = {}
-        self._patch_upsert(monkeypatch, capture)
-
-        rule_id, predicate = model_scripts.create_draft_rule_from_bookmarked(
-            "X", ce_roles
-        )
-        assert db.calls == []  # no DB lookup attempted
-        assert rule_id == 4242
-        # All names unknown -> buckets empty; predicate uses CE_None placeholders.
-        assert capture["rule_data"]["necessary"] == []
-        assert capture["rule_data"]["sufficient"] == []
+        assert capture["rule_data"]["description"] == ""

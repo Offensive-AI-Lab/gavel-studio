@@ -2,16 +2,15 @@
 //
 // RuleCard is a presentational card with a lot of conditional branches:
 //   * header (status pill draft/public, category pills, author link,
-//     bookmark / publish / rule-page / delete buttons, chevron)
-//   * expanded body (boolean-logic predicate, edit-predicate
-//     mode with per-CE role selects + fallback inputs, elements & roles
-//     list with role badges, remove-CE + add-CE affordances, role help).
+//     bookmark / disabled-publish / rule-page / delete buttons, chevron)
+//   * expanded body (groups + condition firing logic via RuleLogicPreview,
+//     legacy predicate fallback, cognitive-elements list).
 //
 // Every interactive handler stops propagation so a click on a button does
 // NOT bubble up to the header's onToggle — we assert that explicitly.
 //
-// We mock ../../api (RuleCard reads CE bookmarks) and sweetalert2 (used by the
-// role-help alert dialog) so nothing hits the network or pops a real modal.
+// We mock ../../api (RuleCard reads CE bookmarks) and sweetalert2 (used by
+// alert dialogs) so nothing hits the network or pops a real modal.
 
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -39,16 +38,26 @@ vi.mock('sweetalert2', () => ({ default: { fire: (...a) => swalFire(...a), close
 
 import RuleCard from '../../../src/components/RuleCard/RuleCard';
 
-// A baseline rule with two CEs in different roles.
+// A baseline LEGACY rule (no groups/condition — predicate fallback path).
 const baseRule = () => ({
     setup_id: 7,
     rule_id: 99,
     custom_name: 'My Rule',
     predicate: 'A AND B',
     active_ces: [
-        { ce_id: 1, name: 'CE One', role: 'necessary', fallback_group: 0 },
-        { ce_id: 2, name: 'CE Two', role: 'sufficient', fallback_group: 0 },
+        { ce_id: 1, name: 'CE One' },
+        { ce_id: 2, name: 'CE Two' },
     ],
+});
+
+// A v2 rule with named groups + a condition.
+const groupedRule = () => ({
+    ...baseRule(),
+    groups: {
+        required: [{ ce_id: 1, name: 'CE One' }],
+        option_1: [{ ce_id: 2, name: 'CE Two' }, { ce_id: 3, name: 'CE Three' }],
+    },
+    condition: 'all of required and 1 of option_1',
 });
 
 const renderCard = (props = {}) => render(
@@ -191,34 +200,19 @@ describe('RuleCard — bookmark button', () => {
     });
 });
 
-describe('RuleCard — publish button', () => {
-    it('shows the publish button on a draft when onPublish is wired', () => {
-        const onPublish = vi.fn();
+describe('RuleCard — publish button (disabled: PR-based contributions)', () => {
+    it('shows a DISABLED publish button on a draft with the PR tooltip', () => {
         const rule = { ...baseRule(), is_local_draft: true };
-        render(<MemoryRouter><RuleCard rule={rule} isExpanded={false} onToggle={() => {}} onPublish={onPublish} /></MemoryRouter>);
-        expect(screen.getByRole('button', { name: 'Publish rule to library' })).toBeInTheDocument();
-    });
-
-    it('calls onPublish with the rule and does not toggle the card', () => {
-        const onPublish = vi.fn();
-        const onToggle = vi.fn();
-        const rule = { ...baseRule(), is_local_draft: true };
-        render(<MemoryRouter><RuleCard rule={rule} isExpanded={false} onToggle={onToggle} onPublish={onPublish} /></MemoryRouter>);
-        fireEvent.click(screen.getByRole('button', { name: 'Publish rule to library' }));
-        expect(onPublish).toHaveBeenCalledWith(rule);
-        expect(onToggle).not.toHaveBeenCalled();
+        render(<MemoryRouter><RuleCard rule={rule} isExpanded={false} onToggle={() => {}} /></MemoryRouter>);
+        const btn = screen.getByRole('button', { name: 'Publish rule to library (coming soon)' });
+        expect(btn).toBeDisabled();
+        expect(btn).toHaveAttribute('title', expect.stringContaining('gavel-rules pull requests'));
     });
 
     it('hides the publish button when the rule is not a draft', () => {
         const rule = { ...baseRule(), is_local_draft: false };
-        render(<MemoryRouter><RuleCard rule={rule} isExpanded={false} onToggle={() => {}} onPublish={() => {}} /></MemoryRouter>);
-        expect(screen.queryByRole('button', { name: 'Publish rule to library' })).not.toBeInTheDocument();
-    });
-
-    it('hides the publish button when onPublish is not a function', () => {
-        const rule = { ...baseRule(), is_local_draft: true };
         render(<MemoryRouter><RuleCard rule={rule} isExpanded={false} onToggle={() => {}} /></MemoryRouter>);
-        expect(screen.queryByRole('button', { name: 'Publish rule to library' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /Publish rule to library/ })).not.toBeInTheDocument();
     });
 });
 
@@ -269,46 +263,32 @@ describe('RuleCard — delete affordance', () => {
 });
 
 describe('RuleCard — expanded body, read view', () => {
-    it('shows the boolean-logic predicate text', () => {
+    it('falls back to the predicate string when the rule has no groups', () => {
         renderCard({ isExpanded: true });
         expect(screen.getByText('Boolean Logic')).toBeInTheDocument();
         expect(screen.getByText('A AND B')).toBeInTheDocument();
     });
 
-    it('lists every CE name with a role badge', () => {
+    it('renders group chips titled by group name plus the condition verbatim', () => {
+        render(<MemoryRouter><RuleCard rule={groupedRule()} isExpanded onToggle={() => {}} /></MemoryRouter>);
+        // Group name headers
+        expect(screen.getByText('required')).toBeInTheDocument();
+        expect(screen.getByText('option_1')).toBeInTheDocument();
+        // Member pills (CE One appears in both the group chip and the CE list)
+        expect(screen.getAllByText('CE One').length).toBeGreaterThan(0);
+        expect(screen.getByText('CE Three')).toBeInTheDocument();
+        // Condition rendered verbatim
+        expect(screen.getByText('all of required and 1 of option_1')).toBeInTheDocument();
+        // The raw predicate string is NOT shown when groups exist
+        expect(screen.queryByText('A AND B')).not.toBeInTheDocument();
+    });
+
+    it('lists every CE name (membership, no role badges)', () => {
         renderCard({ isExpanded: true });
         expect(screen.getByText('CE One')).toBeInTheDocument();
         expect(screen.getByText('CE Two')).toBeInTheDocument();
-        expect(screen.getByText('Necessary')).toBeInTheDocument();
-        expect(screen.getByText('Supporting')).toBeInTheDocument();
-    });
-
-    it('renders a fallback badge with the group label', () => {
-        const rule = {
-            ...baseRule(),
-            active_ces: [{ ce_id: 3, name: 'CE Fb', role: 'fallback', fallback_group: 2 }],
-        };
-        render(<MemoryRouter><RuleCard rule={rule} isExpanded onToggle={() => {}} /></MemoryRouter>);
-        expect(screen.getByText('Any of · G3')).toBeInTheDocument();
-    });
-
-    it('defaults a fallback badge to G1 when group is 0/missing', () => {
-        const rule = {
-            ...baseRule(),
-            active_ces: [{ ce_id: 3, name: 'CE Fb', role: 'fallback', fallback_group: 0 }],
-        };
-        render(<MemoryRouter><RuleCard rule={rule} isExpanded onToggle={() => {}} /></MemoryRouter>);
-        expect(screen.getByText('Any of · G1')).toBeInTheDocument();
-    });
-
-    it('defaults a CE with no role to a Necessary badge', () => {
-        const rule = {
-            ...baseRule(),
-            active_ces: [{ ce_id: 4, name: 'CE NoRole' }],
-        };
-        render(<MemoryRouter><RuleCard rule={rule} isExpanded onToggle={() => {}} /></MemoryRouter>);
-        expect(screen.getByText('CE NoRole')).toBeInTheDocument();
-        expect(screen.getByText('Necessary')).toBeInTheDocument();
+        expect(screen.queryByText('Necessary')).not.toBeInTheDocument();
+        expect(screen.queryByText('Supporting')).not.toBeInTheDocument();
     });
 
     it('renders string CEs (ce is a bare string)', () => {
@@ -320,8 +300,8 @@ describe('RuleCard — expanded body, read view', () => {
     it('handles a rule with no active_ces array', () => {
         const rule = { ...baseRule(), active_ces: undefined };
         render(<MemoryRouter><RuleCard rule={rule} isExpanded onToggle={() => {}} /></MemoryRouter>);
-        // Summary reads 0 elements, body still renders the Elements & Roles header.
-        expect(screen.getByText('Elements & Roles')).toBeInTheDocument();
+        // Summary reads 0 elements, body still renders the elements header.
+        expect(screen.getByText('Cognitive Elements')).toBeInTheDocument();
     });
 
     it('does not show remove-CE or add-CE in the default read view', () => {
@@ -333,12 +313,22 @@ describe('RuleCard — expanded body, read view', () => {
 
 });
 
-describe('RuleCard — role help', () => {
-    it('opens the role-help alert dialog and stops propagation', () => {
+describe('RuleCard — edit logic affordance', () => {
+    it('shows Edit logic only when onEditLogic is wired and not readOnly', () => {
+        const onEditLogic = vi.fn();
         const onToggle = vi.fn();
-        renderCard({ isExpanded: true, onToggle });
-        fireEvent.click(screen.getByRole('button', { name: 'Role help' }));
-        expect(swalFire).toHaveBeenCalledTimes(1);
+        // Needs a signed-in user for nothing here — Edit logic is gated only
+        // on the prop + readOnly.
+        const rule = groupedRule();
+        render(<MemoryRouter><RuleCard rule={rule} isExpanded={false} onToggle={onToggle} onEditLogic={onEditLogic} /></MemoryRouter>);
+        const btn = screen.getByRole('button', { name: "Edit this rule's groups and condition in place" });
+        fireEvent.click(btn);
+        expect(onEditLogic).toHaveBeenCalledWith(rule);
         expect(onToggle).not.toHaveBeenCalled();
+    });
+
+    it('hides Edit logic in readOnly mode', () => {
+        render(<MemoryRouter><RuleCard rule={groupedRule()} isExpanded={false} onToggle={() => {}} onEditLogic={() => {}} readOnly /></MemoryRouter>);
+        expect(screen.queryByRole('button', { name: "Edit this rule's groups and condition in place" })).not.toBeInTheDocument();
     });
 });

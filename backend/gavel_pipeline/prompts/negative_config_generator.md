@@ -11,7 +11,7 @@ The user has created a rule to detect a specific misuse scenario. Your task is t
 {rule_information}
 
 **Your Task:**
-First, **reason about the necessary and fallback CEs** of the rule to understand what makes the misuse scenario problematic. Then apply the **Polar Context Question**:
+First, **reason about the rule's CE groups and firing condition** — which CEs must all be present, and which are alternative expressions of the same aspect — to understand what makes the misuse scenario problematic. Then apply the **Polar Context Question**:
 
 > **Does the misuse we are modeling have a legitimate counterpart?**
 
@@ -25,11 +25,11 @@ Based on this reasoning, generate a complete JSON configuration file for creatin
 
 Before generating the configuration, reason through the following:
 
-1. **Identify the Necessary CEs:** What contextual elements MUST be present for the misuse scenario to occur?
+1. **Identify the Must-Have CEs:** What contextual elements MUST be present (the CEs the rule's condition requires in full) for the misuse scenario to occur?
    - What is the core malicious intent or harmful outcome?
    - What specific behaviors or patterns define the problematic scenario?
 
-2. **Identify the Fallback CEs:** What contextual elements might appear but are not sufficient on their own?
+2. **Identify the Alternative-Signal CEs:** What contextual elements might appear (CEs from the rule's any-one-of groups) but do not constitute the misuse on their own?
    - What surface-level features could trigger false positives?
    - What domain-related elements are present in both benign and malicious cases?
 

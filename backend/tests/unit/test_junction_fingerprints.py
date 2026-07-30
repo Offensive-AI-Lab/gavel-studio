@@ -1,317 +1,271 @@
-"""Pure unit tests for the rule structural fingerprint helpers in
+"""Pure unit tests for the v2 rule structural fingerprint in
 ``sql_scripts.junction_scripts``.
 
-These cover:
-  * ``compute_rule_fingerprint_from_links`` — the ce_id-shaped path. No DB
-    access at all, so it is exercised directly.
-  * ``compute_rule_fingerprint_from_names`` — the name-shaped path that does a
-    single ``execute_query_dict`` name->id lookup. That DB call is
-    monkeypatched (the symbol is imported INTO the target module, so we patch
-    it on the module object) to return canned rows; no database is touched.
+``compute_rule_fingerprint_v2(ce_groups, condition)`` canonicalizes a rule's
+(groups, condition) logic so that two rules with the SAME firing semantics
+fingerprint identically regardless of surface spelling:
 
-The two functions are designed so that a names-based fingerprint equals the
-links-based fingerprint of the same underlying ce_ids — several tests assert
-exactly that equivalence.
+  * group NAMES don't matter (canonical rename to g0..gN ordered by member
+    tuple) — the v2 analogue of "fallback group numbers don't matter";
+  * and/or children are commutative (sorted serialization);
+  * groups never referenced by the condition (e.g. the migrated 'supporting'
+    bucket) are excluded entirely — they don't affect firing;
+  * condition-less / unparseable logic falls back to a membership-only
+    fingerprint (dedup must never raise).
+
+The two DB-scanning finders (`find_existing_rule_by_fingerprint_v2`,
+`find_existing_rule_setup_by_fingerprint_v2`) are exercised with a
+monkeypatched ``execute_query_dict`` — no database is touched.
 """
 import pytest
 
 import sql_scripts.junction_scripts as js
 from sql_scripts.junction_scripts import (
-    compute_rule_fingerprint_from_links,
-    compute_rule_fingerprint_from_names,
+    compute_rule_fingerprint_v2,
+    find_existing_rule_by_fingerprint_v2,
+    find_existing_rule_setup_by_fingerprint_v2,
 )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# compute_rule_fingerprint_v2 — canonicalization properties
+# ===========================================================================
 
-def _patch_lookup(monkeypatch, name_to_id, capture=None):
-    """Replace execute_query_dict (as imported into junction_scripts) with a
-    fake that maps the requested names to canned {ce_id, name} rows.
+class TestGroupNameIndependence:
+    def test_renamed_groups_fingerprint_identically(self):
+        a = compute_rule_fingerprint_v2(
+            {"hook": ["A"], "action": ["B", "C"]}, "all of hook and 1 of action")
+        b = compute_rule_fingerprint_v2(
+            {"x": ["A"], "y": ["B", "C"]}, "all of x and 1 of y")
+        assert a == b
 
-    Mirrors the real query ``SELECT ce_id, name FROM cognitive_elements
-    WHERE name = ANY(%s)`` — only names present in ``name_to_id`` come back,
-    so unknown names are silently dropped just like the real DB would do.
-    ``capture`` (a list) optionally records (query, params) for assertions.
-    """
-    def fake(query, params):
-        if capture is not None:
-            capture.append((query, params))
-        requested = params[0]
-        return [
-            {"ce_id": name_to_id[n], "name": n}
-            for n in requested
-            if n in name_to_id
-        ]
+    def test_swapped_group_names_same_structure(self):
+        # Same partition, same selectors — only the labels swapped.
+        a = compute_rule_fingerprint_v2(
+            {"g1": ["A"], "g2": ["B"]}, "all of g1 and 1 of g2")
+        b = compute_rule_fingerprint_v2(
+            {"g2": ["A"], "g1": ["B"]}, "all of g2 and 1 of g1")
+        assert a == b
 
-    monkeypatch.setattr(js, "execute_query_dict", fake)
+    def test_member_order_within_group_irrelevant(self):
+        a = compute_rule_fingerprint_v2({"g": ["B", "A"]}, "all of g")
+        b = compute_rule_fingerprint_v2({"g": ["A", "B"]}, "all of g")
+        assert a == b
+
+    def test_duplicate_members_deduped(self):
+        a = compute_rule_fingerprint_v2({"g": ["A", "A", "B"]}, "all of g")
+        b = compute_rule_fingerprint_v2({"g": ["A", "B"]}, "all of g")
+        assert a == b
+
+
+class TestCommutativity:
+    def test_and_children_commute(self):
+        a = compute_rule_fingerprint_v2(
+            {"p": ["A"], "q": ["B"]}, "all of p and all of q")
+        b = compute_rule_fingerprint_v2(
+            {"p": ["A"], "q": ["B"]}, "all of q and all of p")
+        assert a == b
+
+    def test_or_children_commute(self):
+        a = compute_rule_fingerprint_v2(
+            {"p": ["A"], "q": ["B"]}, "all of p or all of q")
+        b = compute_rule_fingerprint_v2(
+            {"p": ["A"], "q": ["B"]}, "all of q or all of p")
+        assert a == b
+
+    def test_and_vs_or_differ(self):
+        groups = {"p": ["A"], "q": ["B"]}
+        a = compute_rule_fingerprint_v2(groups, "all of p and all of q")
+        o = compute_rule_fingerprint_v2(groups, "all of p or all of q")
+        assert a != o
+
+    def test_nesting_structure_preserved(self):
+        # (p and q) or r  !=  p and (q or r)
+        groups = {"p": ["A"], "q": ["B"], "r": ["C"]}
+        a = compute_rule_fingerprint_v2(groups, "(all of p and all of q) or all of r")
+        b = compute_rule_fingerprint_v2(groups, "all of p and (all of q or all of r)")
+        assert a != b
+
+
+class TestDeadGroupExclusion:
+    def test_unreferenced_group_does_not_affect_fingerprint(self):
+        # The migrated 'supporting' bucket: present in ce_groups, absent from
+        # the condition — must not change the fingerprint.
+        with_dead = compute_rule_fingerprint_v2(
+            {"required": ["A", "B"], "supporting": ["Z"]}, "all of required")
+        without = compute_rule_fingerprint_v2(
+            {"required": ["A", "B"]}, "all of required")
+        assert with_dead == without
+
+    def test_different_dead_groups_still_equal(self):
+        a = compute_rule_fingerprint_v2(
+            {"g": ["A"], "supporting": ["X"]}, "all of g")
+        b = compute_rule_fingerprint_v2(
+            {"g": ["A"], "extra_stuff": ["Y", "Z"]}, "all of g")
+        assert a == b
+
+    def test_moving_a_member_into_the_condition_changes_it(self):
+        # Same membership union, but Z participates in firing in one of them.
+        dead = compute_rule_fingerprint_v2(
+            {"g": ["A"], "supporting": ["Z"]}, "all of g")
+        live = compute_rule_fingerprint_v2(
+            {"g": ["A"], "z": ["Z"]}, "all of g and all of z")
+        assert dead != live
+
+
+class TestQuantifierSensitivity:
+    def test_n_of_value_matters(self):
+        groups = {"g": ["A", "B", "C"]}
+        one = compute_rule_fingerprint_v2(groups, "1 of g")
+        two = compute_rule_fingerprint_v2(groups, "2 of g")
+        assert one != two
+
+    def test_all_vs_k(self):
+        groups = {"g": ["A", "B", "C"]}
+        all_of = compute_rule_fingerprint_v2(groups, "all of g")
+        two = compute_rule_fingerprint_v2(groups, "2 of g")
+        assert all_of != two
+
+    def test_not_wrapper_matters(self):
+        groups = {"g": ["A"], "h": ["B"]}
+        plain = compute_rule_fingerprint_v2(groups, "all of g and all of h")
+        negated = compute_rule_fingerprint_v2(groups, "all of g and not all of h")
+        assert plain != negated
+
+    def test_different_membership_differs(self):
+        a = compute_rule_fingerprint_v2({"g": ["A"]}, "all of g")
+        b = compute_rule_fingerprint_v2({"g": ["B"]}, "all of g")
+        assert a != b
+
+    def test_partition_matters(self):
+        # {A,B} as one 1-of group vs two singleton 1-of groups joined by AND
+        # are different firing semantics.
+        one_group = compute_rule_fingerprint_v2({"g": ["A", "B"]}, "1 of g")
+        two_groups = compute_rule_fingerprint_v2(
+            {"g1": ["A"], "g2": ["B"]}, "1 of g1 and 1 of g2")
+        assert one_group != two_groups
+
+
+class TestMembershipFallback:
+    def test_condition_none_uses_membership_fingerprint(self):
+        fp = compute_rule_fingerprint_v2({"g": ["B", "A"]}, None)
+        assert fp.startswith("M:")
+        assert fp == compute_rule_fingerprint_v2({"other": ["A", "B"]}, "")
+
+    def test_membership_fallback_ignores_grouping(self):
+        # With no condition there is no logic — only the member union counts.
+        a = compute_rule_fingerprint_v2({"g1": ["A"], "g2": ["B"]}, None)
+        b = compute_rule_fingerprint_v2({"g": ["A", "B"]}, "")
+        assert a == b
+
+    def test_unparseable_condition_falls_back_not_raises(self):
+        fp = compute_rule_fingerprint_v2({"g": ["A"]}, "all of of nonsense ((")
+        assert fp.startswith("M:")
+
+    def test_empty_everything_is_stable(self):
+        assert compute_rule_fingerprint_v2({}, None) == compute_rule_fingerprint_v2(None, "")
+
+    def test_membership_differs_from_conditioned(self):
+        bare = compute_rule_fingerprint_v2({"g": ["A"]}, None)
+        cond = compute_rule_fingerprint_v2({"g": ["A"]}, "all of g")
+        assert bare != cond
+
+
+class TestDeterminism:
+    def test_same_input_same_output(self):
+        groups = {"hook": ["A", "B"], "action": ["C"]}
+        cond = "1 of hook and all of action"
+        assert compute_rule_fingerprint_v2(dict(groups), cond) == \
+            compute_rule_fingerprint_v2(dict(groups), cond)
+
+    def test_returns_str(self):
+        assert isinstance(compute_rule_fingerprint_v2({"g": ["A"]}, "all of g"), str)
 
 
 # ===========================================================================
-# compute_rule_fingerprint_from_links
+# The DB-scanning finders (execute_query_dict monkeypatched)
 # ===========================================================================
 
-class TestFingerprintFromLinks:
-    def test_empty_list_canonical_form(self):
-        assert compute_rule_fingerprint_from_links([]) == "N:()|F:[]|S:()"
+def _rule_row(rule_id, name, groups, condition):
+    return {"rule_id": rule_id, "name": name, "ce_groups": groups, "condition": condition}
 
-    def test_none_input_treated_as_empty(self):
-        # ``ce_links or []`` makes None behave like an empty list.
-        assert compute_rule_fingerprint_from_links(None) == "N:()|F:[]|S:()"
 
-    def test_single_necessary(self):
-        links = [{"ce_id": 5, "role": "necessary", "fallback_group": 0}]
-        assert compute_rule_fingerprint_from_links(links) == "N:(5,)|F:[]|S:()"
+def _setup_row(setup_id, custom_name, groups, condition):
+    return {"setup_id": setup_id, "custom_name": custom_name,
+            "ce_groups": groups, "condition": condition}
 
-    def test_role_defaults_to_necessary_when_missing(self):
-        # No 'role' key -> (None or "necessary") -> "necessary".
-        links = [{"ce_id": 7}]
-        assert compute_rule_fingerprint_from_links(links) == "N:(7,)|F:[]|S:()"
 
-    def test_role_none_defaults_to_necessary(self):
-        links = [{"ce_id": 7, "role": None}]
-        assert compute_rule_fingerprint_from_links(links) == "N:(7,)|F:[]|S:()"
-
-    def test_role_is_case_insensitive(self):
-        links = [
-            {"ce_id": 1, "role": "NECESSARY"},
-            {"ce_id": 2, "role": "Sufficient"},
+class TestFindExistingRule:
+    def test_finds_structural_duplicate_under_different_names(self, monkeypatch):
+        rows = [
+            _rule_row(1, "other", {"g": ["X"]}, "all of g"),
+            _rule_row(2, "match", {"named_differently": ["A", "B"]}, "1 of named_differently"),
         ]
-        assert compute_rule_fingerprint_from_links(links) == "N:(1,)|F:[]|S:(2,)"
+        monkeypatch.setattr(js, "execute_query_dict", lambda q, p=None: rows)
+        fp = compute_rule_fingerprint_v2({"anything": ["A", "B"]}, "1 of anything")
+        hit = find_existing_rule_by_fingerprint_v2(fp)
+        assert hit is not None and hit["rule_id"] == 2
 
-    def test_necessary_ids_are_sorted(self):
-        links = [
-            {"ce_id": 9, "role": "necessary"},
-            {"ce_id": 2, "role": "necessary"},
-            {"ce_id": 5, "role": "necessary"},
+    def test_returns_none_when_no_match(self, monkeypatch):
+        rows = [_rule_row(1, "r", {"g": ["X"]}, "all of g")]
+        monkeypatch.setattr(js, "execute_query_dict", lambda q, p=None: rows)
+        fp = compute_rule_fingerprint_v2({"g": ["Y"]}, "all of g")
+        assert find_existing_rule_by_fingerprint_v2(fp) is None
+
+    def test_exclude_name_threaded_into_query(self, monkeypatch):
+        captured = {}
+
+        def fake(q, p=None):
+            captured["params"] = p
+            return []
+
+        monkeypatch.setattr(js, "execute_query_dict", fake)
+        find_existing_rule_by_fingerprint_v2("fp", exclude_name="myself")
+        assert captured["params"] == ("myself", "myself")
+
+    def test_rows_without_members_never_match(self, monkeypatch):
+        # Fresh/no-logic rules (empty groups) carry no logic and must not
+        # dedup against each other.
+        rows = [_rule_row(1, "empty", {}, None), _rule_row(2, "empty2", {"g": []}, None)]
+        monkeypatch.setattr(js, "execute_query_dict", lambda q, p=None: rows)
+        fp = compute_rule_fingerprint_v2({}, None)
+        assert find_existing_rule_by_fingerprint_v2(fp) is None
+
+    def test_none_rows_guarded(self, monkeypatch):
+        monkeypatch.setattr(js, "execute_query_dict", lambda q, p=None: None)
+        assert find_existing_rule_by_fingerprint_v2("fp") is None
+
+
+class TestFindExistingSetup:
+    def test_finds_sibling_with_same_logic(self, monkeypatch):
+        rows = [
+            _setup_row(10, "sib", {"grp": ["A"]}, "all of grp"),
         ]
-        assert compute_rule_fingerprint_from_links(links) == "N:(2, 5, 9)|F:[]|S:()"
+        monkeypatch.setattr(js, "execute_query_dict", lambda q, p=None: rows)
+        fp = compute_rule_fingerprint_v2({"renamed": ["A"]}, "all of renamed")
+        hit = find_existing_rule_setup_by_fingerprint_v2(5, fp)
+        assert hit is not None and hit["setup_id"] == 10
 
-    def test_sufficient_ids_are_sorted(self):
-        links = [
-            {"ce_id": 30, "role": "sufficient"},
-            {"ce_id": 10, "role": "sufficient"},
-        ]
-        assert compute_rule_fingerprint_from_links(links) == "N:()|F:[]|S:(10, 30)"
+    def test_classifier_and_exclusion_threaded_into_query(self, monkeypatch):
+        captured = {}
 
-    def test_ce_id_none_is_skipped(self):
-        links = [
-            {"ce_id": None, "role": "necessary"},
-            {"ce_id": 4, "role": "necessary"},
-        ]
-        assert compute_rule_fingerprint_from_links(links) == "N:(4,)|F:[]|S:()"
+        def fake(q, p=None):
+            captured["params"] = p
+            return []
 
-    def test_missing_ce_id_key_is_skipped(self):
-        links = [
-            {"role": "necessary"},
-            {"ce_id": 4, "role": "necessary"},
-        ]
-        assert compute_rule_fingerprint_from_links(links) == "N:(4,)|F:[]|S:()"
+        monkeypatch.setattr(js, "execute_query_dict", fake)
+        find_existing_rule_setup_by_fingerprint_v2(7, "fp", exclude_setup_id=42)
+        assert captured["params"] == (7, 42, 42)
 
-    def test_unknown_role_is_ignored(self):
-        # A role that is not necessary/sufficient/fallback falls through all
-        # branches and contributes nothing.
-        links = [
-            {"ce_id": 1, "role": "necessary"},
-            {"ce_id": 2, "role": "bogus"},
-        ]
-        assert compute_rule_fingerprint_from_links(links) == "N:(1,)|F:[]|S:()"
+    def test_no_match_returns_none(self, monkeypatch):
+        rows = [_setup_row(10, "s", {"g": ["B"]}, "all of g")]
+        monkeypatch.setattr(js, "execute_query_dict", lambda q, p=None: rows)
+        fp = compute_rule_fingerprint_v2({"g": ["A"]}, "all of g")
+        assert find_existing_rule_setup_by_fingerprint_v2(1, fp) is None
 
-    def test_fallback_single_group(self):
-        links = [
-            {"ce_id": 3, "role": "fallback", "fallback_group": 1},
-            {"ce_id": 1, "role": "fallback", "fallback_group": 1},
-        ]
-        # Group members are sorted within the group.
-        assert compute_rule_fingerprint_from_links(links) == "N:()|F:[(1, 3)]|S:()"
-
-    def test_fallback_groups_partition_and_sort(self):
-        links = [
-            {"ce_id": 4, "role": "fallback", "fallback_group": 2},
-            {"ce_id": 3, "role": "fallback", "fallback_group": 2},
-            {"ce_id": 1, "role": "fallback", "fallback_group": 1},
-            {"ce_id": 2, "role": "fallback", "fallback_group": 1},
-        ]
-        # Each group sorted internally; list-of-groups sorted as tuples.
-        assert (
-            compute_rule_fingerprint_from_links(links)
-            == "N:()|F:[(1, 2), (3, 4)]|S:()"
-        )
-
-    def test_fallback_group_numbering_does_not_matter(self):
-        # The docstring promises the user's group *numbering* is discarded —
-        # only the partition matters. These two should be identical.
-        a = [
-            {"ce_id": 1, "role": "fallback", "fallback_group": 1},
-            {"ce_id": 2, "role": "fallback", "fallback_group": 2},
-        ]
-        b = [
-            {"ce_id": 1, "role": "fallback", "fallback_group": 7},
-            {"ce_id": 2, "role": "fallback", "fallback_group": 99},
-        ]
-        assert (
-            compute_rule_fingerprint_from_links(a)
-            == compute_rule_fingerprint_from_links(b)
-        )
-
-    def test_fallback_group_defaults_to_zero(self):
-        # Missing fallback_group -> default 0; both land in the same group.
-        links = [
-            {"ce_id": 2, "role": "fallback"},
-            {"ce_id": 1, "role": "fallback", "fallback_group": None},
-        ]
-        assert compute_rule_fingerprint_from_links(links) == "N:()|F:[(1, 2)]|S:()"
-
-    def test_fallback_group_string_is_coerced_to_int(self):
-        # int(link.get("fallback_group", 0) or 0) coerces numeric strings.
-        links = [
-            {"ce_id": 1, "role": "fallback", "fallback_group": "1"},
-            {"ce_id": 2, "role": "fallback", "fallback_group": "1"},
-        ]
-        assert compute_rule_fingerprint_from_links(links) == "N:()|F:[(1, 2)]|S:()"
-
-    def test_mixed_roles_full_fingerprint(self):
-        links = [
-            {"ce_id": 5, "role": "necessary"},
-            {"ce_id": 1, "role": "necessary"},
-            {"ce_id": 8, "role": "sufficient"},
-            {"ce_id": 10, "role": "fallback", "fallback_group": 1},
-            {"ce_id": 9, "role": "fallback", "fallback_group": 1},
-            {"ce_id": 12, "role": "fallback", "fallback_group": 2},
-        ]
-        assert (
-            compute_rule_fingerprint_from_links(links)
-            == "N:(1, 5)|F:[(9, 10), (12,)]|S:(8,)"
-        )
-
-    def test_order_of_input_does_not_change_fingerprint(self):
-        links1 = [
-            {"ce_id": 1, "role": "necessary"},
-            {"ce_id": 2, "role": "sufficient"},
-            {"ce_id": 3, "role": "fallback", "fallback_group": 1},
-        ]
-        links2 = list(reversed(links1))
-        assert (
-            compute_rule_fingerprint_from_links(links1)
-            == compute_rule_fingerprint_from_links(links2)
-        )
-
-
-# ===========================================================================
-# compute_rule_fingerprint_from_names
-# ===========================================================================
-
-class TestFingerprintFromNames:
-    def test_all_empty_inputs_short_circuit_without_db(self, monkeypatch):
-        # When there are no names at all, the function must NOT touch the DB;
-        # it returns the empty-links fingerprint directly. We install a fake
-        # that explodes to prove the lookup is never called.
-        def boom(*args, **kwargs):
-            raise AssertionError("execute_query_dict should not be called")
-
-        monkeypatch.setattr(js, "execute_query_dict", boom)
-        result = compute_rule_fingerprint_from_names([], [], [])
-        assert result == "N:()|F:[]|S:()"
-        assert result == compute_rule_fingerprint_from_links([])
-
-    def test_all_none_inputs_short_circuit_without_db(self, monkeypatch):
-        def boom(*args, **kwargs):
-            raise AssertionError("execute_query_dict should not be called")
-
-        monkeypatch.setattr(js, "execute_query_dict", boom)
-        assert compute_rule_fingerprint_from_names(None, None, None) == "N:()|F:[]|S:()"
-
-    def test_empty_fallback_groups_only_still_short_circuits(self, monkeypatch):
-        # fallback is a list of empty groups -> no names collected -> no DB.
-        def boom(*args, **kwargs):
-            raise AssertionError("execute_query_dict should not be called")
-
-        monkeypatch.setattr(js, "execute_query_dict", boom)
-        assert compute_rule_fingerprint_from_names([], [[], []], []) == "N:()|F:[]|S:()"
-
-    def test_necessary_names_translated_to_ids(self, monkeypatch):
-        _patch_lookup(monkeypatch, {"alpha": 1, "beta": 2})
-        result = compute_rule_fingerprint_from_names(["alpha", "beta"], [], [])
-        assert result == "N:(1, 2)|F:[]|S:()"
-
-    def test_sufficient_names_translated_to_ids(self, monkeypatch):
-        _patch_lookup(monkeypatch, {"gamma": 10, "delta": 20})
-        result = compute_rule_fingerprint_from_names([], [], ["gamma", "delta"])
-        assert result == "N:()|F:[]|S:(10, 20)"
-
-    def test_fallback_groups_get_sequential_group_indices(self, monkeypatch):
-        _patch_lookup(monkeypatch, {"a": 1, "b": 2, "c": 3})
-        # enumerate(..., start=1) -> group ["a","b"] = group 1, ["c"] = group 2.
-        result = compute_rule_fingerprint_from_names([], [["a", "b"], ["c"]], [])
-        assert result == "N:()|F:[(1, 2), (3,)]|S:()"
-
-    def test_unknown_names_are_dropped(self, monkeypatch):
-        # "ghost" has no row -> name_to_id.get returns None -> skipped.
-        _patch_lookup(monkeypatch, {"known": 5})
-        result = compute_rule_fingerprint_from_names(["known", "ghost"], [], [])
-        assert result == "N:(5,)|F:[]|S:()"
-
-    def test_all_names_unknown_yields_empty_fingerprint(self, monkeypatch):
-        _patch_lookup(monkeypatch, {})  # DB returns no rows for anything
-        result = compute_rule_fingerprint_from_names(["x", "y"], [], [])
-        assert result == "N:()|F:[]|S:()"
-
-    def test_db_returns_none_is_handled(self, monkeypatch):
-        # ``execute_query_dict(...) or []`` guards a None return.
-        monkeypatch.setattr(js, "execute_query_dict", lambda q, p: None)
-        result = compute_rule_fingerprint_from_names(["x", "y"], [], [])
-        assert result == "N:()|F:[]|S:()"
-
-    def test_full_mixed_fingerprint(self, monkeypatch):
-        _patch_lookup(
-            monkeypatch,
-            {"n1": 1, "n2": 5, "s1": 8, "f1": 9, "f2": 10, "f3": 12},
-        )
-        result = compute_rule_fingerprint_from_names(
-            necessary=["n2", "n1"],
-            fallback=[["f2", "f1"], ["f3"]],
-            sufficient=["s1"],
-        )
-        assert result == "N:(1, 5)|F:[(9, 10), (12,)]|S:(8,)"
-
-    def test_query_uses_anyof_distinct_names(self, monkeypatch):
-        # The lookup should pass a *list* of the deduped set of all names.
-        captured = []
-        _patch_lookup(monkeypatch, {"a": 1, "b": 2}, capture=captured)
-        compute_rule_fingerprint_from_names(["a", "a"], [["b"]], ["a"])
-        assert len(captured) == 1
-        query, params = captured[0]
-        assert "name = ANY(%s)" in query
-        passed_names = params[0]
-        assert isinstance(passed_names, list)
-        # Deduped via set(): {"a", "b"} regardless of input repetition.
-        assert sorted(passed_names) == ["a", "b"]
-
-    def test_names_path_equals_links_path_for_same_ids(self, monkeypatch):
-        # The core equivalence guarantee: a names fingerprint must equal the
-        # links fingerprint built from the resolved ce_ids.
-        _patch_lookup(
-            monkeypatch,
-            {"nn": 3, "ss": 4, "fa": 7, "fb": 8},
-        )
-        from_names = compute_rule_fingerprint_from_names(
-            necessary=["nn"],
-            fallback=[["fa", "fb"]],
-            sufficient=["ss"],
-        )
-        from_links = compute_rule_fingerprint_from_links(
-            [
-                {"ce_id": 3, "role": "necessary", "fallback_group": 0},
-                {"ce_id": 4, "role": "sufficient", "fallback_group": 0},
-                {"ce_id": 7, "role": "fallback", "fallback_group": 1},
-                {"ce_id": 8, "role": "fallback", "fallback_group": 1},
-            ]
-        )
-        assert from_names == from_links
-
-    def test_duplicate_name_across_roles_resolves_independently(self, monkeypatch):
-        # A name appearing in two roles produces a link in each role.
-        _patch_lookup(monkeypatch, {"shared": 42})
-        result = compute_rule_fingerprint_from_names(["shared"], [], ["shared"])
-        assert result == "N:(42,)|F:[]|S:(42,)"
+    def test_memberless_setups_skipped(self, monkeypatch):
+        # A fresh custom setup (ce_groups = {}) must never be reported.
+        rows = [_setup_row(10, "fresh", {}, None)]
+        monkeypatch.setattr(js, "execute_query_dict", lambda q, p=None: rows)
+        fp = compute_rule_fingerprint_v2({}, None)
+        assert find_existing_rule_setup_by_fingerprint_v2(1, fp) is None

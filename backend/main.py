@@ -102,8 +102,9 @@ def _boot_step(name: str, fn):
 
 
 # Initialize local database. Everything lives here — this is a single-machine
-# deployment; publishing to the HF registry is done directly by the backend
-# (services/hf_write.py) when HF_TOKEN is configured.
+# deployment; the public library is read-synced from the gavel-rules GitHub
+# repo (services/library_sync.py), and contributions go by pull request
+# outside the studio (no in-app publish).
 # Synchronous: every route assumes the schema exists. Fast-skips when
 # the live schema is already at the expected version (see DButils.SCHEMA_VERSION).
 _boot_step("db init", init_database)
@@ -278,11 +279,11 @@ threading.Thread(target=_run_early_recovery, daemon=True, name="early-recovery")
 # huggingface_hub preload — moved off the synchronous boot path.
 #
 # The original concern was a Python import race: sentence_transformers
-# (in the warmup thread) and services.hf_sync (in the library-sync
-# thread) both touch huggingface_hub at first-import time; if they hit
-# it simultaneously Python's import system can hand one of them a
-# partially-initialised package ("cannot import name 'XetConnectionInfo'
-# from ..._xet"). The original fix was to import on the main thread
+# both in the warmup thread and in the library-sync thread (its
+# embedding trigger) touches huggingface_hub at first-import time; if
+# two threads hit it simultaneously Python's import system can hand one
+# a partially-initialised package ("cannot import name
+# 'XetConnectionInfo' from ..._xet"). The original fix was to import on the main thread
 # before any daemon started — correct but ~400ms-1s of synchronous boot.
 #
 # Replacement strategy: a dedicated bootstrap thread imports hf_hub
@@ -373,7 +374,7 @@ def _bootstrap_library_sync():
     # synchronous main-thread preload provided. 30s bounded.
     _hf_hub_ready.wait(timeout=30.0)
     try:
-        from services.hf_sync import sync_library, pull_all_aux_datasets
+        from services.library_sync import sync_library, pull_all_aux_datasets
         result = sync_library()
         if result.errors:
             print(f"[library-sync] startup sync had errors: {result.errors}")
@@ -391,8 +392,8 @@ def _bootstrap_library_sync():
         # thread so login + every other route stays unblocked. Calibration
         # / Evaluation routes use lazy `ensure_*` helpers that fetch any
         # records this background pull hasn't reached yet, so a request
-        # arriving mid-warmup just pays a few hundred ms of HF latency
-        # for the records it actually needs.
+        # arriving mid-warmup just pays a few hundred ms of registry
+        # latency for the records it actually needs.
         try:
             aux = pull_all_aux_datasets()
             print(f"[library-sync] aux datasets warmed: {aux}")

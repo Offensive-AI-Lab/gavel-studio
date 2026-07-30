@@ -1,17 +1,15 @@
-"""Tests for the backend -> frontend live push and the publisher's
-no-phantom-update fix.
+"""Tests for the backend -> frontend live push.
 
-Covers three pieces:
+Covers two pieces:
   * library_events — the in-process SSE bus (subscribe / publish / drop-oldest)
     and set_available()'s `update_available` / `synced` events.
   * the registry notifier — PROBES freshness (never pulls) and pushes the badge
-    state, so the user applies updates on their click and a publisher's own
-    commit comes back "synced".
-  * _record_pushed_manifest_hash — caches the central server's authoritative
-    (post-stamp) manifest hash, falling back to the local hash if absent.
+    state; the user applies updates on their own click.
+
+(The publisher-hash tests died with the publish machinery — the studio no
+longer writes to the registry; contributions go by gavel-rules PR.)
 """
 import asyncio
-import hashlib
 
 from services import library_events as bus
 from services.registry_sync import wiring
@@ -78,7 +76,7 @@ def test_set_available_updates_state_and_emits():
 # notifier — probe freshness (never pull) and push the badge state
 # --------------------------------------------------------------------------- #
 def test_notifier_flags_available(monkeypatch):
-    monkeypatch.setattr("services.hf_sync.check_for_updates",
+    monkeypatch.setattr("services.library_sync.check_for_updates",
                         lambda: {"available": True, "checked": True, "reason": None})
     seen = []
     monkeypatch.setattr("services.library_events.set_available",
@@ -91,7 +89,7 @@ def test_notifier_flags_available(monkeypatch):
 
 
 def test_notifier_flags_synced_and_never_pulls(monkeypatch):
-    monkeypatch.setattr("services.hf_sync.check_for_updates",
+    monkeypatch.setattr("services.library_sync.check_for_updates",
                         lambda: {"available": False, "checked": True, "reason": None})
     seen = []
     monkeypatch.setattr("services.library_events.set_available",
@@ -99,38 +97,8 @@ def test_notifier_flags_synced_and_never_pulls(monkeypatch):
 
     def _no_sync(*a, **k):
         raise AssertionError("notifier must not sync_library")
-    monkeypatch.setattr("services.hf_sync.sync_library", _no_sync)
+    monkeypatch.setattr("services.library_sync.sync_library", _no_sync)
 
     wiring._LibraryUpdateNotifier().reconcile()
 
     assert seen == [False]
-
-
-# --------------------------------------------------------------------------- #
-# publisher hash — prefer the central server's authoritative stamped hash
-# --------------------------------------------------------------------------- #
-def test_record_pushed_manifest_hash_prefers_returned_sha(monkeypatch):
-    from services import hf_publish
-
-    captured = []
-    monkeypatch.setattr("services.hf_publish.execute_query",
-                        lambda sql, params: captured.append(params))
-
-    hf_publish._record_pushed_manifest_hash(
-        {"status": "success", "manifest_sha256": "deadbeef"}, {"rules": {}})
-
-    assert captured and captured[0] == ("deadbeef",)
-
-
-def test_record_pushed_manifest_hash_falls_back_to_local(monkeypatch):
-    from services import hf_publish
-
-    captured = []
-    monkeypatch.setattr("services.hf_publish.execute_query",
-                        lambda sql, params: captured.append(params))
-
-    manifest = {"rules": {"r": "t"}}
-    hf_publish._record_pushed_manifest_hash({"status": "success"}, manifest)  # no sha
-
-    expected = hashlib.sha256(hf_publish._to_bytes(manifest)).hexdigest()
-    assert captured and captured[0] == (expected,)

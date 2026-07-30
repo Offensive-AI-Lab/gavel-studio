@@ -46,152 +46,121 @@ def get_ces_for_setup(setup_id: int):
 
 
 # ---------------------------------------------------------------------------
-# Rule structural fingerprint
+# Rule structural fingerprint — v2 (groups + condition model)
 # ---------------------------------------------------------------------------
 #
-# A rule's "logic" is fully described by which CEs play which role and how
-# fallback groups are partitioned. Two rules with the same role/fallback
-# structure but different names are functionally identical at scoring time —
-# the user gets confused if both show up in their library, and the trained
-# guardrail wastes capacity learning duplicate detectors. The fingerprint
-# below normalizes that structure into a stable string so we can dedup on
-# create.
-#
-# Format (chosen for human-readability when surfaced in error messages):
-#   N:[ce_id_1,ce_id_2,...]|F:[[a,b],[c]]|S:[ce_id_x,...]
-# where each list is sorted, fallback groups are individually sorted then
-# the list-of-groups is itself sorted. fallback_group integer values are
-# discarded — only the partition matters, not the user's group numbering.
+# Under the gavel-rules data model a rule's logic is (ce_groups, condition):
+# named groups of CE names plus a condition string in the v2 grammar
+# (utils/rule_condition.py). Two rules are structurally identical when their
+# firing logic is the same REGARDLESS of what the author called the groups —
+# so the fingerprint canonicalizes: referenced groups are keyed by their
+# sorted member tuple (names, not ids — ce_groups stores names and that is
+# the identity conditions speak), renamed g0..gN in that canonical order,
+# and the condition AST is serialized with commutative and/or children
+# sorted. Groups never referenced by the condition (e.g. the migrated
+# 'supporting' bucket) do not affect firing and are excluded.
 
-def compute_rule_fingerprint_from_links(ce_links: list) -> str:
-    """ce_links is a list of {ce_id, role, fallback_group}. Used by the
-    bookmarked-CE path where the request body already speaks ce_ids."""
-    necessary, sufficient = [], []
-    fallback_groups: dict = {}
-    for link in ce_links or []:
-        ce_id = link.get("ce_id")
-        if ce_id is None:
-            continue
-        role = (link.get("role") or "necessary").lower()
-        if role == "necessary":
-            necessary.append(ce_id)
-        elif role == "sufficient":
-            sufficient.append(ce_id)
-        elif role == "fallback":
-            grp = int(link.get("fallback_group", 0) or 0)
-            fallback_groups.setdefault(grp, []).append(ce_id)
+def compute_rule_fingerprint_v2(ce_groups: dict | None, condition: str | None) -> str:
+    """Canonical fingerprint of a (ce_groups, condition) pair.
 
-    necessary_sorted = sorted(necessary)
-    sufficient_sorted = sorted(sufficient)
-    fallback_normalized = sorted(
-        tuple(sorted(group)) for group in fallback_groups.values()
+    ce_groups: {group_name: [ce_name, ...]}. condition: v2 grammar string or
+    None/empty (legacy rules with membership but no logic). Falls back to a
+    membership-only fingerprint when the condition is absent or unparseable
+    (unparseable should never happen for validated rows, but a fingerprint
+    must never raise — dedup is best-effort)."""
+    from utils.rule_condition import ConditionError, parse, referenced_groups
+
+    groups = ce_groups or {}
+    members_of = {
+        name: tuple(sorted(set(members or [])))
+        for name, members in groups.items()
+    }
+
+    all_members = tuple(sorted({m for t in members_of.values() for m in t}))
+    if not (condition or "").strip():
+        return f"M:{all_members}"
+
+    try:
+        ast = parse(condition)
+    except ConditionError:
+        return f"M:{all_members}"
+
+    refs = sorted(
+        (name for name in referenced_groups(ast) if name in members_of),
+        key=lambda n: (members_of[n], n),
     )
-    return f"N:{tuple(necessary_sorted)}|F:{fallback_normalized}|S:{tuple(sufficient_sorted)}"
+    canonical_name = {name: f"g{i}" for i, name in enumerate(refs)}
+
+    def serialize(node) -> str:
+        kind = node[0]
+        if kind in ("and", "or"):
+            inner = ",".join(sorted(serialize(c) for c in node[1]))
+            return f"{'a' if kind == 'and' else 'o'}({inner})"
+        if kind == "not":
+            return f"n({serialize(node[1])})"
+        _, quant, name = node
+        cname = canonical_name.get(name, name)
+        return f"s({quant},{cname})"
+
+    canon_groups = "|".join(
+        f"{canonical_name[n]}:{members_of[n]}" for n in refs
+    )
+    return f"G:{canon_groups}|C:{serialize(ast)}"
 
 
-def compute_rule_fingerprint_from_names(necessary, fallback, sufficient) -> str:
-    """Same fingerprint, but the inputs are CE NAMES grouped by role.
-    Used by the AI pipeline / public-rule path (`upsert_rule_with_links`),
-    which speaks names because rule_ce_link is hydrated by name lookup.
+def find_existing_rule_by_fingerprint_v2(fingerprint: str, exclude_name: str = None):
+    """Scan the GLOBAL `rules` table for a rule whose (ce_groups, condition)
+    logic has the same canonical fingerprint. Returns the first match
+    ({rule_id, name, ...}) or None.
 
-    Names are translated to ce_ids before fingerprinting so the result
-    is comparable to fingerprints computed from ce_id-shaped inputs."""
-    all_names = set(necessary or [])
-    all_names.update(sufficient or [])
-    for group in (fallback or []):
-        all_names.update(group)
-    if not all_names:
-        return compute_rule_fingerprint_from_links([])
-
-    rows = execute_query_dict(
-        "SELECT ce_id, name FROM cognitive_elements WHERE name = ANY(%s)",
-        (list(all_names),),
-    ) or []
-    name_to_id = {r["name"]: r["ce_id"] for r in rows}
-
-    links: list = []
-    for ce_name in (necessary or []):
-        cid = name_to_id.get(ce_name)
-        if cid is not None:
-            links.append({"ce_id": cid, "role": "necessary", "fallback_group": 0})
-    for ce_name in (sufficient or []):
-        cid = name_to_id.get(ce_name)
-        if cid is not None:
-            links.append({"ce_id": cid, "role": "sufficient", "fallback_group": 0})
-    for idx, group in enumerate((fallback or []), start=1):
-        for ce_name in group:
-            cid = name_to_id.get(ce_name)
-            if cid is not None:
-                links.append({"ce_id": cid, "role": "fallback", "fallback_group": idx})
-    return compute_rule_fingerprint_from_links(links)
-
-
-def find_existing_rule_setup_by_fingerprint(classifier_id: int, fingerprint: str):
-    """Scan rule_setup rows in this guardrail and return the first that
-    matches the structural fingerprint, or None. Used by manual rule
-    creation (bookmarked-CE flow) to refuse duplicates with clearer
-    messaging than a name conflict.
-
-    The fingerprint comparison happens in Python rather than SQL because
-    the storage shape (rule_setup + setup_ce_link) doesn't have a stable
-    serialized fingerprint column — adding one would tie us to recompute
-    on every CE-link edit, which is more invasive than just walking the
-    guardrail's setups (typically <100 per guardrail in practice).
+    Used by `upsert_rule_with_links` (and the editor's check-duplicate probe)
+    to flag a same-structure-different-name collision before writing.
+    `exclude_name` lets a rule be re-saved under its OWN name without
+    tripping the dedup. Rules with no group members carry no logic and are
+    never reported as duplicates of each other.
     """
     rows = execute_query_dict(
         """
-        SELECT rs.setup_id, rs.custom_name,
-               COALESCE(
-                   json_group_array(
-                       json_object(
-                           'ce_id', scl.ce_id,
-                           'role', scl.role,
-                           'fallback_group', scl.fallback_group
-                       )
-                   ) FILTER (WHERE scl.ce_id IS NOT NULL),
-                   '[]'
-               ) AS "links [JSONB]"
-        FROM rule_setup rs
-        LEFT JOIN setup_ce_link scl ON scl.setup_id = rs.setup_id
-        WHERE rs.classifier_id = %s
-        GROUP BY rs.setup_id, rs.custom_name
-        """,
-        (classifier_id,),
-    ) or []
-    for row in rows:
-        if compute_rule_fingerprint_from_links(row["links"]) == fingerprint:
-            return row
-    return None
-
-
-def find_existing_rule_by_fingerprint(fingerprint: str, exclude_name: str = None):
-    """Scan the GLOBAL `rules` table for a rule with the same structural
-    fingerprint. Returns the first match (with name + rule_id) or None.
-
-    Used by `upsert_rule_with_links` to flag a same-structure-different-
-    name collision before writing. `exclude_name` lets the caller
-    re-save a rule under its OWN name without tripping the dedup."""
-    rows = execute_query_dict(
-        """
-        SELECT r.rule_id, r.name,
-               COALESCE(
-                   json_group_array(
-                       json_object(
-                           'ce_id', rcl.ce_id,
-                           'role', rcl.role,
-                           'fallback_group', rcl.fallback_group
-                       )
-                   ) FILTER (WHERE rcl.ce_id IS NOT NULL),
-                   '[]'
-               ) AS "links [JSONB]"
-        FROM rules r
-        LEFT JOIN rule_ce_link rcl ON rcl.rule_id = r.rule_id
-        WHERE (%s IS NULL OR r.name <> %s)
-        GROUP BY r.rule_id, r.name
+        SELECT rule_id, name, ce_groups, condition
+        FROM rules
+        WHERE (%s IS NULL OR name <> %s)
         """,
         (exclude_name, exclude_name),
     ) or []
     for row in rows:
-        if compute_rule_fingerprint_from_links(row["links"]) == fingerprint:
+        groups = row.get("ce_groups") or {}
+        if not any(members for members in groups.values()):
+            continue  # no logic — nothing to duplicate
+        if compute_rule_fingerprint_v2(groups, row.get("condition")) == fingerprint:
+            return row
+    return None
+
+
+def find_existing_rule_setup_by_fingerprint_v2(
+    classifier_id: int, fingerprint: str, exclude_setup_id: int = None
+):
+    """Scan this guardrail's rule_setup rows for one whose per-guardrail
+    (ce_groups, condition) copy matches the canonical fingerprint. Returns
+    the first match ({setup_id, custom_name, ...}) or None.
+
+    Used by the rule editor's Save flow to refuse a fork that duplicates a
+    sibling rule in the same guardrail. `exclude_setup_id` skips the setup
+    currently being edited so an unchanged save doesn't match itself.
+    Setups with no group members (fresh custom setups) are never matched.
+    """
+    rows = execute_query_dict(
+        """
+        SELECT setup_id, custom_name, ce_groups, condition
+        FROM rule_setup
+        WHERE classifier_id = %s
+          AND (%s IS NULL OR setup_id <> %s)
+        """,
+        (classifier_id, exclude_setup_id, exclude_setup_id),
+    ) or []
+    for row in rows:
+        groups = row.get("ce_groups") or {}
+        if not any(members for members in groups.values()):
+            continue
+        if compute_rule_fingerprint_v2(groups, row.get("condition")) == fingerprint:
             return row
     return None

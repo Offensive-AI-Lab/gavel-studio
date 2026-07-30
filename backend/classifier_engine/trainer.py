@@ -299,7 +299,7 @@ def fetch_calibration_entries(classifier_id: int, ces_with_datasets: list, per_c
     Returns [{"conversation": <conv>, "ce": "<sanitized label>"}]. Best-effort:
     any failure returns [] and the caller falls back to a single fit."""
     try:
-        from services.hf_sync import ensure_ce_calibrations_for_classifier
+        from services.library_sync import ensure_ce_calibrations_for_classifier
         ensure_ce_calibrations_for_classifier(classifier_id)
     except Exception as fetch_err:
         logger.warning(f"[Trainer] CE-calibration lazy fetch failed: {fetch_err}")

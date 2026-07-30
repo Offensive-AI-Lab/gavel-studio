@@ -22,7 +22,6 @@ import {
     deleteGuardrailFolder, assignGuardrailFolder,
     getRuleSetBookmarks, forkPublicRuleSet, getPublicRuleSets,
 } from '../api';
-import { publishDraftRuleSet } from '../services/RuleService';
 import { forgetRecent, getRecents } from '../utils/recents';
 import { useTutorialContent } from '../contexts/TutorialContext';
 import InlineHelp from '../components/InlineHelp/InlineHelp';
@@ -562,9 +561,10 @@ const Guardrails = () => {
                         <FiMove size={12} /> Move
                     </button>
                     <button
-                        onClick={(e) => { e.stopPropagation(); publishDraftRuleSet(c.classifier_id, c.name, fetchGuardrails); }}
-                        style={cloneBtnStyle}
-                        title="Share this rule set's rules to the community (members must be published rules)"
+                        onClick={(e) => e.stopPropagation()}
+                        disabled
+                        style={{ ...cloneBtnStyle, opacity: 0.55, cursor: 'not-allowed' }}
+                        title="Library contributions move to gavel-rules pull requests — submission from Studio coming soon"
                     >
                         <FiUploadCloud size={12} /> Share
                     </button>

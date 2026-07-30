@@ -89,7 +89,7 @@ const Workspace = () => {
                     'Rule Sets — your rule sets; the primary place you work.',
                     'Models — manage your registered LLMs and see which rule sets are attached to each.',
                     'Community — public library of vetted rules and CEs.',
-                    'My Bookmarks — saved for reuse. My Drafts — rules and CEs not yet published.',
+                    'My Bookmarks — saved for reuse. My Drafts — your local rules and CEs (not yet in the shared library).',
                     'Tutorial — re-opens this help (page-aware on every page).',
                     'Models (lower section) — your model tree, expandable to show the rule sets attached underneath.',
                 ],

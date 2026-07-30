@@ -1,18 +1,18 @@
-"""Integration tests for the auxiliary-dataset upsert + lazy-fetch flow.
+"""Integration tests for the auxiliary-dataset local-DB presence flow.
 
-The HF push side of the contract is covered by the bootstrap script's own
-runs and the Pydantic schema unit tests. This file pins down the local-DB
-integration that survives the rule-calibration table merge:
+The registry fetch side is covered by tests/unit/test_library_sync.py with
+a FakeReader. This file pins down the local-DB integration that survives
+the rule-calibration table merge:
 
   * `rule_calibration_datasets` is gone — its data lives in `test_datasets`
-    (dataset_type='positive_calibration').
-  * `ensure_rule_calibration` now reports presence based on a
-    `test_datasets` row attached to the rule's classifier.
-  * `ensure_rule_aux_for_classifier` summary buckets are accurate against
-    the new storage.
+    (dataset_type='positive_calibration', is_default=TRUE rows).
+  * `ensure_rule_calibration` reports presence based on the rule's DEFAULT
+    positive_calibration row; a local-only rule with no row is False.
+  * `ensure_rule_aux_for_classifier` is a prefetch (returns None) — it must
+    tolerate a classifier with no rules.
 
-We don't touch HuggingFace from these tests — rule calibration is
-strictly local and never round-trips through HF anymore.
+The registry is never touched — the root conftest installs a dead reader,
+so any accidental fetch fails fast instead of hitting the network.
 """
 import json
 
@@ -93,7 +93,7 @@ class TestAuxTablesExist:
 
 class TestEnsureRuleCalibrationPresence:
     def test_returns_false_when_classifier_has_no_calibration_row(self, client, test_classifier):
-        from services.hf_sync import ensure_rule_calibration
+        from services.library_sync import ensure_rule_calibration
         from utils.sqlite_db import execute_query_dict
         cid = test_classifier["classifier_id"]
         rule_id = _insert_pending_rule("aux_presence_no_row_rule")
@@ -112,7 +112,7 @@ class TestEnsureRuleCalibrationPresence:
             execute_query("DELETE FROM rule_setup WHERE setup_id = %s", (setup_id,))
 
     def test_returns_true_when_calibration_row_exists_for_classifier(self, client, test_classifier):
-        from services.hf_sync import ensure_rule_calibration
+        from services.library_sync import ensure_rule_calibration
         from utils.sqlite_db import execute_query_dict, execute_query
         cid = test_classifier["classifier_id"]
         rule_id = _insert_pending_rule("aux_presence_with_row_rule")
@@ -124,11 +124,13 @@ class TestEnsureRuleCalibrationPresence:
             (cid, rule_id, "aux_presence_with_row_setup", "A AND B"),
         )
         setup_id = rs_rows[0]["setup_id"]
+        # The calibration bucket is the rule's DEFAULT positive_calibration
+        # row (is_default=TRUE) — a user's custom set does not satisfy it.
         td_rows = execute_query_dict(
             """
             INSERT INTO test_datasets
-                (rule_id, dataset_type, scenario_name, conversations, status)
-            VALUES (%s, 'positive_calibration', 'unit', %s::jsonb, 'ready')
+                (rule_id, dataset_type, scenario_name, conversations, status, is_default)
+            VALUES (%s, 'positive_calibration', 'unit', %s::jsonb, 'ready', TRUE)
             RETURNING dataset_id
             """,
             (rule_id, json.dumps([[{"role": "user", "content": "x"}]])),
@@ -147,11 +149,12 @@ class TestEnsureRuleCalibrationPresence:
 
 
 class TestEnsureRuleAuxForClassifier:
-    def test_classifier_with_no_rules_returns_zero_summary(self, client, test_classifier):
-        from services.hf_sync import ensure_rule_aux_for_classifier
+    def test_classifier_with_no_rules_is_a_quiet_noop(self, client, test_classifier):
+        # The bulk helper is a PREFETCH now — it returns None and must not
+        # raise (or fetch anything) for a classifier with no rules.
+        from services.library_sync import ensure_rule_aux_for_classifier
         from utils.sqlite_db import execute_query
         cid = test_classifier["classifier_id"]
         # Make absolutely sure no rules are linked.
         execute_query("DELETE FROM rule_setup WHERE classifier_id = %s", (cid,))
-        summary = ensure_rule_aux_for_classifier(cid)
-        assert summary["calibration"] == {"fetched": 0, "missing": 0, "already_present": 0}
+        assert ensure_rule_aux_for_classifier(cid) is None

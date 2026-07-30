@@ -96,7 +96,7 @@ export const step2aRuleGeneration = {
             bullets: [
                 '**Identify scenario-specific behavioral signatures** that distinguish your misuse from other types',
                 '**Evaluate all existing CEs**, determining which ones apply and how they contribute to the misuse',
-                '**Assign functional roles** to applicable CEs, clarifying what aspect of the misuse each CE represents',
+                '**Organize applicable CEs into named groups** and write the firing condition over them, clarifying what aspect of the misuse each group represents',
                 '**Detect gaps in CE coverage**, identifying behaviors or contexts not represented in the current CE set',
                 '**Propose new CEs** only when necessary, ensuring they are justified, non-overlapping, and consistent with the CE taxonomy',
                 '**Assemble a complete rule** by organizing essential CEs into a coherent detection logic that specifies the required co-occurrence conditions',

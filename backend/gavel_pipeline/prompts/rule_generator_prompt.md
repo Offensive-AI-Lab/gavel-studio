@@ -136,19 +136,23 @@ For each gap identified:
 **Existing Rules for Reference:**
 {existing_rules}
 
-Build the rule with SCENARIO-SPECIFIC logic:
+Build the rule as **named CE groups** plus a **firing condition** — SCENARIO-SPECIFIC logic:
 
-**Necessary CEs:** Core elements that define THIS SPECIFIC misuse
-- Must include scenario-specific CONTEXT if it exists (e.g., "tax" for tax scam)
-- Must include scenario-defining ACTIONS
+**Groups:** Partition the rule's CEs into named groups. Each group holds CEs that play the same part in the misuse pattern:
+- Group names MUST be descriptive, lowercase snake_case matching `[a-z][a-z0-9_]*`, and MUST NOT be a grammar keyword (`all`, `of`, `and`, `or`, `not`). Good: `scam_context`, `pressure_tactics`, `extraction_methods`. Bad: `Group1`, `ALL`, `not`.
+- A group whose members must ALL be present (combined with `all of`) holds the core elements that define THIS SPECIFIC misuse — it must include the scenario-specific CONTEXT CE if it exists (e.g., "tax" for a tax scam) and the scenario-defining ACTIONS.
+- A group whose members are alternative expressions of ONE aspect of the misuse (combined with `1 of`, e.g., "information extraction methods") — any single member counts. Create one such group per aspect; keep each group semantically coherent.
+- Optionally, a `supporting` group of confidence-booster CEs relevant to the specific domain that you deliberately DO NOT reference in the condition — they strengthen detection but never trigger the rule on their own.
 
-**Fallback Groups:** Alternative expressions within this scenario
-- Group by semantic meaning (e.g., "information extraction methods")
-- Each group represents ONE aspect of the misuse pattern
+**Condition:** ONE boolean expression over the group names, using EXACTLY this grammar:
+- `all of <group>` — every CE in the group must be detected
+- `1 of <group>` — at least one CE in the group must be detected
+- `<K> of <group>` — at least K of the group's CEs must be detected (K is a positive integer no larger than the group size)
+- Join selectors with `and` / `or`; parentheses `( )` are allowed for grouping
+- `not` is **FORBIDDEN** — never use negation
+- Every group name referenced in the condition MUST exist in `groups`; every group except an optional `supporting` group SHOULD be referenced
 
-**Sufficient CEs:** Confidence boosters specific to this scenario
-- Optional elements that strengthen detection
-- Should be relevant to the specific domain
+Example: `"groups": {{"scam_context": ["tax"], "pressure_tactics": ["making_threat", "urgency_pressure"], "extraction_methods": ["payment_tools", "requesting_personal_information"]}}` with `"condition": "all of scam_context and 1 of pressure_tactics and 1 of extraction_methods"`.
 
 **CRITICAL REASONING REQUIREMENTS:**
 
@@ -180,10 +184,10 @@ You MUST show your complete reasoning process:
    - Examples of presence and absence
 
 5. **Rule Logic** (Clear structure!)
-   - Why these specific necessary CEs?
-   - What does each fallback group represent?
-   - How do sufficient CEs add confidence?
-   - Why this structure captures the scenario?
+   - Why these specific groups — what ONE aspect of the misuse pattern does each group represent?
+   - Why this quantifier (`all of` vs `1 of` vs `<K> of`) for each referenced group?
+   - If you added an unreferenced `supporting` group: how do its CEs add confidence without being required?
+   - Why this condition captures the scenario?
 
 6. Perform an explicit NON-OVERLAP / BOUNDARY CHECK:
 
@@ -223,7 +227,7 @@ You MUST show your complete reasoning process:
     "rule_structure_logic": "Why this specific rule structure captures the scenario..."
   }},
   
-"necessary": ["list", "of", "required", "CEs"], "fallback": [ ["first", "fallback", "group"], ["second", "fallback", "group"] ], "sufficient": ["list", "of", "optional", "CEs"],
+"groups": {{ "descriptive_group_name": ["ce_name_1", "ce_name_2"], "another_group_name": ["ce_name_3", "ce_name_4"] }}, "condition": "all of descriptive_group_name and 1 of another_group_name",
   
   "new_ces": {{
     "new_ce_name": {{
@@ -251,15 +255,16 @@ You MUST show your complete reasoning process:
 **VALIDATION CHECKLIST:**
 
 Before outputting, verify:
-- [ ] Rule contains AT LEAST 2 Cognitive Elements (necessary + fallback + sufficient combined). A rule with only 1 CE cannot be used for classification — the classifier needs at least 2 CEs to distinguish between different intents.
+- [ ] Rule contains AT LEAST 2 Cognitive Elements (all groups combined). A rule with only 1 CE cannot be used for classification — the classifier needs at least 2 CEs to distinguish between different intents.
 - [ ] Rule name is SPECIFIC to the scenario (not generic)
 - [ ] Description mentions the SPECIFIC domain/context
 - [ ] You reviewed ALL existing CEs systematically
 - [ ] New CEs are justified with gap analysis
 - [ ] Rule captures SPECIFIC tactics of this scenario
 - [ ] Reasoning section is comprehensive and shows thinking
-- [ ] Necessary CEs include scenario-specific context if applicable
-- [ ] Fallback groups are semantically coherent
+- [ ] The group(s) the condition requires in full (`all of`) include the scenario-specific context CE if applicable
+- [ ] Every group is semantically coherent (ONE aspect of the pattern per group) with a descriptive lowercase snake_case name
+- [ ] The condition uses only `all of` / `1 of` / `<K> of` selectors joined by `and`/`or` (parentheses allowed), contains NO `not`, and references only group names defined in `groups`
 - [ ] This rule would NOT match unrelated misuse types
 - [ ] New CEs are mutually non-overlapping with each other AND with existing CEs
 - [ ] Each CE example belongs to exactly one CE (or to a clearly stated combination of CEs at the rule level), not to multiple CEs
@@ -272,7 +277,7 @@ Scenario: "Tax scam via AI"
 
 Good reasoning:
 - "This is specifically about TAXATION context"
-- "Reviewed 'tax' CE - YES, this is necessary for tax-specific framing"
+- "Reviewed 'tax' CE - YES, this is the required context for tax-specific framing"
 - "Reviewed 'making_threat' CE - YES, tax scams use IRS threat tactics"
 - "Reviewed 'payment_tools' CE - YES, tax scams demand payment"
 - "Need new CE 'fake_tax_authority_reference' for specific tax agency impersonation"

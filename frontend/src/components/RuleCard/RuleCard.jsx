@@ -4,8 +4,9 @@ import { showAlertDialog } from '../ConfirmDialog/confirmDialog';
 import { FiPenTool, FiTrash2, FiChevronDown, FiChevronUp, FiCpu, FiPlus, FiMinus, FiInfo, FiTag, FiUpload, FiFileText, FiBookmark, FiEdit2 } from 'react-icons/fi';
 import GlassModal from '../GlassModal/GlassModal';
 import RoleLogicGuide from '../RoleLogicGuide/RoleLogicGuide';
+import RuleLogicPreview from '../RuleLogicPreview/RuleLogicPreview';
 import BuildRuleFromCEsModal from '../../pages/BuildRuleFromCEsModal';
-import { ROLE_LABELS, anyOfGroupLabel } from '../../utils/roleLabels';
+import { extractLogic } from '../../utils/ruleLogic';
 import { getCEBookmarks, addCEBookmark, removeCEBookmark } from '../../api';
 import { recordRecent } from '../../utils/recents';
 import './RuleCard.css'; // Import its own CSS
@@ -19,23 +20,13 @@ const RuleCard = ({
     onBookmark,
     bookmarkLabel = 'Save',
     isBookmarked = false,
-    onPublish,
+    onEditLogic,
 }) => {
-    // A rule is "publishable" when it backs an existing rules-table draft
-    // (is_local_draft === true). Setups whose rule_id is NULL come back with
-    // is_local_draft === null/undefined and don't get the button — those need
-    // a separate "promote setup → rule → publish" path.
-    //
-    // NOTE: independent of `readOnly` (matching CognitiveElementCard) so the
-    // Publish button shows on your own drafts in Browse too — there the card is
-    // read-only for editing, but publishing your draft is still allowed. The
-    // `onPublish` guard keeps it off contexts that don't wire publishing.
-    const canPublish = rule?.is_local_draft === true && typeof onPublish === 'function';
-    // In-flight guard: disable Publish while a publish is running so a
-    // double/rage-click can't fire two concurrent publishes for the same draft
-    // (the second would race the first's HF commit). onPublish returns a
-    // promise; we await it and re-enable in finally.
-    const [publishing, setPublishing] = React.useState(false);
+    // Drafts show a DISABLED Publish button: publishing from Studio is gone —
+    // library contributions now go through gavel-rules pull requests. The
+    // button stays (disabled, with an explanatory tooltip) so the affordance
+    // isn't silently missing for users who knew the old flow.
+    const isDraftRule = rule?.is_local_draft === true;
     // CE bookmarking from the rule card — which of this rule's CEs the user has
     // saved. Loaded lazily when the card expands (the CE tags are only shown
     // then), so list views don't each fire a fetch.
@@ -79,13 +70,6 @@ const RuleCard = ({
     const [logicGuideOpen, setLogicGuideOpen] = React.useState(false);
     const description = (rule?.description || '').trim();
     const descIsLong = description.length > 180;
-    const handlePublishClick = async (e) => {
-        e.stopPropagation();
-        if (publishing) return;
-        setPublishing(true);
-        try { await onPublish(rule); }
-        finally { setPublishing(false); }
-    };
     const navigate = useNavigate();
     const ruleNavId = rule?.source_rule_id || rule?.rule_id;
 
@@ -98,45 +82,23 @@ const RuleCard = ({
         }
     }, [isExpanded, ruleNavId, rule?.custom_name]);
 
-    // "Edit" = fork this rule into a NEW draft (build-from-CEs prefilled with this
-    // rule's CEs/roles/categories, forced to a new name). Available to a signed-in
-    // user when the rule has at least one CE we can carry (needs a ce_id to relink).
+    // The rule's firing logic in the groups + condition model. `logic.groups`
+    // is null for legacy rows — then the derived predicate string is shown.
+    const logic = extractLogic(rule);
+
+    // "Edit" = fork this rule into a NEW draft (build-from-CEs prefilled with
+    // this rule's CEs/groups/condition/categories, forced to a new name).
+    // Available to a signed-in user when the rule has at least one CE we can
+    // carry (needs a ce_id to relink).
     const [editOpen, setEditOpen] = React.useState(false);
     const editableCes = (rule?.active_ces || []).filter((c) => c && c.ce_id != null);
     const canEdit = !!_ruleCardUser && editableCes.length > 0;
     const editBase = {
         name: rule?.custom_name,
-        ces: editableCes.map((c) => ({ ce_id: c.ce_id, name: c.name, role: c.role, fallback_group: c.fallback_group, category: c.category })),
+        ces: editableCes.map((c) => ({ ce_id: c.ce_id, name: c.name, category: c.category })),
+        groups: logic.groups,
+        condition: logic.condition,
         categories: rule?.categories || [],
-    };
-
-    const renderRoleBadge = (role, fallbackGroup) => {
-        const normalized = role || 'necessary';
-        if (normalized === 'fallback') {
-            // 'fallback' is the internal role name; shown as "Any of". The
-            // fallback_group is 0-indexed in the DB; shown 1-indexed (G1, G2, …).
-            return <span className="ce-role-badge fallback" title="Any-of group (OR within group, AND across groups)">{anyOfGroupLabel(fallbackGroup)}</span>;
-        }
-        // 'sufficient' is the internal role name; shown as "Supporting" — these
-        // CEs raise confidence but are NOT part of the rule's boolean logic.
-        if (normalized === 'sufficient') return <span className="ce-role-badge sufficient" title="Supporting signal — raises confidence but does not trigger the rule on its own">{ROLE_LABELS.sufficient}</span>;
-        return <span className="ce-role-badge necessary" title="Necessary (all must be true)">{ROLE_LABELS.necessary}</span>;
-    };
-
-    const roleHelpTooltip = "Necessary: all must be true • Any of: OR within group, AND across groups • Supporting: extra confidence signals, not part of the boolean logic.";
-
-    const showRoleHelp = (e) => {
-        e.stopPropagation();
-        showAlertDialog({
-            title: 'Roles guide',
-            messageHtml: `
-                <p><strong>Necessary</strong>: every CE must be true (AND).</p>
-                <p><strong>Any of</strong>: OR inside the same group (G1, G2&hellip;), AND across groups.</p>
-                <p><strong>Supporting</strong>: raises confidence when present, but does NOT trigger the rule on its own — it is not part of the boolean logic.</p>
-            `,
-            confirmText: 'Got it',
-            variant: 'info',
-        });
     };
 
     return (
@@ -242,16 +204,16 @@ const RuleCard = ({
                             {isBookmarked ? 'Remove' : bookmarkLabel}
                         </button>
                     )}
-                    {canPublish && (
+                    {isDraftRule && (
                         <button
                             className="bookmark-btn publish-btn"
-                            onClick={handlePublishClick}
-                            disabled={publishing}
-                            aria-label="Publish rule to library"
-                            title="Push this draft to the public registry"
+                            disabled
+                            onClick={(e) => e.stopPropagation()}
+                            aria-label="Publish rule to library (coming soon)"
+                            title="Library contributions move to gavel-rules pull requests — submission from Studio coming soon"
                         >
                             <FiUpload />
-                            {publishing ? 'Publishing…' : 'Publish'}
+                            Publish
                         </button>
                     )}
                     {ruleNavId && (
@@ -277,6 +239,17 @@ const RuleCard = ({
                         >
                             <FiEdit2 />
                             Edit
+                        </button>
+                    )}
+                    {typeof onEditLogic === 'function' && !readOnly && (
+                        <button
+                            className="bookmark-btn"
+                            onClick={(e) => { e.stopPropagation(); onEditLogic(rule); }}
+                            aria-label="Edit this rule's groups and condition in place"
+                            title="Edit logic — change this rule's CE groups and firing condition"
+                        >
+                            <FiEdit2 />
+                            Edit logic
                         </button>
                     )}
                     {!readOnly && (
@@ -345,52 +318,36 @@ const RuleCard = ({
                         </button>
                     </div>
 
-                    <div className="code-box">{rule.predicate}</div>
-                    
+                    {logic.groups ? (
+                        <RuleLogicPreview title={null} groups={logic.groups} condition={logic.condition} />
+                    ) : (
+                        // Legacy row without groups — show the derived predicate string.
+                        <div className="code-box">{logic.predicate || rule.predicate}</div>
+                    )}
+
                     <div className="ce-tags-list">
                         <div style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px', color: '#475569', fontWeight: 600 }}>
-                            <span>Elements & Roles</span>
-                            <button
-                                type="button"
-                                onClick={showRoleHelp}
-                                aria-label="Role help"
-                                title={roleHelpTooltip}
-                                style={{
-                                    border: 'none',
-                                    background: 'transparent',
-                                    padding: 0,
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    cursor: 'pointer',
-                                    color: '#475569'
-                                }}
-                            >
-                                <FiInfo />
-                            </button>
+                            <span>Cognitive Elements</span>
+                            <FiInfo title="Every CE the rule trains on — the groups and condition above decide which combinations make it fire." />
                         </div>
-                        {(rule.active_ces || []).map((ce, ci) => {
-                            const role = ce.role || 'necessary';
-                            const fallbackGroup = ce.fallback_group || 0;
-                            return (
-                                <div key={ce.ce_id || ce.name || ci} className="ce-tag" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '6px' }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', alignSelf: 'stretch' }}>
-                                        <span>{ce.name || ce}</span>
-                                        {/* Bookmark this CE to your Library. Only for published CEs
-                                          * (have a ce_id) when a user is signed in. */}
-                                        {ce.ce_id != null && _ruleCardUser && !ce.is_local_draft && (
-                                            <button
-                                                onClick={(e) => { e.stopPropagation(); toggleCeBookmark(ce); }}
-                                                title={ceBmIds.has(ce.ce_id) ? 'Remove CE from your Library' : 'Save CE to your Library'}
-                                                style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: ceBmIds.has(ce.ce_id) ? '#fcd34d' : '#94a3b8', display: 'inline-flex', alignItems: 'center', padding: 2 }}
-                                            >
-                                                <FiBookmark size={14} fill={ceBmIds.has(ce.ce_id) ? '#fcd34d' : 'none'} />
-                                            </button>
-                                        )}
-                                    </div>
-                                    {renderRoleBadge(role, fallbackGroup)}
+                        {(rule.active_ces || []).map((ce, ci) => (
+                            <div key={ce.ce_id || ce.name || ci} className="ce-tag" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '6px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', alignSelf: 'stretch' }}>
+                                    <span>{ce.name || ce}</span>
+                                    {/* Bookmark this CE to your Library. Only for published CEs
+                                      * (have a ce_id) when a user is signed in. */}
+                                    {ce.ce_id != null && _ruleCardUser && !ce.is_local_draft && (
+                                        <button
+                                            onClick={(e) => { e.stopPropagation(); toggleCeBookmark(ce); }}
+                                            title={ceBmIds.has(ce.ce_id) ? 'Remove CE from your Library' : 'Save CE to your Library'}
+                                            style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: ceBmIds.has(ce.ce_id) ? '#fcd34d' : '#94a3b8', display: 'inline-flex', alignItems: 'center', padding: 2 }}
+                                        >
+                                            <FiBookmark size={14} fill={ceBmIds.has(ce.ce_id) ? '#fcd34d' : 'none'} />
+                                        </button>
+                                    )}
                                 </div>
-                            );
-                        })}
+                            </div>
+                        ))}
                     </div>
                 </div>
             )}

@@ -10,9 +10,10 @@
 #      apt/dnf/pacman/zypper/brew; on Windows it prints install links and
 #      stops). There is no database server to install — storage is a SQLite
 #      file (backend/db/gavel.sqlite3) the backend creates on first boot.
-#   2. Asks for an optional OpenAI key (AI rule/CE generation). Publishing to
-#      the HF registry is optional too — add a write-scope HF_TOKEN to
-#      backend/.env by hand to enable it; everything else works without one.
+#   2. Asks for an optional OpenAI key (AI rule/CE generation). A GITHUB_TOKEN
+#      in backend/.env is only needed while the gavel-rules library repo is
+#      private (read access); everything else works without one. Library
+#      contributions go by pull request to gavel-rules, not through the app.
 #   3. Installs Python deps for the backend and Node deps for the frontend
 #      ("downloads everything he needs").
 #   4. Writes backend/.env, then launches the backend + frontend and streams
@@ -22,7 +23,7 @@
 # one local operator.
 #
 # Clean slate: delete backend/db/gavel.sqlite3 — the public library re-syncs
-# from HuggingFace on the next boot.
+# from the gavel-rules GitHub repo on the next boot.
 #
 # Needs: an internet connection. The FIRST run downloads the ML stack
 # (torch, transformers, ...), so it can take several minutes.
@@ -200,7 +201,7 @@ set_env backend/.env OPENAI_API_KEY "$OPENAI_VAL"
 [ -f frontend/.env ] && set_env frontend/.env VITE_API_URL "http://localhost:${BACKEND_PORT}"
 
 [ -z "$OPENAI_VAL" ] && warn "OPENAI_API_KEY not set — AI rule/CE generation disabled (everything else works)."
-[ -z "$(get_env backend/.env HF_TOKEN)" ] && warn "HF_TOKEN not set — publishing to the HF registry disabled (everything else works)."
+[ -z "$(get_env backend/.env GITHUB_TOKEN)" ] && warn "GITHUB_TOKEN not set — needed only while the gavel-rules library repo is private (everything else works)."
 ok "environment configured"
 
 ###############################################################################

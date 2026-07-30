@@ -6,7 +6,6 @@ import RuleCard from '../components/RuleCard/RuleCard';
 import SearchPanel from '../components/SearchPanel/SearchPanel';
 import Pagination from '../components/Pagination/Pagination';
 import { getPublicRules, addRuleBookmark, getRuleBookmarks, removeRuleBookmark, getAllCategories } from '../api';
-import { publishDraftRule } from '../services/RuleService';
 import useLibrarySearch from '../hooks/useLibrarySearch';
 import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
 import { useTutorialContent } from '../contexts/TutorialContext';
@@ -82,13 +81,11 @@ const Browse = () => {
     };
 
     const mapSearchResultToRule = (item) => {
-        // Prefer the role-aware list from the backend (`active_ces`),
-        // which carries { ce_id, name, role, fallback_group } per
-        // member so RuleCard can render NECESSARY / SUFFICIENT /
-        // FALLBACK badges correctly. Fall back to `ces` (names only)
-        // for older response shapes — in that case every CE will
-        // render as NECESSARY, which is the pre-fix behavior, but
-        // we never strip role data we DO have.
+        // Prefer the membership list from the backend (`active_ces`,
+        // { ce_id, name } per member). The rule's LOGIC — groups +
+        // condition — rides along on the row itself (spread below) and
+        // RuleCard renders it via extractLogic; `ces` (names only) is
+        // the fallback for older response shapes.
         const richActive = Array.isArray(item.active_ces) && item.active_ces.length > 0
             ? item.active_ces
             : null;
@@ -124,9 +121,10 @@ const Browse = () => {
 
     const fetchRules = async () => {
         try {
-            // Community/Browse is the PUBLIC space: it shows only published
-            // library rules. A user's unpublished drafts never appear here —
-            // they live in "Your Library" until the user publishes them.
+            // Community/Browse is the PUBLIC space: it shows only synced
+            // library rules. A user's local drafts never appear here — they
+            // live in "Your Library" (drafts join the shared library via
+            // gavel-rules pull requests).
             const publicRes = await getPublicRules();
             const publicData = publicRes.data.rules || publicRes.data || [];
             const publicRules = (Array.isArray(publicData) ? publicData : [])
@@ -155,9 +153,9 @@ const Browse = () => {
     }, [searchQuery, searchCategories, searchTopK]);
 
     // Stay in sync with library mutations from anywhere in the app —
-    // a new public rule arriving via HF sync, a publish from the AI
-    // pipeline, a bookmark toggle in another tab, etc. — all flow
-    // through gavel:libraryChanged.
+    // a new public rule arriving via gavel-rules sync, a bookmark
+    // toggle in another tab, etc. — all flow through
+    // gavel:libraryChanged.
     useLibraryRefresh(() => {
         fetchRules();
         fetchBookmarks();
@@ -352,7 +350,6 @@ const Browse = () => {
                                         onBookmark={handleBookmark}
                                         bookmarkLabel="Save"
                                         isBookmarked={bookmarkIds.has(rule.rule_id || rule.id)}
-                                        onPublish={(r) => publishDraftRule(r, user?.user_id, fetchRules)}
                                     />
                                 ))}
                             </div>
@@ -462,7 +459,6 @@ const Browse = () => {
                                         onBookmark={handleBookmark}
                                         bookmarkLabel="Save"
                                         isBookmarked={bookmarkIds.has(rule.rule_id || rule.id)}
-                                        onPublish={(r) => publishDraftRule(r, user?.user_id, fetchRules)}
                                     />
                                 ))}
                             </div>

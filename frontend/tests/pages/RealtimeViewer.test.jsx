@@ -107,8 +107,26 @@ const richAnalysis = {
         { token: ' world', token_index: 2, triggered_ces: ['Bias'], probabilities: { Toxicity: 0.1, Bias: 0.8 } },
     ],
     rule_triggers: [
-        { rule_name: 'RuleFired', fired: true },
-        { rule_name: 'RuleMissed', fired: false, all_required_satisfied: false, any_of_groups_unmet: [{}, {}] },
+        {
+            rule_name: 'RuleFired',
+            fired: true,
+            condition: 'all of required',
+            groups: {
+                required: { members: ['Toxicity'], hits: ['Toxicity'], quantifier: 'all', satisfied: true },
+            },
+            groups_unmet: [],
+        },
+        {
+            rule_name: 'RuleMissed',
+            fired: false,
+            condition: 'all of required and 2 of solicited_action',
+            groups: {
+                required: { members: ['Toxicity'], hits: ['Toxicity'], quantifier: 'all', satisfied: true },
+                solicited_action: { members: ['a', 'b', 'c'], hits: ['a'], quantifier: 2, satisfied: false },
+                supporting: { members: ['x'], hits: [], quantifier: null, satisfied: true },
+            },
+            groups_unmet: ['solicited_action'],
+        },
     ],
 };
 
@@ -239,6 +257,10 @@ describe('RealtimeViewer — live chat send flow', () => {
         expect(within(sidebar).getByText('RuleFired')).toBeInTheDocument();
         expect(within(sidebar).getByText('FIRED')).toBeInTheDocument();
         expect(within(sidebar).getByText('NOT FIRED')).toBeInTheDocument();
+        // Per-group progress: hits vs. the condition's demand, per group.
+        expect(within(sidebar).getByText(/1\/2 of solicited_action/)).toBeInTheDocument();
+        // Unreferenced (supporting) groups are not listed as progress rows.
+        expect(within(sidebar).queryByText(/of supporting/)).not.toBeInTheDocument();
     });
 
     it('passes prior history on the second send', async () => {
@@ -472,7 +494,7 @@ describe('RealtimeViewer — stored (test samples) mode', () => {
                             { token: 'B1', token_index: 0, triggered_ces: ['Bias'], probabilities: { Toxicity: 0.1, Bias: 0.8 } },
                             { token: 'B2', token_index: 1, triggered_ces: [], probabilities: { Toxicity: 0.1, Bias: 0.1 } },
                         ],
-                        rule_triggers: [{ rule_name: 'RuleTurnTwo', fired: false, all_required_satisfied: false }],
+                        rule_triggers: [{ rule_name: 'RuleTurnTwo', fired: false, condition: 'all of required', groups: { required: { members: ['a'], hits: [], quantifier: 'all', satisfied: false } }, groups_unmet: ['required'] }],
                     },
                 ],
             },

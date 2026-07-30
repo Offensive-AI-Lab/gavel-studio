@@ -1,6 +1,6 @@
-"""Contribution counts come from the LOCAL synced library, not the drift-prone
-central counter — so a profile/community count stays accurate even after items
-are removed from HF. Covers routes.user._local_published_counts.
+"""Contribution counts come from the LOCAL synced library — so a profile/
+community count stays accurate even after items are removed from the
+gavel-rules registry. Covers routes.user._local_published_counts.
 """
 import time
 

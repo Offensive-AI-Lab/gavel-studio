@@ -1,9 +1,9 @@
 """Server-side background jobs for guardrail bundle export / import.
 
-Export and import can take a while (export may publish draft rules to HF first;
-import syncs the whole library, then rebuilds the guardrail). Running them as
-detached background tasks means the work survives the user closing the modal —
-only a backend crash ends it. The `bundle_jobs` table is the durable record the
+Export and import can take a while (import syncs the whole library from the
+gavel-rules registry, then rebuilds the guardrail). Running them as detached
+background tasks means the work survives the user closing the modal — only a
+backend crash ends it. The `bundle_jobs` table is the durable record the
 frontend polls, and the breadcrumb crash recovery uses to clean up a partially
 imported guardrail.
 
@@ -172,21 +172,9 @@ def run_export_job(job_id: int, user_id: int, classifier_id: int, tier: str) -> 
         if a["drift"]:
             return _set_error(job_id, a["reason"] or "The policy changed since training; retrain first.")
 
-        # Publish any draft rules in the policy (the user approved this by
-        # starting the export). publish_rule cascades each rule's draft CEs.
-        if not a["can_export"] and a["unpublished"]:
-            _set_phase(job_id, "Publishing rules to the library…")
-            from services.hf_publish import publish_rule
-            for item in a["unpublished"]:
-                res = publish_rule(item["rule_id"], publisher_user_id=user_id)
-                ok = getattr(res, "status", None) is not None and res.status.name == "SUCCESS"
-                if not ok:
-                    return _set_error(
-                        job_id,
-                        f"Couldn't publish rule “{item['name']}”: {getattr(res, 'error', 'publish failed')}",
-                    )
-            a = cb.assess_export(classifier_id)
-
+        # There is no in-studio publish: everything in the policy must already
+        # be in the public library (contributed via a gavel-rules pull request
+        # and synced). assess_export's reason names exactly what's missing.
         if not a["can_export"]:
             return _set_error(job_id, a["reason"] or "This rule set can't be exported.")
         if tier not in a["tiers_available"]:

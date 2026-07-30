@@ -140,17 +140,21 @@ class TestAttachModel:
 
 class TestClone:
     def _seed_rule(self, classifier_id):
+        import json as _json
+        ce_name = _unique("clone_ce")
         ce = execute_query_dict(
             "INSERT INTO cognitive_elements (name, definition) VALUES (%s, %s) RETURNING ce_id",
-            (_unique("clone_ce"), "clone test CE"),
+            (ce_name, "clone test CE"),
         )[0]["ce_id"]
         setup = execute_query_dict(
-            "INSERT INTO rule_setup (classifier_id, rule_id, custom_name, predicate, is_active) "
-            "VALUES (%s, NULL, %s, %s, TRUE) RETURNING setup_id",
-            (classifier_id, "clone_rule", "CE_x"),
+            "INSERT INTO rule_setup (classifier_id, rule_id, custom_name, predicate, "
+            "ce_groups, condition, is_active) "
+            "VALUES (%s, NULL, %s, %s, %s, %s, TRUE) RETURNING setup_id",
+            (classifier_id, "clone_rule", ce_name,
+             _json.dumps({"required": [ce_name]}), "all of required"),
         )[0]["setup_id"]
         execute_query(
-            "INSERT INTO setup_ce_link (setup_id, ce_id, role, fallback_group) VALUES (%s, %s, 'necessary', 0)",
+            "INSERT INTO setup_ce_link (setup_id, ce_id) VALUES (%s, %s)",
             (setup, ce),
         )
         return setup, ce

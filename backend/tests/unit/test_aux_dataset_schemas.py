@@ -1,90 +1,70 @@
-"""Unit tests for the auxiliary-dataset Pydantic schemas + manifest fields.
+"""Unit tests for the lazily-fetched dataset record schemas
+(services.library_schemas).
 
-These verify the schema contract that the bootstrap script writes and that
-hf_sync reads. Mismatches between what gets pushed to HF and what local
-clients can parse would silently truncate calibration / eval data on every
-client at once — exactly the kind of regression a unit test should catch
-before a PR lands.
+The catalog side of the gavel-rules registry (index.json) is consumed as
+plain dicts by services/library_sync.py; only the per-record dataset files
+are validated through Pydantic before they touch the local DB. These tests
+lock the contract for those files:
 
-What's covered:
-  * the new Manifest fields default to empty maps (so old manifests still
-    validate cleanly under the new schema)
-  * each new record type validates a happy-path payload and round-trips
-    its `samples` / partition lists unchanged
-  * extra fields are dropped silently (forward-compat: a v2 record with
-    new fields shouldn't break v1 clients)
+  * ces/<name>/excitation.json      -> ExcitationRecord
+  * ces/<name>/calibration.json     -> CECalibrationRecord
+  * rules/<name>/tests/<type>.json  -> RuleDatasetRecord (upstream carries
+                                       the bucket under `type`; locally the
+                                       field is `dataset_type` — both keys
+                                       must validate)
 
-What's NOT covered: the actual HF push. That's an integration concern and
-would require either a real HF token (don't want side effects in CI) or a
-lot of huggingface_hub mocking (low value vs effort). The publish path is
-exercised in production runs via the bootstrap script.
+The v1 Manifest/CERecord/RuleRecord catalog models are gone with the HF
+registry — index.json needs no Pydantic layer.
 """
 import pytest
+from pydantic import ValidationError
 
 from services.library_schemas import (
-    Manifest,
     CECalibrationRecord,
+    ExcitationRecord,
+    RuleDatasetRecord,
 )
 
 
 # ---------------------------------------------------------------------------
-# Manifest — backward compat + the three new sections
+# ExcitationRecord
 # ---------------------------------------------------------------------------
 
 
-class TestManifestBackwardCompat:
-    def test_old_manifest_without_aux_sections_still_validates(self):
-        # An old manifest (no ce_calibration key) must validate cleanly so
-        # existing clients keep syncing.
-        old = {"schema_version": 1, "rules": {}, "ces": {}}
-        m = Manifest.model_validate(old)
-        assert m.ce_calibration == {}
+class TestExcitationRecord:
+    def test_happy_path_round_trips_samples(self):
+        convo = [{"role": "user", "content": "hi"}]
+        rec = ExcitationRecord.model_validate({
+            "schema_version": 2,
+            "ce_public_id": "ce_abc",
+            "samples": [convo, convo],
+            "sample_count": 2,
+            "published_at": "2025-01-01T00:00:00Z",
+        })
+        assert rec.ce_public_id == "ce_abc"
+        assert rec.samples == [convo, convo]
+        assert rec.sample_count == 2
 
-    def test_new_manifest_round_trips_aux_sections(self):
-        new = {
-            "schema_version": 1,
-            "rules": {"rule_a": "2025-01-01T00:00:00Z"},
-            "ces": {"ce_a": "2025-01-01T00:00:00Z"},
-            "ce_calibration": {"ce_a": "2025-01-01T00:00:00Z"},
-        }
-        m = Manifest.model_validate(new)
-        assert "ce_a" in m.ce_calibration
+    def test_samples_default_to_empty(self):
+        rec = ExcitationRecord.model_validate({
+            "schema_version": 2,
+            "ce_public_id": "ce_x",
+        })
+        assert rec.samples == []
+        assert rec.sample_count == 0
 
-    def test_legacy_rule_calibration_field_silently_ignored(self):
-        # The old `rule_calibration` section (replaced by rule_datasets) must
-        # validate cleanly and be dropped — extra="ignore".
-        legacy = {
-            "schema_version": 1,
-            "rules": {}, "ces": {},
-            "rule_calibration": {"rule_a": "2025-01-01T00:00:00Z"},
-        }
-        m = Manifest.model_validate(legacy)
-        assert not hasattr(m, "rule_calibration")
-
-    def test_legacy_rule_evaluation_field_silently_ignored(self):
-        # An older manifest that carried `rule_evaluation` (decision walked
-        # back) must validate cleanly — extra="ignore" drops the field
-        # so legacy registry state doesn't break clients.
-        legacy = {
-            "schema_version": 1,
-            "rules": {}, "ces": {},
-            "rule_evaluation": {"rule_a": "2025-01-01T00:00:00Z"},
-        }
-        m = Manifest.model_validate(legacy)
-        assert not hasattr(m, "rule_evaluation")
-
-    def test_unknown_extra_fields_dropped(self):
-        # Forward compat — a future schema_version 2 manifest with new
-        # fields still validates under v1 (extra="ignore").
-        with_extras = {
-            "schema_version": 1,
-            "rules": {}, "ces": {},
-            "ce_calibration": {},
-            "rule_calibration": {},
+    def test_upstream_extra_fields_ignored(self):
+        # Real gavel-rules files carry extras (ce name, type, ...) — a v2
+        # record with new fields must not break this client.
+        rec = ExcitationRecord.model_validate({
+            "schema_version": 2,
+            "ce_public_id": "ce_x",
+            "ce": "some_ce_name",
+            "type": "excitation",
             "future_field": {"some": "thing"},
-        }
-        m = Manifest.model_validate(with_extras)
-        assert not hasattr(m, "future_field")
+        })
+        assert not hasattr(rec, "future_field")
+        assert not hasattr(rec, "ce")
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +76,7 @@ class TestCECalibrationRecord:
     def test_happy_path(self):
         sample_convo = [{"role": "user", "content": "hi"}]
         rec = CECalibrationRecord.model_validate({
-            "schema_version": 1,
+            "schema_version": 2,
             "ce_public_id": "ce_abc",
             "samples": [sample_convo, sample_convo],
             "sample_count": 2,
@@ -111,18 +91,86 @@ class TestCECalibrationRecord:
         # just empty. The downstream upsert will write an empty dataset
         # rather than raising.
         rec = CECalibrationRecord.model_validate({
-            "schema_version": 1,
+            "schema_version": 2,
             "ce_public_id": "ce_x",
         })
         assert rec.samples == []
         assert rec.sample_count == 0
 
-
-# ---------------------------------------------------------------------------
-# RuleCalibrationRecord tests removed — the schema itself is gone now
-# that rule calibration is local-only and lives in `test_datasets`.
-# ---------------------------------------------------------------------------
-# RuleEvaluationRecord
-# ---------------------------------------------------------------------------
+    def test_missing_public_id_rejected(self):
+        with pytest.raises(ValidationError):
+            CECalibrationRecord.model_validate({"schema_version": 2})
 
 
+# ---------------------------------------------------------------------------
+# RuleDatasetRecord — the `type` alias is load-bearing
+# ---------------------------------------------------------------------------
+
+
+class TestRuleDatasetRecord:
+    def _payload(self, **over):
+        base = {
+            "schema_version": 2,
+            "rule_public_id": "rule_abc",
+            "type": "positive",
+            "config": {"scenario_instructions": "do the thing"},
+            "conversations": [[{"role": "user", "content": "hi"}]],
+            "conversation_count": 1,
+            "published_at": "2025-01-01T00:00:00Z",
+        }
+        base.update(over)
+        return base
+
+    def test_upstream_type_key_populates_dataset_type(self):
+        rec = RuleDatasetRecord.model_validate(self._payload())
+        assert rec.dataset_type == "positive"
+        assert rec.rule_public_id == "rule_abc"
+        assert rec.conversation_count == 1
+        assert rec.config == {"scenario_instructions": "do the thing"}
+
+    def test_local_dataset_type_key_also_validates(self):
+        # populate_by_name=True: the local column name works too.
+        payload = self._payload()
+        payload.pop("type")
+        payload["dataset_type"] = "negative"
+        rec = RuleDatasetRecord.model_validate(payload)
+        assert rec.dataset_type == "negative"
+
+    def test_missing_bucket_key_rejected(self):
+        payload = self._payload()
+        payload.pop("type")
+        with pytest.raises(ValidationError):
+            RuleDatasetRecord.model_validate(payload)
+
+    def test_conversations_round_trip_unchanged(self):
+        convos = [[{"role": "user", "content": "a"}], [{"role": "assistant", "content": "b"}]]
+        rec = RuleDatasetRecord.model_validate(self._payload(conversations=convos))
+        assert rec.conversations == convos
+
+    def test_extra_fields_ignored(self):
+        rec = RuleDatasetRecord.model_validate(self._payload(rule="some_rule", extra=1))
+        assert not hasattr(rec, "rule")
+        assert not hasattr(rec, "extra")
+
+    def test_config_and_conversations_default_empty(self):
+        rec = RuleDatasetRecord.model_validate({
+            "schema_version": 2,
+            "rule_public_id": "r",
+            "type": "positive_calibration",
+        })
+        assert rec.config == {}
+        assert rec.conversations == []
+        assert rec.conversation_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Deleted v1 catalog models must stay deleted
+# ---------------------------------------------------------------------------
+
+
+def test_v1_catalog_models_are_gone():
+    import services.library_schemas as schemas
+
+    for name in ("Manifest", "CERecord", "RuleRecord", "RuleSetRecord",
+                 "CategoriesFile", "NeutralCorpusFile"):
+        assert not hasattr(schemas, name), f"{name} should have died with the HF registry"

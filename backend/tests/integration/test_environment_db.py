@@ -55,6 +55,19 @@ class TestDatabaseInitialization:
         missing = [t for t in required if t not in existing]
         assert not missing, f"Missing tables: {missing}"
 
+    def test_v24_logic_columns_present(self):
+        """The groups+condition model (schema v24): rules and rule_setup carry
+        ce_groups/condition, and the junction tables are membership-only."""
+        from utils.sqlite_db import execute_query_dict
+        for table in ("rules", "rule_setup"):
+            cols = {r["name"] for r in execute_query_dict(
+                f"SELECT name FROM pragma_table_info('{table}')") or []}
+            assert {"ce_groups", "condition"}.issubset(cols), table
+        for table in ("rule_ce_link", "setup_ce_link"):
+            cols = {r["name"] for r in execute_query_dict(
+                f"SELECT name FROM pragma_table_info('{table}')") or []}
+            assert "role" not in cols and "fallback_group" not in cols, table
+
     def test_search_infrastructure_present(self):
         """The SQLite replacements for the old Postgres extensions must exist:
         FTS5 side-tables (replaced tsvector/pg_trgm search) and enforced

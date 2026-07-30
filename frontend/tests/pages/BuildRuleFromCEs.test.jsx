@@ -2,9 +2,10 @@
 //
 // Now rendered as the BODY of BuildRuleFromCEsModal (no longer a routed page):
 // it composes a rule from the user's bookmarked Cognitive Elements across five
-// steps (Pick CEs -> Learn Roles -> Assign -> Name -> Test & Calibration), then
-// creates a provisional draft and (via the background tray) finalizes it. The
-// page chrome is gone — `onClose` closes the modal instead of navigating.
+// steps (Pick CEs -> Learn the logic -> Groups & Condition -> Name -> Test &
+// Calibration), then creates a provisional draft and (via the background tray)
+// finalizes it. The rule's logic is named CE GROUPS + a CONDITION expression
+// over the group names (v2 grammar) — no roles.
 //
 // Strategy:
 //   * mock '../api' so nothing hits the network — each export returns benign data
@@ -86,15 +87,8 @@ const toggleCe = (name) => {
     fireEvent.click(within(label).getByRole('checkbox'));
 };
 
-// On the Assign step (step 3) each selected CE renders as a row containing its
-// name and a segmented group of role <button>s (Necessary / Fallback / Helpful).
-// The name lives in a <div> whose parent is the row. Find that row by CE name.
-const ceRow = (name) =>
-    screen.getAllByText(name).find((el) => el.tagName === 'DIV').closest('div').parentElement;
-
-// Click a role button (by visible label) within a given CE's row.
-const setRole = (ceName, roleLabel) =>
-    fireEvent.click(within(ceRow(ceName)).getByRole('button', { name: roleLabel }));
+// The condition text input of the Groups & Condition editor.
+const conditionInput = () => screen.getByLabelText('Firing condition');
 
 
 describe('BuildRuleFromCEs', () => {
@@ -129,7 +123,7 @@ describe('BuildRuleFromCEs', () => {
         renderPage();
         await waitLoaded();
         expect(screen.getByText(/Compose a rule from your bookmarked Cognitive Elements/i)).toBeInTheDocument();
-        ['Pick CEs', 'Learn Roles', 'Assign', 'Name', 'Test & Calibration']
+        ['Pick CEs', 'Learn the logic', 'Groups & Condition', 'Name', 'Test & Calibration']
             .forEach((l) => expect(screen.getByText(l)).toBeInTheDocument());
     });
 
@@ -205,29 +199,28 @@ describe('BuildRuleFromCEs', () => {
         expect(screen.getByText(/1 selected/i)).toBeInTheDocument();
     });
 
-    // ---- step 2 -> 3: learn roles / assign ---------------------------------
+    // ---- step 2 -> 3: learn the logic / groups & condition ------------------
 
-    it('advances through Learn Roles into Assign and lists selected CEs with role selects', async () => {
+    it('advances through the guide into Groups & Condition with a seeded default group', async () => {
         getCEBookmarks.mockResolvedValue({ data: { bookmarks: BOOKMARKS } });
         renderPage();
         await waitLoaded();
         toggleCe('Alpha CE');
         toggleCe('Beta CE');
         fireEvent.click(screen.getByText('Next'));   // -> step 2
-        expect(screen.getByText(/How roles shape the predicate/i)).toBeInTheDocument();
+        expect(screen.getByText(/How the firing logic is built/i)).toBeInTheDocument();
         fireEvent.click(screen.getByText('Next'));   // -> step 3
-        expect(screen.getByText(/Assign a role to each CE/i)).toBeInTheDocument();
-        // Each selected CE shows a segmented role control with the three
-        // role buttons (Necessary / Fallback / Helpful).
-        ['Alpha CE', 'Beta CE'].forEach((name) => {
-            const row = ceRow(name);
-            expect(within(row).getByRole('button', { name: 'Necessary' })).toBeInTheDocument();
-            expect(within(row).getByRole('button', { name: 'Any of' })).toBeInTheDocument();
-            expect(within(row).getByRole('button', { name: 'Supporting' })).toBeInTheDocument();
-        });
+        expect(screen.getByText(/Organize the CEs into named groups/i)).toBeInTheDocument();
+        // First visit seeds one "required" group with every selected CE and
+        // the matching default condition.
+        expect(screen.getByLabelText('Group 1 name')).toHaveValue('required');
+        expect(conditionInput()).toHaveValue('all of required');
+        // Member chips appear in the editor (and again in the live preview).
+        expect(screen.getAllByText('Alpha CE').length).toBeGreaterThanOrEqual(1);
+        expect(screen.getAllByText('Beta CE').length).toBeGreaterThanOrEqual(1);
     });
 
-    it('Back from Learn Roles returns to Pick CEs', async () => {
+    it('Back from the guide returns to Pick CEs', async () => {
         getCEBookmarks.mockResolvedValue({ data: { bookmarks: BOOKMARKS } });
         renderPage();
         await waitLoaded();
@@ -237,36 +230,54 @@ describe('BuildRuleFromCEs', () => {
         expect(screen.getByText(/Select the cognitive elements/i)).toBeInTheDocument();
     });
 
-    it('changing a role to Fallback reveals the OR Group number input', async () => {
+    it('supports renaming a group, adding a group, and editing the condition', async () => {
         getCEBookmarks.mockResolvedValue({ data: { bookmarks: BOOKMARKS } });
         renderPage();
         await waitLoaded();
         toggleCe('Alpha CE');
         toggleCe('Beta CE');
-        fireEvent.click(screen.getByText('Next'));   // step 2
-        fireEvent.click(screen.getByText('Next'));   // step 3
+        fireEvent.click(screen.getByText('Next'));   // 2
+        fireEvent.click(screen.getByText('Next'));   // 3
 
-        expect(screen.queryByText(/OR Group/i)).not.toBeInTheDocument();
-        setRole('Alpha CE', 'Any of');
-        expect(screen.getByText(/OR Group/i)).toBeInTheDocument();
-
-        // The number input defaults to 1 and accepts an edit.
-        const num = screen.getByRole('spinbutton');
-        expect(num).toHaveValue(1);
-        fireEvent.change(num, { target: { value: '3' } });
-        expect(num).toHaveValue(3);
+        fireEvent.change(screen.getByLabelText('Group 1 name'), { target: { value: 'core' } });
+        fireEvent.click(screen.getByRole('button', { name: /Add group/ }));
+        // The new group gets a fresh default name and its own name input.
+        expect(screen.getByLabelText('Group 2 name')).toBeInTheDocument();
+        fireEvent.change(conditionInput(), { target: { value: 'all of core' } });
+        expect(conditionInput()).toHaveValue('all of core');
     });
 
-    it('selecting Sufficient does not show the OR Group input', async () => {
+    it('blocks Next when a selected CE belongs to no group', async () => {
         getCEBookmarks.mockResolvedValue({ data: { bookmarks: BOOKMARKS } });
         renderPage();
         await waitLoaded();
         toggleCe('Alpha CE');
         toggleCe('Beta CE');
-        fireEvent.click(screen.getByText('Next'));   // step 2
-        fireEvent.click(screen.getByText('Next'));   // step 3
-        setRole('Alpha CE', 'Supporting');
-        expect(screen.queryByText(/OR Group/i)).not.toBeInTheDocument();
+        fireEvent.click(screen.getByText('Next'));   // 2
+        fireEvent.click(screen.getByText('Next'));   // 3
+        // Remove Beta CE from the seeded group -> it becomes ungrouped.
+        fireEvent.click(screen.getByRole('button', { name: 'Remove Beta CE from required' }));
+        fireEvent.click(screen.getByText('Next'));
+        expect(showAlertDialog).toHaveBeenCalledWith(
+            expect.objectContaining({ title: 'Ungrouped CEs' }),
+        );
+        // Still on step 3.
+        expect(conditionInput()).toBeInTheDocument();
+    });
+
+    it('blocks Next on an invalid group name', async () => {
+        getCEBookmarks.mockResolvedValue({ data: { bookmarks: BOOKMARKS } });
+        renderPage();
+        await waitLoaded();
+        toggleCe('Alpha CE');
+        toggleCe('Beta CE');
+        fireEvent.click(screen.getByText('Next'));   // 2
+        fireEvent.click(screen.getByText('Next'));   // 3
+        fireEvent.change(screen.getByLabelText('Group 1 name'), { target: { value: 'Bad Name' } });
+        fireEvent.click(screen.getByText('Next'));
+        expect(showAlertDialog).toHaveBeenCalledWith(
+            expect.objectContaining({ title: 'Fix the logic first' }),
+        );
     });
 
     // ---- step 4: name + categories -----------------------------------------
@@ -312,10 +323,10 @@ describe('BuildRuleFromCEs', () => {
         expect(screen.getByText('Create Rule').closest('button')).toBeDisabled();
     });
 
-    it('Back from the Name step returns to Assign', async () => {
+    it('Back from the Name step returns to Groups & Condition', async () => {
         await gotoStep4();
         fireEvent.click(screen.getByText('Back'));
-        expect(screen.getByText(/Assign a role to each CE/i)).toBeInTheDocument();
+        expect(screen.getByText(/Organize the CEs into named groups/i)).toBeInTheDocument();
     });
 
     it('dedupes and sorts category names from the API', async () => {
@@ -329,26 +340,24 @@ describe('BuildRuleFromCEs', () => {
 
     // ---- handleCreate -------------------------------------------------------
 
-    it('creates the draft rule with trimmed name, ce links, and categories then advances to step 5', async () => {
+    it('creates the draft rule with trimmed name, groups, condition, and categories then advances to step 5', async () => {
         await gotoStep4();
         fireEvent.change(screen.getByPlaceholderText(/phishing_content_creation/i), { target: { value: '  my_rule  ' } });
         fireEvent.click(screen.getByRole('button', { name: 'Safety & Harm' }));
         fireEvent.click(screen.getByText('Create Rule'));
 
         await waitFor(() => expect(createDraftRuleFromBookmarks).toHaveBeenCalled());
-        const [name, ceLinks, categories] = createDraftRuleFromBookmarks.mock.calls[0];
+        const [name, groups, condition, categories] = createDraftRuleFromBookmarks.mock.calls[0];
         expect(name).toBe('my_rule');
+        expect(groups).toEqual({ required: [1, 2] });
+        expect(condition).toBe('all of required');
         expect(categories).toEqual(['Safety & Harm']);
-        expect(ceLinks).toEqual([
-            { ce_id: 1, role: 'necessary', fallback_group: 0 },
-            { ce_id: 2, role: 'necessary', fallback_group: 0 },
-        ]);
 
         await waitFor(() => expect(screen.getByTestId('rule-defaults-step')).toBeInTheDocument());
         expect(screen.getByTestId('rds-rule-id')).toHaveTextContent('99');
     });
 
-    it('encodes fallback_group only for fallback CEs in the ce links', async () => {
+    it('encodes a multi-group layout with the edited condition', async () => {
         getCEBookmarks.mockResolvedValue({ data: { bookmarks: BOOKMARKS } });
         getAllCategories.mockResolvedValue({ data: ['Safety'] });
         renderPage();
@@ -357,9 +366,11 @@ describe('BuildRuleFromCEs', () => {
         toggleCe('Beta CE');
         fireEvent.click(screen.getByText('Next')); // -> 2
         fireEvent.click(screen.getByText('Next')); // -> 3
-        // Make Alpha a fallback in group 2.
-        setRole('Alpha CE', 'Any of');
-        fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '2' } });
+        // Move Beta CE out of "required" into a new option_1 group.
+        fireEvent.click(screen.getByRole('button', { name: 'Remove Beta CE from required' }));
+        fireEvent.click(screen.getByRole('button', { name: /Add group/ }));
+        fireEvent.change(screen.getByLabelText('Add a CE to option_1'), { target: { value: '2' } });
+        fireEvent.change(conditionInput(), { target: { value: 'all of required and 1 of option_1' } });
         fireEvent.click(screen.getByText('Next')); // -> 4
 
         fireEvent.change(screen.getByPlaceholderText(/phishing_content_creation/i), { target: { value: 'r' } });
@@ -367,9 +378,9 @@ describe('BuildRuleFromCEs', () => {
         fireEvent.click(screen.getByText('Create Rule'));
 
         await waitFor(() => expect(createDraftRuleFromBookmarks).toHaveBeenCalled());
-        const ceLinks = createDraftRuleFromBookmarks.mock.calls[0][1];
-        expect(ceLinks).toContainEqual({ ce_id: 1, role: 'fallback', fallback_group: 2 });
-        expect(ceLinks).toContainEqual({ ce_id: 2, role: 'necessary', fallback_group: 0 });
+        const [, groups, condition] = createDraftRuleFromBookmarks.mock.calls[0];
+        expect(groups).toEqual({ required: [1], option_1: [2] });
+        expect(condition).toBe('all of required and 1 of option_1');
     });
 
     it('shows an error alert and stays on step 4 when create fails', async () => {

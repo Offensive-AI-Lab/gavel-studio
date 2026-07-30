@@ -8,20 +8,24 @@ Distinct from test_classifiers.py — these focus on the route-level contract:
   * classifier CRUD edges (create validation/auth/conflict, details 404).
   * rules listing, config get/update, not-found (404), auth (401/403).
 
-Policy-drift tests seed rule wiring (rule_setup + setup_ce_link) and a
+Policy-drift tests seed rule wiring (rule_setup with its v2 ce_groups/
+condition logic copy + membership setup_ce_link) and a
 trained_policy_fingerprint via direct SQL, then assert training-status flips
-the status. Everything inserted lives in tracked tables, so the conftest
-snapshot/restore cleans it up automatically.
+the status. Under the v2 model the fingerprint reads the setup's OWN
+(ce_groups, condition) columns, so drift is introduced by editing that logic
+— not by deleting junction rows. Everything inserted lives in tracked
+tables, so the conftest snapshot/restore cleans it up automatically.
 
 NO model weights are loaded — we never hit /train end-to-end, only the
 status/state/validation surfaces.
 """
+import json
 import time
 
 import pytest
 
 from utils.sqlite_db import execute_query, execute_query_dict
-from sql_scripts.model_scripts import compute_classifier_policy_fingerprint
+from sql_scripts.model_scripts import compute_classifier_policy_fingerprint_v2
 
 
 # ---------------------------------------------------------------------------
@@ -56,32 +60,44 @@ def _create_classifier(client, model_id, auth_headers, name=None) -> int:
 
 
 def _seed_rule_with_ce(classifier_id: int, user_id: int) -> tuple[int, int]:
-    """Insert one active rule_setup with one CE link for `classifier_id`.
+    """Insert one active rule_setup (with its v2 ce_groups/condition logic)
+    plus the membership setup_ce_link row for `classifier_id`.
 
     Returns (setup_id, ce_id). All rows land in tracked tables
     (cognitive_elements, rule_setup, setup_ce_link) so cleanup is automatic.
     """
     # cognitive_elements has no user_id column — CEs are global. Insert the
     # minimal valid row (name + definition); is_ready defaults to TRUE.
+    ce_name = _unique("drift_ce")
     ce_rows = execute_query_dict(
         "INSERT INTO cognitive_elements (name, definition) VALUES (%s, %s) RETURNING ce_id",
-        (_unique("drift_ce"), "drift test CE"),
+        (ce_name, "drift test CE"),
     )
     ce_id = ce_rows[0]["ce_id"]
 
     setup_rows = execute_query_dict(
-        "INSERT INTO rule_setup (classifier_id, custom_name, predicate) "
-        "VALUES (%s, %s, %s) RETURNING setup_id",
-        (classifier_id, _unique("drift_rule"), "CE"),
+        "INSERT INTO rule_setup (classifier_id, custom_name, predicate, ce_groups, condition) "
+        "VALUES (%s, %s, %s, %s, %s) RETURNING setup_id",
+        (classifier_id, _unique("drift_rule"), ce_name,
+         json.dumps({"required": [ce_name]}), "all of required"),
     )
     setup_id = setup_rows[0]["setup_id"]
 
     execute_query(
-        "INSERT INTO setup_ce_link (setup_id, ce_id, role, fallback_group) "
-        "VALUES (%s, %s, 'necessary', 0)",
+        "INSERT INTO setup_ce_link (setup_id, ce_id) VALUES (%s, %s)",
         (setup_id, ce_id),
     )
     return setup_id, ce_id
+
+
+def _drift_setup_logic(setup_id: int) -> None:
+    """Edit the setup's stored logic so the live policy fingerprint diverges
+    from any earlier snapshot (the v2 analogue of 'delete a CE link')."""
+    execute_query(
+        "UPDATE rule_setup SET ce_groups = %s, condition = %s WHERE setup_id = %s",
+        (json.dumps({"required": ["a_totally_different_ce"]}), "all of required",
+         setup_id),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +115,7 @@ class TestReconcileSelfHeal:
         _seed_rule_with_ce(cid, test_user["user_id"])
 
         # Snapshot the CURRENT policy as the trained fingerprint -> no drift.
-        current_fp = compute_classifier_policy_fingerprint(cid)
+        current_fp = compute_classifier_policy_fingerprint_v2(cid)
         assert current_fp != ""  # a real rule link exists
         execute_query(
             "UPDATE classifiers SET status = 'active', "
@@ -122,18 +138,15 @@ class TestReconcileSelfHeal:
         setup_id, ce_id = _seed_rule_with_ce(cid, test_user["user_id"])
 
         # Train-time snapshot taken with the CE present.
-        trained_fp = compute_classifier_policy_fingerprint(cid)
+        trained_fp = compute_classifier_policy_fingerprint_v2(cid)
         execute_query(
             "UPDATE classifiers SET status = 'active', "
             "trained_policy_fingerprint = %s WHERE classifier_id = %s",
             (trained_fp, cid),
         )
 
-        # Drift: remove the CE link so the live policy differs from trained.
-        execute_query(
-            "DELETE FROM setup_ce_link WHERE setup_id = %s AND ce_id = %s",
-            (setup_id, ce_id),
-        )
+        # Drift: edit the setup's stored logic so the live policy differs.
+        _drift_setup_logic(setup_id)
 
         res = client.get(f"/classifiers/{cid}/training-status", headers=auth_headers)
         assert res.status_code == 200
@@ -150,7 +163,7 @@ class TestReconcileSelfHeal:
     ):
         cid = _create_classifier(client, test_model["model_id"], auth_headers)
         setup_id, ce_id = _seed_rule_with_ce(cid, test_user["user_id"])
-        trained_fp = compute_classifier_policy_fingerprint(cid)
+        trained_fp = compute_classifier_policy_fingerprint_v2(cid)
 
         # Start in the drifted state already stored as needs_retraining,
         # but the live policy still matches the trained fingerprint.
@@ -169,17 +182,14 @@ class TestReconcileSelfHeal:
     ):
         cid = _create_classifier(client, test_model["model_id"], auth_headers)
         setup_id, ce_id = _seed_rule_with_ce(cid, test_user["user_id"])
-        trained_fp = compute_classifier_policy_fingerprint(cid)
+        trained_fp = compute_classifier_policy_fingerprint_v2(cid)
         execute_query(
             "UPDATE classifiers SET status = 'active', "
             "trained_policy_fingerprint = %s WHERE classifier_id = %s",
             (trained_fp, cid),
         )
         # Introduce drift.
-        execute_query(
-            "DELETE FROM setup_ce_link WHERE setup_id = %s AND ce_id = %s",
-            (setup_id, ce_id),
-        )
+        _drift_setup_logic(setup_id)
 
         res = client.get(
             f"/classifiers/{test_model['model_id']}", headers=auth_headers
@@ -270,7 +280,7 @@ class TestTrainedPolicySnapshot:
         _seed_rule_with_ce(cid, test_user["user_id"])
 
         # Trained on policy P1.
-        fp1 = compute_classifier_policy_fingerprint(cid)
+        fp1 = compute_classifier_policy_fingerprint_v2(cid)
         execute_query(
             "UPDATE classifiers SET status = 'active', "
             "trained_policy_fingerprint = %s WHERE classifier_id = %s",
@@ -297,7 +307,7 @@ class TestTrainedPolicySnapshot:
         against the new policy instead of falsely going 'Up to Date')."""
         cid = _create_classifier(client, test_model["model_id"], auth_headers)
         _seed_rule_with_ce(cid, test_user["user_id"])
-        fp1 = compute_classifier_policy_fingerprint(cid)
+        fp1 = compute_classifier_policy_fingerprint_v2(cid)
         execute_query(
             "UPDATE classifiers SET status = 'active', "
             "trained_policy_fingerprint = %s WHERE classifier_id = %s",

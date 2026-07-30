@@ -51,8 +51,30 @@ export default defineConfig(({ mode }) => {
   }
   const connectSrc = [...sources].join(' ')
 
+  // Dev-server proxy: every backend route prefix is forwarded to the local
+  // backend, so the browser talks ONLY to :5173 and api.js can use a
+  // same-origin base URL. This is what makes remote/tunneled use work with a
+  // single forwarded port — with an absolute VITE_API_URL the browser tries
+  // to reach :8000 on the VIEWER'S machine, which fails unless that port is
+  // forwarded too (the classic stuck-on-"Connecting to Gavel" splash).
+  //
+  // /rules, /classifiers and /library are BOTH SPA page routes and API
+  // prefixes; `bypass` keeps browser page-navigations (Accept: text/html) in
+  // the SPA and forwards everything else (axios JSON, EventSource SSE).
+  const API_PREFIXES = [
+    '/health', '/user', '/dashboard', '/rules', '/cognitive', '/models',
+    '/classifiers', '/ai', '/library', '/evaluation', '/realtime', '/compute',
+    '/pipeline-runs', '/guardrail-folders',
+  ]
+  const proxy = Object.fromEntries(API_PREFIXES.map((p) => [p, {
+    target: 'http://127.0.0.1:8000',
+    changeOrigin: true,
+    bypass: (req) => ((req.headers.accept || '').includes('text/html') ? req.url : undefined),
+  }]))
+
   return {
     plugins: [react(), cspPlugin(connectSrc)],
+    server: { proxy },
     test: {
       environment: 'jsdom',
       globals: true,

@@ -6,7 +6,6 @@ import Pagination from '../components/Pagination/Pagination';
 import { getCEBookmarks, removeCEBookmark, getCognitiveDataset, getCognitiveElements, searchBookmarks, listLocalDrafts, deleteDraftCE } from '../api';
 import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
 import { useTutorialContent } from '../contexts/TutorialContext';
-import { publishDraftCE } from '../services/RuleService';
 import CognitiveElementCard from '../components/CognitiveElementCard/CognitiveElementCard';
 import { FiArrowLeft, FiInbox } from 'react-icons/fi';
 import Swal from 'sweetalert2';
@@ -378,7 +377,6 @@ const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
                                             isOpen={expandedCe === ce.ce_id}
                                             onToggle={toggleExpand}
                                             samples={previewCache[ce.ce_id]}
-                                            onPublish={(c) => publishDraftCE(c, user?.user_id, fetchBookmarks)}
                                             onDelete={(c) => handleDeleteDraftCe(c)}
                                         />
                                     ) : (

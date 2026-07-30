@@ -33,7 +33,7 @@ class _LibraryUpdateNotifier:
     frontend. Safe to call on every tick."""
 
     def reconcile(self):
-        from services.hf_sync import check_for_updates
+        from services.library_sync import check_for_updates
         from services import library_events
         try:
             status = check_for_updates()

@@ -11,67 +11,109 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-def convert_labels_to_tensors(data: dict, labels_dict: dict) -> dict:
-    """Convert ruleset label names to one-hot tensor representations.
+def build_ruleset_logic(data: dict, labels_dict: dict) -> dict:
+    """Parse each rule's (groups, condition) pair into an evaluatable
+    structure — the groups+condition replacement for the retired
+    all_required/any_of/supporting tensor builders.
 
     Args:
-        data: Dictionary mapping use case names to their label specifications,
-            where each specification contains 'all_required' and 'supporting' lists.
-        labels_dict: Dictionary mapping label names to their indices.
+        data: unified ruleset — {use_case: {"groups": {gname: [label names]},
+            "condition": "all of gname and 1 of other", ...}}.
+        labels_dict: label name -> index mapping of the trained model.
 
     Returns:
-        Dictionary mapping use case names to tensors with 'all_required_labels'
-        and 'supporting_labels' as one-hot encoded torch tensors.
-    """
-    processed_data = {}
-    num_labels = len(labels_dict)
+        {use_case: {
+            "ast":           parsed condition AST (None when absent/invalid),
+            "groups_idx":    {gname: LongTensor of member label indices},
+            "member_labels": one-hot FloatTensor over every group member,
+        }}
 
-    def create_one_hot_tensor(label_list):
-        one_hot_list = [0.0] * num_labels
-        for label in label_list:
-            if label in labels_dict:
-                one_hot_list[labels_dict[label]] = 1.0
-        return torch.tensor(one_hot_list, dtype=torch.float32)
+    Member names unknown to labels_dict are dropped — same tolerance the old
+    tensor builders had; a referenced group left EMPTY by that filtering
+    evaluates vacuously True (the legacy builders dropped empty groups)."""
+    from utils.rule_condition import ConditionError, parse
 
-    for category, labels in data.items():
-        processed_data[category] = {}
-        processed_data[category]["all_required_labels"] = create_one_hot_tensor(
-            labels.get("all_required", [])
-        )
-        processed_data[category]["supporting_labels"] = create_one_hot_tensor(
-            labels.get("supporting", [])
-        )
-
-    return processed_data
-
-
-def load_any_of_conditions(
-    data: dict, labels_dict: dict[str, int]
-) -> dict[str, list[torch.Tensor]]:
-    """Load any-of conditions from ruleset data.
-
-    Any-of conditions specify groups of labels where at least one label
-    from each group must trigger for a use case to be detected.
-
-    Args:
-        data: Dictionary mapping use case names to their specifications,
-            where each specification may contain an 'any_of' list of label groups.
-        labels_dict: Dictionary mapping label names to their indices.
-
-    Returns:
-        Dictionary mapping use case names to lists of index tensors,
-        where each tensor contains indices of labels in an any-of group.
-    """
     out = {}
+    num_labels = len(labels_dict)
     for uc, spec in data.items():
-        any_of_groups = spec.get("any_of", [])
-        idx_groups = []
-        for group in any_of_groups:
-            idxs = [labels_dict[name] for name in group if name in labels_dict]
-            if idxs:  # only add non-empty lists
-                idx_groups.append(torch.tensor(idxs, dtype=torch.long))
-        out[uc] = idx_groups  # list of tensors
+        groups_idx = {}
+        member_idxs: set = set()
+        for gname, members in (spec.get("groups") or {}).items():
+            idxs = [labels_dict[m] for m in (members or []) if m in labels_dict]
+            groups_idx[gname] = torch.tensor(idxs, dtype=torch.long)
+            member_idxs.update(idxs)
+        ast = None
+        condition = (spec.get("condition") or "").strip()
+        if condition:
+            try:
+                ast = parse(condition)
+            except ConditionError as e:
+                logger.warning("ruleset logic: condition for '%s' does not parse (%s)", uc, e)
+        one_hot = torch.zeros(num_labels, dtype=torch.float32)
+        if member_idxs:
+            one_hot[sorted(member_idxs)] = 1.0
+        out[uc] = {"ast": ast, "groups_idx": groups_idx, "member_labels": one_hot}
     return out
+
+
+def _eval_condition_idx(node, groups_idx: dict, predicted_idxs: torch.Tensor) -> bool:
+    """Evaluate a condition AST against the set of triggered label indices.
+    Selector semantics: at least k distinct group members triggered ('all' =
+    every member). A group missing/empty after label filtering is vacuously
+    True (mirrors the legacy dropped-empty-group behavior)."""
+    kind = node[0]
+    if kind == "or":
+        return any(_eval_condition_idx(c, groups_idx, predicted_idxs) for c in node[1])
+    if kind == "and":
+        return all(_eval_condition_idx(c, groups_idx, predicted_idxs) for c in node[1])
+    if kind == "not":
+        return not _eval_condition_idx(node[1], groups_idx, predicted_idxs)
+    _, quant, name = node
+    members = groups_idx.get(name)
+    if members is None or members.numel() == 0:
+        return True
+    hits = int(torch.isin(members, predicted_idxs).sum().item())
+    k = members.numel() if quant == "all" else quant
+    return hits >= k
+
+
+def detect_usecase(ruleset_logic: dict, uc: str, predicted_idxs: torch.Tensor) -> bool:
+    """Does the triggered-label set fire this use case's condition? Unknown
+    use cases and rules without a parsed condition never fire."""
+    entry = ruleset_logic.get(uc)
+    if entry is None or entry["ast"] is None:
+        return False
+    return _eval_condition_idx(entry["ast"], entry["groups_idx"], predicted_idxs)
+
+
+def usecase_soft_score(entry: dict, topic_scores: torch.Tensor) -> float:
+    """Fuzzy [0,1] confidence that a use case fires, for AUC curves.
+    Generalizes the legacy min(required)/min-over-groups(max) score:
+    and=min, or=max, not=1-x, 'all of g'=min over members, 'k of g'=k-th
+    largest member score. Vacuous (missing/empty) selectors score 1.0."""
+    def rec(node) -> float:
+        kind = node[0]
+        if kind == "or":
+            return max(rec(c) for c in node[1])
+        if kind == "and":
+            return min(rec(c) for c in node[1])
+        if kind == "not":
+            return 1.0 - rec(node[1])
+        _, quant, name = node
+        members = entry["groups_idx"].get(name)
+        if members is None or members.numel() == 0:
+            return 1.0
+        scores = topic_scores[members]
+        if quant == "all":
+            return float(scores.min().item())
+        k = min(int(quant), scores.numel())
+        if k <= 1:
+            return float(scores.max().item())
+        return float(scores.topk(k).values[-1].item())
+
+    if entry["ast"] is None:
+        return 0.0
+    return rec(entry["ast"])
 
 
 def compute_triggers(
@@ -137,8 +179,7 @@ def save_to_csv(labels_statistics: List[Dict[str, Any]], output_path: str) -> No
 
 def eval_usecase_detection(
     triggers: torch.Tensor,
-    any_of_conditions: dict[str, list[torch.Tensor]],
-    all_usecase_gt_labels: dict[str, dict[str, torch.Tensor]],
+    ruleset_logic: dict,
     gt_uc_name: str,
     dialogue_name: str,
     split: str,
@@ -151,8 +192,7 @@ def eval_usecase_detection(
 
     Args:
         triggers: 1D tensor of triggered labels (1.0 for triggered, 0.0 otherwise).
-        any_of_conditions: Any-of conditions from load_any_of_conditions.
-        all_usecase_gt_labels: Ground truth labels for all use cases.
+        ruleset_logic: parsed rule logic from build_ruleset_logic.
         gt_uc_name: Name of the ground truth use case for this dialogue.
         dialogue_name: Identifier for the dialogue (for logging).
         split: Data split - "positive", "negative", or "neutral".
@@ -165,29 +205,8 @@ def eval_usecase_detection(
     fired_any = predicted_idxs.numel() > 0
     logger.debug(f"Predicted idx: {predicted_idxs}")
 
-    # Detection logic for the ground truth use case
-    def has_all_required(uc: str) -> bool:
-        required_idxs = (all_usecase_gt_labels[uc]["all_required_labels"] == 1).nonzero(
-            as_tuple=True
-        )[0]
-        return (required_idxs.numel() == 0) or torch.all(torch.isin(required_idxs, predicted_idxs))
-
-    def passes_any_of(uc: str) -> bool:
-        if uc not in any_of_conditions:
-            return True
-        groups = any_of_conditions[uc]
-        if len(groups) == 0:
-            # No any_of conditions - automatically passes
-            return True
-        elif len(groups) > 1:
-            # All groups must have at least one trigger
-            return all(torch.any(torch.isin(predicted_idxs, group)) for group in groups)
-        else:
-            # At least one from the single group must trigger
-            return torch.any(torch.isin(predicted_idxs, groups[0]))
-
     def detect_uc(uc: str) -> bool:
-        return has_all_required(uc) and passes_any_of(uc)
+        return detect_usecase(ruleset_logic, uc, predicted_idxs)
 
     mal_detected_in_neutral = False
     if split == "neutral":
@@ -230,8 +249,7 @@ def eval_usecase_detection(
 
 def update_usecase_confusion_matrix(
     triggers: torch.Tensor,
-    any_of_conditions: dict[str, list[torch.Tensor]],
-    all_usecase_gt_labels: dict[str, dict[str, torch.Tensor]],
+    ruleset_logic: dict,
     gt_uc_name: str,
     split: str,
     use_cases_stats: dict[str, dict[str, int]],
@@ -243,36 +261,15 @@ def update_usecase_confusion_matrix(
 
     Args:
         triggers: 1D tensor of triggered labels.
-        any_of_conditions: Any-of conditions from load_any_of_conditions.
-        all_usecase_gt_labels: Ground truth labels for all use cases.
+        ruleset_logic: parsed rule logic from build_ruleset_logic.
         gt_uc_name: Name of the ground truth use case for this dialogue.
         split: Data split - "positive", "negative", or "neutral".
         use_cases_stats: Dictionary to update with TP/FP/TN/FN counts.
     """
     predicted_idxs = triggers.bool().nonzero(as_tuple=True)[0]
-    # fired_any = predicted_idxs.numel() > 0
-
-    def has_all_required(uc: str) -> bool:
-        req_idxs = (all_usecase_gt_labels[uc]["all_required_labels"] == 1).nonzero(as_tuple=True)[0]
-        return (req_idxs.numel() == 0) or torch.all(torch.isin(req_idxs, predicted_idxs))
-
-    def passes_any_of(uc: str) -> bool:
-        if uc not in any_of_conditions:
-            return True
-
-        groups = any_of_conditions[uc]
-        if len(groups) == 0:
-            # No any_of conditions - automatically passes
-            return True
-        elif len(groups) > 1:
-            # All groups must have at least one trigger
-            return all(torch.any(torch.isin(predicted_idxs, group)) for group in groups)
-        else:
-            # At least one from the single group must trigger
-            return torch.any(torch.isin(predicted_idxs, groups[0]))
 
     def detect_uc(uc: str) -> bool:
-        return has_all_required(uc) and passes_any_of(uc)
+        return detect_usecase(ruleset_logic, uc, predicted_idxs)
 
     if split == "neutral":
         for uc in use_cases_stats.keys():
@@ -814,26 +811,12 @@ def load_evaluation_setup(
     # Filter to only enabled rulesets
     enabled_ruleset = {k: v for k, v in full_ruleset.items() if v.get("enabled", True)}
 
-    any_of_conditions = load_any_of_conditions(enabled_ruleset, labels)
-    malicious_use_cases_ruleset = convert_labels_to_tensors(enabled_ruleset, labels)
-
-    # Add neutral use cases
-    all_usecase_gt_labels = malicious_use_cases_ruleset.copy()
-    all_usecase_gt_labels["conversational"] = {
-        "all_required_labels": torch.zeros(num_topics),
-        "supporting_labels": torch.zeros(num_topics),
-    }
-    all_usecase_gt_labels["instructive"] = {
-        "all_required_labels": torch.zeros(num_topics),
-        "supporting_labels": torch.zeros(num_topics),
-    }
+    ruleset_logic = build_ruleset_logic(enabled_ruleset, labels)
 
     return {
         "thresholds": topic_thresholds,
         "unified_ruleset": enabled_ruleset,
-        "any_of_conditions": any_of_conditions,
-        "malicious_use_cases_ruleset": malicious_use_cases_ruleset,
-        "all_usecase_gt_labels": all_usecase_gt_labels,
+        "ruleset_logic": ruleset_logic,
         "idx_to_label": idx_to_label,
     }
 
@@ -883,14 +866,6 @@ def evaluate_usecase_detection_from_logits(
         split = meta.get("split", "")
         gt_uc_name = meta.get("usecase_path", "")
 
-        # Get ground truth labels
-        # if gt_uc_name in ["conversational", "instructive"]:
-        #     gt_req = torch.zeros(num_topics)
-        #     gt_supp = torch.zeros(num_topics)
-        # else:
-        #     gt_req = setup["malicious_use_cases_ruleset"][gt_uc_name]["all_required_labels"]
-        #     gt_supp = setup["malicious_use_cases_ruleset"][gt_uc_name]["supporting_labels"]
-
         # Compute triggers
         triggers = compute_triggers(
             dialogue_logits, thresholds=setup["thresholds"], patience_rate=1
@@ -899,8 +874,7 @@ def evaluate_usecase_detection_from_logits(
         # Update stats
         eval_usecase_detection(
             triggers=triggers,
-            all_usecase_gt_labels=setup["all_usecase_gt_labels"],
-            any_of_conditions=setup["any_of_conditions"],
+            ruleset_logic=setup["ruleset_logic"],
             gt_uc_name=gt_uc_name,
             dialogue_name=meta.get("dialogue_id", meta_path.stem),
             split=split,
@@ -908,8 +882,7 @@ def evaluate_usecase_detection_from_logits(
         )
         update_usecase_confusion_matrix(
             triggers=triggers,
-            all_usecase_gt_labels=setup["all_usecase_gt_labels"],
-            any_of_conditions=setup["any_of_conditions"],
+            ruleset_logic=setup["ruleset_logic"],
             gt_uc_name=gt_uc_name,
             split=split,
             use_cases_stats=acc_stats,
@@ -996,9 +969,7 @@ def compute_usecase_auc(
         topic_scores = max_over_windows_probs(np.load(npy_path))
 
         for uc in usecases:
-            req = setup["malicious_use_cases_ruleset"][uc]["all_required_labels"]
-            groups = setup["any_of_conditions"].get(uc, []) or []
-            s_uc = build_usecase_score(topic_scores, req, groups)
+            s_uc = usecase_soft_score(setup["ruleset_logic"][uc], topic_scores)
 
             if split == "positive" and uc_in_meta == uc:
                 uc_true[uc].append(1)
@@ -1125,17 +1096,14 @@ def evaluate(
             gt_uc_name = meta.get("usecase_path", "")
             dialogue_id = meta.get("dialogue_id", "")
 
-            # Get ground truth labels
-            if gt_uc_name in ["conversational", "instructive"]:
-                gt_req = torch.zeros(num_topics)
-                gt_supp = torch.zeros(num_topics)
-            else:
-                if gt_uc_name not in setup["malicious_use_cases_ruleset"]:
-                    if logger:
-                        logger.warning(f"Unknown use case '{gt_uc_name}' - skipping")
-                    continue
-                gt_req = setup["malicious_use_cases_ruleset"][gt_uc_name]["all_required_labels"]
-                gt_supp = setup["malicious_use_cases_ruleset"][gt_uc_name]["supporting_labels"]
+            # Unknown (non-neutral) use cases can't be scored — skip.
+            if (
+                gt_uc_name not in ["conversational", "instructive"]
+                and gt_uc_name not in setup["ruleset_logic"]
+            ):
+                if logger:
+                    logger.warning(f"Unknown use case '{gt_uc_name}' - skipping")
+                continue
 
             # Compute triggers
             triggers = compute_triggers(
@@ -1145,8 +1113,7 @@ def evaluate(
             # Update stats
             eval_usecase_detection(
                 triggers=triggers,
-                all_usecase_gt_labels=setup["all_usecase_gt_labels"],
-                any_of_conditions=setup["any_of_conditions"],
+                ruleset_logic=setup["ruleset_logic"],
                 gt_uc_name=gt_uc_name,
                 dialogue_name=dialogue_id,
                 split=split,
@@ -1154,8 +1121,7 @@ def evaluate(
             )
             update_usecase_confusion_matrix(
                 triggers=triggers,
-                all_usecase_gt_labels=setup["all_usecase_gt_labels"],
-                any_of_conditions=setup["any_of_conditions"],
+                ruleset_logic=setup["ruleset_logic"],
                 gt_uc_name=gt_uc_name,
                 split=split,
                 use_cases_stats=acc_stats,
@@ -1287,9 +1253,7 @@ def compute_auc_from_dialogues(
         topic_scores = max_over_windows_probs(dialogue["logits"])
 
         for uc in usecases:
-            req = setup["malicious_use_cases_ruleset"][uc]["all_required_labels"]
-            groups = setup["any_of_conditions"].get(uc, []) or []
-            s_uc = build_usecase_score(topic_scores, req, groups)
+            s_uc = usecase_soft_score(setup["ruleset_logic"][uc], topic_scores)
 
             if split == "positive" and uc_in_meta == uc:
                 uc_true[uc].append(1)

@@ -1,13 +1,14 @@
 // Build Rule from Bookmarked CEs — guardrail-agnostic.
 //
 // The manual twin of the AI Rule Generation wizard (Pipeline A). Composes a
-// rule from the user's bookmarked Cognitive Elements (with necessary /
-// fallback / sufficient roles), generates the rule's Test Set +
+// rule from the user's bookmarked Cognitive Elements — organized into NAMED
+// GROUPS with a firing CONDITION written over the group names (v2 grammar,
+// e.g. "all of required and 1 of option_1") — generates the rule's Test Set +
 // calibration set, then lands the finished draft in Drafts — never attached to
 // a guardrail. Rendered as the BODY of BuildRuleFromCEsModal, opened from the
 // "Build Rule from CEs" button on Browse (no route change).
 //
-// Steps: Pick CEs → Learn Roles → Assign → Name → Test & Calibration.
+// Steps: Pick CEs → Learn the logic → Groups & Condition → Name → Test & Calibration.
 //
 // The rule is created is_ready=FALSE on the Name step (so it stays hidden and
 // is auto-wiped by boot recovery if abandoned). When the user kicks off the
@@ -20,9 +21,10 @@ import ReactiveButton from '../components/ReactiveButton/ReactiveButton';
 import RuleDefaultsStep from '../components/RuleDefaults/RuleDefaultsStep';
 import RuleLogicPreview from '../components/RuleLogicPreview/RuleLogicPreview';
 import RoleLogicGuide from '../components/RoleLogicGuide/RoleLogicGuide';
+import GroupConditionEditor from '../components/GroupConditionEditor/GroupConditionEditor';
 import { showAlertDialog } from '../components/ConfirmDialog/confirmDialog';
 import { normalizeCategoryValue } from '../utils/categoryUtils';
-import { ROLE_LABELS } from '../utils/roleLabels';
+import { normalizeGroups, validateEditorState } from '../utils/ruleLogic';
 import {
     getCEBookmarks,
     getAllCategories,
@@ -31,19 +33,32 @@ import {
     discardUnreadyRule,
 } from '../api';
 
-const STEP_LABELS = ['Pick CEs', 'Learn Roles', 'Assign', 'Name', 'Test & Calibration'];
+const STEP_LABELS = ['Pick CEs', 'Learn the logic', 'Groups & Condition', 'Name', 'Test & Calibration'];
 
 function readUser() {
     try { return JSON.parse(sessionStorage.getItem('user') || 'null'); } catch { return null; }
 }
 
+// baseRule.groups ({gname: [{ce_id, name}]}) -> editable [{name, ceIds}].
+// Members without a ce_id are resolved by name against the base CE list.
+function groupsToEditable(groups, baseCes) {
+    const byName = new Map((baseCes || []).map((c) => [c.name, c.ce_id]));
+    return Object.entries(normalizeGroups(groups)).map(([name, members]) => ({
+        name,
+        ceIds: members
+            .map((m) => (m.ce_id != null ? m.ce_id : byName.get(m.name)))
+            .filter((id) => id != null),
+    }));
+}
+
 export default function BuildRuleFromCEs({ onClose, baseRule = null }) {
     const user = readUser();
     // EDIT mode: `baseRule` carries an existing rule to start from. We pre-load
-    // its CEs/roles/categories/name and start at Pick CEs (step 1) with those CEs
-    // already SELECTED — the user can add or remove before continuing — then the
-    // roles carry through to Assign, and we FORCE a new name. The result is a
-    // brand-new draft; the original rule is never touched.
+    // its CEs/groups/condition/categories/name and start at Pick CEs (step 1)
+    // with those CEs already SELECTED — the user can add or remove before
+    // continuing — then the groups carry through to Groups & Condition, and we
+    // FORCE a new name. The result is a brand-new draft; the original rule is
+    // never touched.
     const isEdit = !!baseRule;
     // Only CEs with a ce_id can be carried (we relink by id).
     const baseCes = (baseRule?.ces || []).filter((c) => c && c.ce_id != null);
@@ -55,11 +70,11 @@ export default function BuildRuleFromCEs({ onClose, baseRule = null }) {
     const [step, setStep] = useState(1);
     const [ceSearch, setCeSearch] = useState('');   // filter Pick-CEs by name
     const [selectedCes, setSelectedCes] = useState(() => new Set(baseCes.map((c) => c.ce_id)));
-    const [ceRoleAssignments, setCeRoleAssignments] = useState(() => {
-        const m = {};
-        baseCes.forEach((c) => { m[c.ce_id] = { role: c.role || 'necessary', fallback_group: c.fallback_group || 0 }; });
-        return m;
-    });
+    // The rule's logic: named groups over the selected CEs + a condition
+    // expression over the group names. Seeded from the base rule in edit
+    // mode; otherwise initialized when the user reaches step 3.
+    const [groupList, setGroupList] = useState(() => (baseRule?.groups ? groupsToEditable(baseRule.groups, baseCes) : []));
+    const [condition, setCondition] = useState(baseRule?.condition || '');
     const [nameInput, setNameInput] = useState(baseRule?.name || '');
     const [selectedCategories, setSelectedCategories] = useState(() => new Set((baseRule?.categories || []).filter(Boolean)));
     const [creating, setCreating] = useState(false);
@@ -87,7 +102,7 @@ export default function BuildRuleFromCEs({ onClose, baseRule = null }) {
                 getAllCategories().catch(() => ({ data: [] })),
             ]);
             // In edit mode, merge the base rule's CEs into the pool so they show
-            // in Pick/Assign even if they aren't in the user's bookmarks.
+            // in Pick/Groups even if they aren't in the user's bookmarks.
             const bm = cesRes.data?.bookmarks || [];
             const pool = [...bm];
             baseCes.forEach((bc) => {
@@ -111,23 +126,60 @@ export default function BuildRuleFromCEs({ onClose, baseRule = null }) {
     }, []);
     useEffect(() => { load(); }, [load]);
 
+    // Entering Groups & Condition: prune group members that were deselected in
+    // Pick CEs, and seed a sensible default (one "required" group holding every
+    // selected CE, fired by "all of required") the first time through.
+    const enterGroupsStep = () => {
+        const selected = Array.from(selectedCes);
+        let nextGroups = groupList
+            .map((g) => ({ ...g, ceIds: g.ceIds.filter((id) => selectedCes.has(id)) }))
+            .filter((g) => g.ceIds.length > 0 || g.name.trim() !== '');
+        let nextCondition = condition;
+        if (nextGroups.length === 0) {
+            nextGroups = [{ name: 'required', ceIds: selected }];
+            if (!nextCondition.trim()) nextCondition = 'all of required';
+        }
+        setGroupList(nextGroups);
+        setCondition(nextCondition);
+        setStep(3);
+    };
+
+    const handleGroupsNext = () => {
+        const err = validateEditorState(groupList, condition);
+        if (err) return showAlertDialog({ title: 'Fix the logic first', message: err, variant: 'info' });
+        const grouped = new Set(groupList.flatMap((g) => g.ceIds));
+        const ungrouped = Array.from(selectedCes).filter((id) => !grouped.has(id));
+        if (ungrouped.length > 0) {
+            const names = ungrouped.map((id) => ceBookmarks.find((c) => c.ce_id === id)?.name || `CE_${id}`);
+            return showAlertDialog({
+                title: 'Ungrouped CEs',
+                message: `Every selected CE must belong to a group (a rule only trains on its group members). Ungrouped: ${names.join(', ')}. Add them to a group or deselect them.`,
+                variant: 'warning',
+            });
+        }
+        setStep(4);
+    };
+
     const handleCreate = async () => {
         const ceIds = Array.from(selectedCes);
         if (!nameInput.trim()) return showAlertDialog({ title: 'Rule name required', message: 'Provide a rule name.', variant: 'info' });
         if (isEdit && nameInput.trim() === (baseRule?.name || '').trim()) return showAlertDialog({ title: 'Rename required', message: 'Editing creates a NEW draft — give it a name different from the original rule.', variant: 'warning' });
         if (ceIds.length < 2) return showAlertDialog({ title: 'Not enough CEs', message: 'A rule must contain at least 2 Cognitive Elements so the rule set can distinguish between them.', variant: 'warning' });
         if (selectedCategories.size === 0) return showAlertDialog({ title: 'Category required', message: 'Pick at least one category for this rule before creating it.', variant: 'warning' });
+        const err = validateEditorState(groupList, condition);
+        if (err) return showAlertDialog({ title: 'Fix the logic first', message: err, variant: 'info' });
 
-        const ceLinks = ceIds.map((id) => {
-            const a = ceRoleAssignments[id] || {};
-            const role = a.role || 'necessary';
-            const fallback_group = role === 'fallback' ? (parseInt(a.fallback_group, 10) || 1) : 0;
-            return { ce_id: id, role, fallback_group };
-        });
+        // Wire shape: { group_name: [ce_id, ...] }. The backend resolves ids to
+        // CE names, validates the condition against the group names, and dedups
+        // by structural fingerprint (409/400 with a readable detail on failure).
+        const groupsPayload = {};
+        groupList.forEach((g) => { groupsPayload[g.name.trim()] = g.ceIds; });
 
         setCreating(true);
         try {
-            const res = await createDraftRuleFromBookmarks(nameInput.trim(), ceLinks, Array.from(selectedCategories));
+            const res = await createDraftRuleFromBookmarks(
+                nameInput.trim(), groupsPayload, condition.trim(), Array.from(selectedCategories),
+            );
             const ruleId = res.data?.rule_id;
             if (!ruleId) throw new Error('Missing rule_id');
             setCreatedRuleId(ruleId);
@@ -157,18 +209,17 @@ export default function BuildRuleFromCEs({ onClose, baseRule = null }) {
     // built, so the rule never shows half-built in Drafts/Browse.
     const finalizeWhenReady = () => finalizeRule(createdRuleId, Array.from(selectedCes));
 
-    // CE list (name + role) the boolean-logic preview / summary renders from.
-    const cesForPreview = Array.from(selectedCes).map((id) => {
-        const ce = ceBookmarks.find((c) => c.ce_id === id);
-        const a = ceRoleAssignments[id] || { role: 'necessary', fallback_group: 0 };
-        return { name: ce?.name || `CE_${id}`, role: a.role || 'necessary', fallback_group: a.fallback_group || 0 };
+    // { gname: [names] } for the live preview / summary.
+    const groupsForPreview = {};
+    groupList.forEach((g) => {
+        groupsForPreview[g.name || '?'] = g.ceIds.map((id) => ceBookmarks.find((c) => c.ce_id === id)?.name || `CE_${id}`);
     });
 
     return (
         <div>
             <p style={{ margin: '0 0 16px', color: '#94a3b8', fontSize: '0.9rem' }}>
                 {isEdit
-                    ? <>Editing <strong style={{ color: '#e2e8f0' }}>{baseRule.name}</strong> — adjust its cognitive elements and roles, then give it a new name. This creates a new draft in your Library; the original rule is unchanged.</>
+                    ? <>Editing <strong style={{ color: '#e2e8f0' }}>{baseRule.name}</strong> — adjust its cognitive elements, groups and condition, then give it a new name. This creates a new draft in your Library; the original rule is unchanged.</>
                     : 'Compose a rule from your bookmarked Cognitive Elements. The finished rule lands in your Drafts.'}
             </p>
 
@@ -255,68 +306,34 @@ export default function BuildRuleFromCEs({ onClose, baseRule = null }) {
                                 <RoleLogicGuide />
                                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                                     <ReactiveButton label="Back" onClick={() => setStep(1)} Icon={FiArrowLeft} />
-                                    <ReactiveButton label="Next" Icon={FiArrowRight}
-                                        onClick={() => { setCeRoleAssignments((prev) => { const n = { ...prev }; Array.from(selectedCes).forEach((id) => { if (!n[id]) n[id] = { role: 'necessary', fallback_group: 0 }; }); return n; }); setStep(3); }}
-                                    />
+                                    <ReactiveButton label="Next" Icon={FiArrowRight} onClick={enterGroupsStep} />
                                 </div>
                             </div>
                         )}
 
                         {step === 3 && (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                                <p style={{ margin: 0, fontSize: '0.88rem', color: '#94a3b8' }}>Assign a role to each CE — the firing logic updates live below.</p>
-                                {/* Real-time boolean expression for the current role choices. */}
-                                <RuleLogicPreview ces={cesForPreview} />
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 320, overflowY: 'auto' }}>
-                                    {Array.from(selectedCes).map((id) => {
-                                        const ce = ceBookmarks.find((c) => c.ce_id === id);
-                                        if (!ce) return null;
-                                        const a = ceRoleAssignments[id] || { role: 'necessary', fallback_group: 0 };
-                                        const roleColor = a.role === 'necessary' ? '#a78bfa' : a.role === 'fallback' ? '#818cf8' : '#34d399';
-                                        return (
-                                            <div key={id} style={{ border: '1px solid rgba(148, 163, 184, 0.18)', borderRadius: 12, padding: 14, borderLeft: `4px solid ${roleColor}`, background: 'rgba(15, 23, 42, 0.55)', color: '#e2e8f0' }}>
-                                                <div style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 10, fontSize: '0.9rem' }}>{ce.name}</div>
-                                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                                                    {/* Segmented control (not a native <select>, whose OS option
-                                                        list clashes with the dark UI). Active pill is tinted by its
-                                                        role colour. */}
-                                                    <div style={{ display: 'inline-flex', gap: 4, padding: 4, borderRadius: 10, background: 'rgba(2,6,23,0.55)', border: '1px solid rgba(148, 163, 184, 0.18)' }}>
-                                                        {ROLE_OPTIONS.map((r) => {
-                                                            const on = a.role === r.value;
-                                                            return (
-                                                                <button key={r.value} type="button"
-                                                                    onClick={() => setCeRoleAssignments((prev) => ({ ...prev, [id]: { role: r.value, fallback_group: r.value === 'fallback' ? (a.fallback_group || 1) : 0 } }))}
-                                                                    style={{
-                                                                        padding: '6px 14px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600,
-                                                                        background: on ? r.color : 'transparent',
-                                                                        color: on ? '#0f172a' : '#94a3b8',
-                                                                        boxShadow: on ? `0 2px 8px -2px ${r.color}99` : 'none',
-                                                                        transition: 'background 0.15s, color 0.15s',
-                                                                    }}>
-                                                                    {r.label}
-                                                                </button>
-                                                            );
-                                                        })}
-                                                    </div>
-                                                    {a.role === 'fallback' && (
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                            <label style={{ fontSize: '0.8rem', color: '#94a3b8', fontWeight: 500, whiteSpace: 'nowrap' }}>OR Group:</label>
-                                                            <input type="number" min="1" value={a.fallback_group || 1}
-                                                                onChange={(e) => setCeRoleAssignments((prev) => ({ ...prev, [id]: { role: a.role, fallback_group: parseInt(e.target.value, 10) || 1 } }))}
-                                                                style={{ ...selectStyle, width: 60, textAlign: 'center' }}
-                                                            />
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
-                                </div>
+                                <p style={{ margin: 0, fontSize: '0.88rem', color: '#94a3b8' }}>
+                                    Organize the CEs into named groups, then write the firing condition over the
+                                    group names — the preview updates live below.
+                                </p>
+                                {/* Real-time firing-logic preview for the current groups + condition. */}
+                                <RuleLogicPreview title="Firing logic — live preview" groups={groupsForPreview} condition={condition} />
+                                <GroupConditionEditor
+                                    pool={Array.from(selectedCes).map((id) => ({
+                                        ce_id: id,
+                                        name: ceBookmarks.find((c) => c.ce_id === id)?.name || `CE_${id}`,
+                                    }))}
+                                    groupList={groupList}
+                                    condition={condition}
+                                    onChange={({ groupList: nextGroups, condition: nextCondition }) => {
+                                        setGroupList(nextGroups);
+                                        setCondition(nextCondition);
+                                    }}
+                                />
                                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                                     <ReactiveButton label="Back" onClick={() => setStep(2)} Icon={FiArrowLeft} />
-                                    <ReactiveButton label="Next" Icon={FiArrowRight}
-                                        onClick={() => { if (Array.from(selectedCes).some((id) => !(ceRoleAssignments[id]?.role))) return showAlertDialog({ title: 'Set roles', message: 'Assign a role to each CE.', variant: 'info' }); setStep(4); }}
-                                    />
+                                    <ReactiveButton label="Next" Icon={FiArrowRight} onClick={handleGroupsNext} />
                                 </div>
                             </div>
                         )}
@@ -372,8 +389,8 @@ export default function BuildRuleFromCEs({ onClose, baseRule = null }) {
 
                         {step === 5 && createdRuleId && (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                                {/* Rule summary — name, categories, the CEs and the
-                                  * boolean expression, mirroring the AI flow's review. */}
+                                {/* Rule summary — name, categories, the groups and the
+                                  * condition, mirroring the AI flow's review. */}
                                 <div style={{
                                     background: 'linear-gradient(135deg, rgba(139, 92, 246, 0.12), rgba(99, 102, 241, 0.10))',
                                     border: '1px solid rgba(148, 163, 184, 0.20)', borderRadius: 14, padding: 16,
@@ -390,7 +407,7 @@ export default function BuildRuleFromCEs({ onClose, baseRule = null }) {
                                             ))}
                                         </div>
                                     )}
-                                    <RuleLogicPreview title={`Firing logic · ${selectedCes.size} cognitive elements`} ces={cesForPreview} />
+                                    <RuleLogicPreview title={`Firing logic · ${selectedCes.size} cognitive elements`} groups={groupsForPreview} condition={condition} />
                                 </div>
                                 <RuleDefaultsStep ruleId={createdRuleId} onDone={handleStarted} finalize={finalizeWhenReady} />
                             </div>
@@ -407,19 +424,3 @@ export default function BuildRuleFromCEs({ onClose, baseRule = null }) {
 const cardStyle = {
     padding: '4px 2px 2px',
 };
-const selectStyle = {
-    padding: '8px 12px', borderRadius: 8, border: '1px solid rgba(148, 163, 184, 0.22)',
-    background: 'rgba(2, 6, 23, 0.55)', color: '#f1f5f9', fontSize: '0.85rem', fontWeight: 500,
-    flex: 1, minWidth: 120,
-};
-// Role choices for the Assign step's segmented control; active pill is tinted
-// by its colour (matches the role legend on the Learn Roles step).
-const ROLE_OPTIONS = [
-    { value: 'necessary', label: ROLE_LABELS.necessary, color: '#a78bfa' },
-    { value: 'fallback', label: ROLE_LABELS.fallback, color: '#818cf8' },
-    { value: 'sufficient', label: ROLE_LABELS.sufficient, color: '#34d399' },
-];
-const roleTag = (a, b) => ({
-    background: `linear-gradient(135deg, ${a} 0%, ${b} 100%)`, color: '#fff', fontSize: '0.7rem',
-    fontWeight: 700, padding: '2px 8px', borderRadius: 6, flexShrink: 0, marginTop: 2,
-});

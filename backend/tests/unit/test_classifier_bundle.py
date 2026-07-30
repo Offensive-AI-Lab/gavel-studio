@@ -16,23 +16,70 @@ from services import classifier_bundle as cb
 
 
 # ---------------------------------------------------------------------------
-# Fingerprint
+# Fingerprint — machine-independent, keyed on CE public_ids (v2 logic shape)
 # ---------------------------------------------------------------------------
 
-def test_rule_fingerprint_is_order_independent():
-    a = [
-        {"ce_public_id": "ce_2", "role": "necessary", "fallback_group": 0},
-        {"ce_public_id": "ce_1", "role": "necessary", "fallback_group": 0},
-        {"ce_public_id": "ce_3", "role": "fallback", "fallback_group": 1},
-    ]
-    b = list(reversed(a))
-    assert cb._rule_fp_from_public_links(a) == cb._rule_fp_from_public_links(b)
+def _logic(ce_groups, condition):
+    """Build the {ce_groups, condition} logic dict _rule_public_fingerprint
+    consumes: members carry both the local name and the public_id."""
+    return {
+        "ce_groups": {
+            g: [{"name": n, "ce_public_id": pid} for n, pid in members]
+            for g, members in ce_groups.items()
+        },
+        "condition": condition,
+    }
 
 
-def test_rule_fingerprint_distinguishes_roles():
-    base = [{"ce_public_id": "ce_1", "role": "necessary", "fallback_group": 0}]
-    other = [{"ce_public_id": "ce_1", "role": "sufficient", "fallback_group": 0}]
-    assert cb._rule_fp_from_public_links(base) != cb._rule_fp_from_public_links(other)
+def test_rule_fingerprint_is_group_name_independent():
+    a = cb._rule_public_fingerprint(_logic(
+        {"hook": [("A", "ce_1")], "action": [("B", "ce_2"), ("C", "ce_3")]},
+        "all of hook and 1 of action"))
+    b = cb._rule_public_fingerprint(_logic(
+        {"x": [("A", "ce_1")], "y": [("B", "ce_2"), ("C", "ce_3")]},
+        "all of x and 1 of y"))
+    assert a == b
+
+
+def test_rule_fingerprint_keyed_on_public_ids_not_names():
+    # Different local display names, same public identities -> same fingerprint
+    # (the property that makes exporter and importer agree across machines).
+    a = cb._rule_public_fingerprint(_logic({"g": [("LocalName", "ce_1")]}, "all of g"))
+    b = cb._rule_public_fingerprint(_logic({"g": [("Renamed", "ce_1")]}, "all of g"))
+    assert a == b
+
+
+def test_rule_fingerprint_distinguishes_conditions():
+    groups = {"g": [("A", "ce_1"), ("B", "ce_2")]}
+    assert cb._rule_public_fingerprint(_logic(groups, "all of g")) != \
+        cb._rule_public_fingerprint(_logic(groups, "1 of g"))
+
+
+def test_rule_fingerprint_missing_public_id_never_matches_public():
+    # A member without a public_id gets a '?name' placeholder — it can never
+    # collide with a fully-public fingerprint.
+    public = cb._rule_public_fingerprint(_logic({"g": [("A", "ce_1")]}, "all of g"))
+    unpublished = cb._rule_public_fingerprint(_logic({"g": [("A", None)]}, "all of g"))
+    assert public != unpublished
+
+
+def test_rule_public_logic_translates_members_and_flags_missing(monkeypatch):
+    """_rule_public_logic reads rules.ce_groups/condition and annotates every
+    member with its CE public_id; members without one land in `missing`."""
+    def fake(query, params=None):
+        if "FROM rules" in query:
+            return [{"ce_groups": {"req": ["A", "B"]}, "condition": "all of req"}]
+        # CE public-id lookup — B has no public_id row.
+        return [{"name": "A", "public_id": "ce_a"}, {"name": "B", "public_id": None}]
+
+    monkeypatch.setattr(cb, "execute_query_dict", fake)
+    logic = cb._rule_public_logic(1)
+    assert logic["condition"] == "all of req"
+    assert logic["ce_groups"] == {
+        "req": [{"name": "A", "ce_public_id": "ce_a"},
+                {"name": "B", "ce_public_id": None}],
+    }
+    assert logic["missing"] == ["B"]
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +186,32 @@ def test_parse_rejects_wrong_format_marker():
     bad = _zip_of({"bundle_manifest.json": json.dumps({"format": "something-else"}).encode()})
     with pytest.raises(cb.BundleError):
         cb.parse_and_validate_bundle(bad)
+
+
+def test_format_version_is_2():
+    # v2 = groups/condition logic + public-id fingerprints. Bumping it again
+    # is a compatibility event — update the import-rejection copy with it.
+    assert cb.FORMAT_VERSION == 2
+
+
+def test_parse_rejects_retired_v1_bundle():
+    """v1 bundles carry role-based fingerprints that can't be verified under
+    the groups/condition model — they must be refused with re-export advice,
+    not imported with unverifiable policy."""
+    manifest = {"format": cb.FORMAT, "format_version": 1, "tier": cb.TIER_MODEL}
+    bad = _zip_of({"bundle_manifest.json": json.dumps(manifest).encode()})
+    with pytest.raises(cb.BundleError) as ei:
+        cb.parse_and_validate_bundle(bad)
+    assert "retired" in str(ei.value).lower()
+
+
+def test_parse_rejects_newer_format_version():
+    manifest = {"format": cb.FORMAT, "format_version": cb.FORMAT_VERSION + 1,
+                "tier": cb.TIER_MODEL}
+    bad = _zip_of({"bundle_manifest.json": json.dumps(manifest).encode()})
+    with pytest.raises(cb.BundleError) as ei:
+        cb.parse_and_validate_bundle(bad)
+    assert "newer" in str(ei.value).lower()
 
 
 def test_validate_model_loads_rejects_geometry_mismatch():

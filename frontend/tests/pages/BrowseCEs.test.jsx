@@ -2,8 +2,7 @@
 //
 // BrowseCEs lists public CEs (from getCognitiveElements), runs a live,
 // debounced library search (via useLibrarySearch -> searchLibrary), lets the
-// user bookmark/unbookmark public CEs and publish local-draft CEs (delegated
-// to RuleService.publishDraftCE), paginates both the default list and the
+// user bookmark/unbookmark public CEs, paginates both the default list and the
 // search results, and routes to /ce-wizard / /login / sidebar links.
 //
 // We mock the network (../api) with benign defaults for every export the page
@@ -40,10 +39,6 @@ vi.mock('../../src/api', () => {
     };
 });
 
-// ---- publish service: assert it's called, never run the real pipeline ----
-vi.mock('../../src/services/RuleService', () => ({
-    publishDraftCE: vi.fn(),
-}));
 
 // ---- confirm-dialog helpers — controllable / capturable ----
 const mockShowAlertDialog = vi.fn(() => Promise.resolve());
@@ -71,7 +66,6 @@ vi.mock('sweetalert2', () => ({
 
 import BrowseCEs from '../../src/pages/BrowseCEs';
 import * as api from '../../src/api';
-import * as RuleService from '../../src/services/RuleService';
 
 const setUser = () => {
     sessionStorage.setItem('token', 'fake-token');
@@ -303,8 +297,10 @@ describe('BrowseCEs — expand & lazy-load samples', () => {
 
 describe('BrowseCEs — live search', () => {
     it('runs a search as the user types and renders mapped results', async () => {
+        // v2 CE fields (role/title/tags) must survive the search-row mapping —
+        // the card renders role as its primary badge (underscores prettified).
         api.searchLibrary.mockResolvedValue({
-            data: { results: [searchRow()], total_results: 1 },
+            data: { results: [searchRow({ role: 'directive_to_user' })], total_results: 1 },
         });
         renderPage();
         await screen.findByText('No Cognitive Elements');
@@ -317,6 +313,7 @@ describe('BrowseCEs — live search', () => {
         );
         expect(await screen.findByText('Searched CE')).toBeInTheDocument();
         expect(await screen.findByText(/Search Results \(1 found\)/)).toBeInTheDocument();
+        expect(screen.getByText('directive to user')).toBeInTheDocument();
     });
 
     it('shows a no-results message when the search returns nothing', async () => {

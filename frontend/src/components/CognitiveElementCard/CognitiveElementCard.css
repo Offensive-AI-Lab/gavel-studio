@@ -160,6 +160,18 @@
     box-shadow: 0 4px 14px -2px rgba(16, 185, 129, 0.45);
 }
 
+/* Publishing from Studio is disabled (contributions go via gavel-rules
+ * PRs) — the button stays visible but muted, tooltip explains why. */
+.bookmark-btn.publish-btn:disabled,
+.bookmark-btn.publish-btn:disabled:hover {
+    background: rgba(148, 163, 184, 0.12);
+    color: #94a3b8;
+    border-color: rgba(148, 163, 184, 0.28);
+    box-shadow: none;
+    cursor: not-allowed;
+    opacity: 0.75;
+}
+
 .delete-icon {
     color: #f87171;
     cursor: pointer;

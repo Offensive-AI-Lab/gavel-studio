@@ -58,38 +58,6 @@ def create_ce(
     return new_ce
 
 
-# ---------------------------------------------------------
-# BOOKMARK HELPERS (Rules & CEs)
-# ---------------------------------------------------------
-# Implementation lives in services/bookmarks.py — these functions are kept as
-# thin compatibility shims so existing import paths stay valid. New code should
-# call BookmarkService directly.
-from services.bookmarks import BookmarkService  # noqa: E402
-
-
-def add_rule_bookmark(user_id: int, rule_id: int):
-    return BookmarkService.add("rule", user_id, rule_id)
-
-
-def remove_rule_bookmark(user_id: int, rule_id: int):
-    return BookmarkService.remove("rule", user_id, rule_id)
-
-
-def list_rule_bookmarks(user_id: int):
-    return BookmarkService.list("rule", user_id)
-
-
-def add_ce_bookmark(user_id: int, ce_id: int):
-    return BookmarkService.add("ce", user_id, ce_id)
-
-
-def remove_ce_bookmark(user_id: int, ce_id: int):
-    return BookmarkService.remove("ce", user_id, ce_id)
-
-
-def list_ce_bookmarks(user_id: int):
-    return BookmarkService.list("ce", user_id)
-
 def get_user_ces():
     """
     Fetches all available Cognitive Elements so the user can
@@ -210,43 +178,90 @@ def get_calibration_dataset(ce_id: int):
 # GLOBAL RULES (Public Library)
 # ---------------------------------------------------------
 
-def create_global_rule(name: str, predicate: str, ce_ids: list):
-    """Creates a community-standard rule template in the 'rules' table."""
+def create_global_rule(name: str, predicate: str, ce_groups: dict = None,
+                       condition: str = None):
+    """Creates a community-standard rule template in the 'rules' table.
+
+    `ce_groups` is {group_name: [CE NAMES]} and `condition` the v2 grammar
+    string over those group names — the logic source of truth. `predicate`
+    is the derived display string; when empty and a condition is given it
+    is re-rendered here. Membership rule_ce_link rows are rebuilt from the
+    union of group members (names resolved to ce_ids; unknown names are
+    skipped — this legacy path creates CEs before calling in).
+    """
+    ce_groups = ce_groups or {}
+    if condition and not predicate:
+        from utils.rule_condition import parse, render_predicate
+        predicate = render_predicate(parse(condition), ce_groups)
+
     # Insert/Update Rule
     query_rule = """
-        INSERT INTO rules (name, predicate) 
-        VALUES (%s, %s) 
-        ON CONFLICT (name) DO UPDATE SET predicate=EXCLUDED.predicate 
+        INSERT INTO rules (name, predicate, ce_groups, condition)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (name) DO UPDATE SET predicate = EXCLUDED.predicate,
+                                         ce_groups = EXCLUDED.ce_groups,
+                                         condition = EXCLUDED.condition
         RETURNING rule_id
     """
-    rule_id = execute_query_dict(query_rule, (name, predicate))[0]['rule_id']
-    
-    # Link CEs to the public template in rule_ce_link
+    rule_id = execute_query_dict(
+        query_rule, (name, predicate, ce_groups, condition)
+    )[0]['rule_id']
+
+    # Rebuild membership links from the union of group members.
+    execute_query("DELETE FROM rule_ce_link WHERE rule_id = %s", (rule_id,))
+    member_names = sorted({m for members in ce_groups.values() for m in (members or [])})
     ce_defs = []
-    for ce_id in ce_ids:
+    for ce_name in member_names:
+        rows = execute_query_dict(
+            "SELECT ce_id, definition FROM cognitive_elements WHERE name = %s",
+            (ce_name,),
+        ) or []
+        if not rows:
+            continue
         execute_query(
-            "INSERT INTO rule_ce_link (rule_id, ce_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", 
-            (rule_id, ce_id)
+            "INSERT INTO rule_ce_link (rule_id, ce_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (rule_id, rows[0]['ce_id']),
         )
-        # Fetch definition for embedding
-        rows = execute_query_dict("SELECT definition FROM cognitive_elements WHERE ce_id = %s", (ce_id,))
-        if rows:
+        if rows[0].get('definition'):
             ce_defs.append(rows[0]['definition'])
-            
+
     # Auto-calculate embedding for rule
-    ce_definitions_str = " ".join(ce_defs)
-    trigger_embedding('rule', rule_id, name, predicate, ce_definitions_str)
+    trigger_embedding('rule', rule_id, name, predicate, " ".join(ce_defs))
 
     return rule_id
 
+
+def _attach_rule_logic(rows: list) -> list:
+    """Post-process rule rows that carry raw ce_groups/condition columns plus
+    a flat active_ces membership list into the read contract: pops the raw
+    columns and adds `logic` = {"groups": {group_name: [{ce_id, name}]},
+    "condition", "predicate"}."""
+    from sql_scripts.model_scripts import _build_logic_payload
+    for row in rows or []:
+        row["logic"] = _build_logic_payload(
+            row.pop("ce_groups", None),
+            row.pop("condition", None),
+            row.get("predicate"),
+            row.get("active_ces") or [],
+        )
+    return rows or []
+
 def get_all_public_rules():
-    """Fetches templates for the community browsing feature."""
+    """Fetches templates for the community browsing feature.
+
+    Each row carries `logic` = {"groups": {group_name: [{ce_id, name}]},
+    "condition", "predicate"} built from the rule's ce_groups/condition
+    columns, plus `active_ces` as a flat [{ce_id, name}] membership list
+    (CE-count displays / membership-only consumers).
+    """
     query = """
         SELECT
             r.rule_id, r.name, r.predicate, r.description, r.type, r.created_at,
             r.is_local_draft,
             r.created_by_username,
             r.public_id,
+            r.ce_groups,
+            r.condition,
             (SELECT json_group_array(c.name) FROM categories c
              WHERE c.category_id IN (SELECT value FROM json_each(r.categories))
             ) as "categories [JSONB]",
@@ -254,9 +269,7 @@ def get_all_public_rules():
                 json_group_array(
                     json_object(
                         'ce_id', ce.ce_id,
-                        'name', ce.name,
-                        'role', COALESCE(rl.role, 'necessary'),
-                        'fallback_group', COALESCE(rl.fallback_group, 0)
+                        'name', ce.name
                     )
                 ) FILTER (WHERE ce.ce_id IS NOT NULL),
                 '[]'
@@ -272,7 +285,7 @@ def get_all_public_rules():
         WHERE r.is_ready = TRUE AND r.is_local_draft = FALSE
         GROUP BY r.rule_id
     """
-    return execute_query_dict(query)
+    return _attach_rule_logic(execute_query_dict(query))
 
 
 def get_all_public_rule_sets():
@@ -313,8 +326,9 @@ def get_all_public_rule_sets():
 
 
 def get_rule_set_detail(public_id: str):
-    """One public rule set + its member rules (each with their CEs/roles) for
-    the rule-set detail page. Keyed by the HF public_id. Returns None if no
+    """One public rule set + its member rules for the rule-set detail page
+    (each member carries `logic` + flat `active_ces` as in
+    get_all_public_rules). Keyed by the library public_id. Returns None if no
     published set with that public_id exists locally."""
     set_rows = execute_query_dict(
         """
@@ -331,17 +345,16 @@ def get_rule_set_detail(public_id: str):
     if not set_rows:
         return None
     rs = set_rows[0]
-    rs["member_rules"] = execute_query_dict(
+    rs["member_rules"] = _attach_rule_logic(execute_query_dict(
         """
         SELECT rsm.position, r.rule_id, r.name, r.predicate, r.description,
                r.public_id, r.created_by_username,
+               r.ce_groups, r.condition,
                COALESCE(
                    json_group_array(
                        json_object(
                            'ce_id', ce.ce_id,
-                           'name', ce.name,
-                           'role', COALESCE(rl.role, 'necessary'),
-                           'fallback_group', COALESCE(rl.fallback_group, 0)
+                           'name', ce.name
                        )
                    ) FILTER (WHERE ce.ce_id IS NOT NULL),
                    '[]'
@@ -356,5 +369,5 @@ def get_rule_set_detail(public_id: str):
         ORDER BY rsm.position
         """,
         (rs["rule_set_id"],),
-    ) or []
+    ) or [])
     return rs

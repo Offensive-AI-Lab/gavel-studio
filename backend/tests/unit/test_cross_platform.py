@@ -28,9 +28,8 @@ class TestPathHandling:
     """Verify the codebase doesn't use hard-coded path separators."""
 
     # Files that may legitimately use OS-specific shell commands
-    ALLOWED_HARDCODED_PATHS = {
-        "scripts/reseed_db_from_registry.py",  # docstring shows Windows venv invocation paths (admin-only tooling)
-    }
+    # (currently none — the reseed script died with the HF registry).
+    ALLOWED_HARDCODED_PATHS = set()
 
     def test_no_hardcoded_backslashes_in_paths(self):
         """Search Python files for '\\' inside string literals that look like paths.

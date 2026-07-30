@@ -12,15 +12,18 @@ import GlassSelect from '../components/GlassSelect/GlassSelect';
 import AddModelModal from '../components/AddModelModal/AddModelModal';
 import CreateChooserModal from '../components/CreateChooserModal/CreateChooserModal';
 import Breadcrumb from '../components/Breadcrumb/Breadcrumb';
+import GroupConditionEditor from '../components/GroupConditionEditor/GroupConditionEditor';
 
 // Services & API
-import { publishDraftRule } from '../services/RuleService';
 import {
     getClassifierRules,
     deleteRuleSetup,
     addRuleToClassifier,
     getClassifierDetails,
     getRuleBookmarks,
+    getCEBookmarks,
+    saveEditedRule,
+    checkRuleDuplicate,
     trainClassifier,
     getComputeTargets,
     getTrainingStatus,
@@ -34,6 +37,7 @@ import {
 import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
 import { useTutorialContent } from '../contexts/TutorialContext';
 import { recordRecent } from '../utils/recents';
+import { extractLogic, normalizeGroups, validateEditorState } from '../utils/ruleLogic';
 
 // Icons & Utils
 import { showAlertDialog, showConfirmDialog } from '../components/ConfirmDialog/confirmDialog';
@@ -127,6 +131,10 @@ const RulesManager = () => {
     const [cloneBusy, setCloneBusy] = useState(false);
     const [addModelOpen, setAddModelOpen] = useState(false);   // inline "add a model" (no Models page)
     const [createOpen, setCreateOpen] = useState(false);       // "Create a New Rule" → shared chooser
+    // In-place rule-logic editor (groups + condition) for one setup row.
+    const [logicEdit, setLogicEdit] = useState(null);          // { rule, groupList, condition, pool } | null
+    const [logicNewName, setLogicNewName] = useState('');
+    const [logicSaving, setLogicSaving] = useState(false);
     const [machineOpen, setMachineOpen] = useState(false);     // "choose a machine" picker (>1 target)
     const [machineTargets, setMachineTargets] = useState([]);
     const user = JSON.parse(sessionStorage.getItem('user'));
@@ -322,7 +330,7 @@ const RulesManager = () => {
                     'Monitor → run the rule set on live conversations in real time.',
                     'Apply to another model → copy this rule set onto a second model (independent copy, retrained there).',
                     'Download → grab the raw trained model files as a .zip.',
-                    'Export → package the rule set as a shareable bundle (model, optionally calibration + evaluation). It publishes any draft rules to the library first (with your OK), then builds in the background — you can close the dialog and it keeps going. Export only shows when the rule set matches what the model was trained on; if you changed the rules, retrain first.',
+                    'Export → package the rule set as a shareable bundle (model, optionally calibration + evaluation). Every rule and CE in the policy must already be in the public library — drafts can\'t be bundled (contribute them via a gavel-rules pull request first). Builds in the background — you can close the dialog and it keeps going. Export only shows when the rule set matches what the model was trained on; if you changed the rules, retrain first.',
                 ],
             },
         ],
@@ -335,6 +343,87 @@ const RulesManager = () => {
             setModels(res.data.models || []);
         } catch {
             setModels([]);
+        }
+    };
+
+    // ---- In-place rule-logic editor (groups + condition) -----------------
+    // Opens on a setup row; edits go to POST /rules/setup/{id}/save-edited
+    // ({groups: {name: [ce_id]}, condition, new_name?}). The backend patches
+    // the user's own draft in place, or forks under new_name when the source
+    // rule is public / setup-only; its 400/409 detail is surfaced verbatim.
+    const openLogicEditor = async (rule) => {
+        const memberCes = (rule.active_ces || []).filter((c) => c && c.ce_id != null);
+        // Pool = the rule's current CEs + the user's bookmarked CEs (so new
+        // elements can be pulled into a group).
+        let pool = memberCes.map((c) => ({ ce_id: c.ce_id, name: c.name }));
+        try {
+            const res = await getCEBookmarks(user.user_id);
+            (res.data?.bookmarks || []).forEach((b) => {
+                if (b.ce_id != null && !pool.some((p) => p.ce_id === b.ce_id)) {
+                    pool.push({ ce_id: b.ce_id, name: b.name });
+                }
+            });
+        } catch { /* bookmarks are optional here */ }
+
+        const logic = extractLogic(rule);
+        let groupList = Object.entries(normalizeGroups(logic.groups || {})).map(([name, members]) => ({
+            name,
+            ceIds: members.map((m) => m.ce_id).filter((id) => id != null),
+        }));
+        let condition = logic.condition;
+        if (groupList.length === 0) {
+            // Legacy row without groups — seed one group with the membership.
+            groupList = [{ name: 'required', ceIds: memberCes.map((c) => c.ce_id) }];
+            if (!condition) condition = 'all of required';
+        }
+        setLogicNewName('');
+        setLogicEdit({ rule, groupList, condition, pool });
+    };
+
+    const saveLogicEdit = async () => {
+        if (!logicEdit || logicSaving) return;
+        const { rule, groupList, condition } = logicEdit;
+        const err = validateEditorState(groupList, condition);
+        if (err) return showAlertDialog({ title: 'Fix the logic first', message: err, variant: 'info' });
+        const groups = {};
+        groupList.forEach((g) => { groups[g.name.trim()] = g.ceIds; });
+
+        setLogicSaving(true);
+        try {
+            // Dedup probe first: an identical structure elsewhere means the
+            // user is about to retrain a copy — point them at the original.
+            try {
+                const dup = await checkRuleDuplicate({
+                    groups,
+                    condition: condition.trim(),
+                    classifier_id: parseInt(classifierId, 10),
+                    exclude_setup_id: rule.setup_id,
+                });
+                if (dup.data?.exists) {
+                    setLogicSaving(false);
+                    return showAlertDialog({
+                        title: 'Duplicate rule',
+                        message: `This logic is structurally identical to "${dup.data.name}". Reuse that rule instead, or change the groups/condition.`,
+                        variant: 'warning',
+                    });
+                }
+            } catch { /* dedup probe is best-effort; the save re-validates */ }
+
+            await saveEditedRule(rule.setup_id, {
+                groups,
+                condition: condition.trim(),
+                new_name: logicNewName.trim() || null,
+            });
+            setLogicEdit(null);
+            refreshData();
+        } catch (e) {
+            showAlertDialog({
+                title: 'Could not save',
+                message: e.response?.data?.detail || e.message || 'Failed to save the edited logic.',
+                variant: 'error',
+            });
+        } finally {
+            setLogicSaving(false);
         }
     };
 
@@ -1110,7 +1199,7 @@ const RulesManager = () => {
                             isExpanded={expandedRule === rule.setup_id}
                             onToggle={() => setExpandedRule(expandedRule === rule.setup_id ? null : rule.setup_id)}
                             onDelete={handleDeleteRule}
-                            onPublish={(r) => publishDraftRule(r, user?.user_id, refreshData)}
+                            onEditLogic={openLogicEditor}
                             onGenerateTestSets={(r) => {
                                 // Phase 7 entry point for Pipeline B
                                 // (Test + Evaluation). The wizard scopes to
@@ -1261,6 +1350,51 @@ const RulesManager = () => {
                         </div>
                     );
                 })()}
+            </GlassModal>
+
+            {/* 5. In-place rule-logic editor (groups + condition) */}
+            <GlassModal
+                isOpen={!!logicEdit}
+                onClose={() => setLogicEdit(null)}
+                title={logicEdit ? `Edit logic — ${logicEdit.rule.custom_name}` : 'Edit logic'}
+            >
+                {logicEdit && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                        <GroupConditionEditor
+                            pool={logicEdit.pool}
+                            groupList={logicEdit.groupList}
+                            condition={logicEdit.condition}
+                            onChange={({ groupList, condition }) =>
+                                setLogicEdit((prev) => (prev ? { ...prev, groupList, condition } : prev))}
+                        />
+                        <div>
+                            <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: '#94a3b8', marginBottom: 4 }}>
+                                Save as (new name)
+                            </label>
+                            <input
+                                value={logicNewName}
+                                onChange={(e) => setLogicNewName(e.target.value)}
+                                placeholder="Leave empty to update in place (your own drafts only)"
+                                maxLength={255}
+                                style={{
+                                    width: '100%', boxSizing: 'border-box', padding: '10px 12px',
+                                    borderRadius: 10, border: '1px solid rgba(148, 163, 184, 0.25)',
+                                    background: 'rgba(2, 6, 23, 0.55)', color: '#f1f5f9', outline: 'none',
+                                }}
+                            />
+                            <p style={{ margin: '6px 0 0', fontSize: '0.75rem', color: '#64748b' }}>
+                                Editing a library rule (or a setup with no backing draft) forks it into a new
+                                draft — a new name is required then. Your own drafts update in place.
+                            </p>
+                        </div>
+                        <ReactiveButton
+                            label={logicSaving ? 'Saving…' : 'Save logic'}
+                            onClick={saveLogicEdit}
+                            Icon={FiCheckCircle}
+                            disabled={logicSaving}
+                        />
+                    </div>
+                )}
             </GlassModal>
 
         </Layout>

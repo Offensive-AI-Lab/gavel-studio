@@ -44,13 +44,21 @@ from utils.sqlite_db import execute_query
 #         with its '*_running' marker); the composite-PK junction tables get
 #         explicit NOT NULL key columns (SQLite's legacy quirk allows NULLs in
 #         PRIMARY KEY columns of rowid tables, which Postgres never did).
+#   24    gavel-rules migration (groups + condition rule model, publish
+#         machinery removed). rules/rule_setup gain ce_groups (JSON object:
+#         group name -> [CE names]) + condition (the v2 grammar string —
+#         utils/rule_condition.py); the old necessary/fallback/sufficient
+#         role columns on rule_ce_link/setup_ce_link are converted (see
+#         _migrate_v23_to_v24) and the junctions become pure membership.
+#         cognitive_elements gain title/role/tags; rules gain title/tags.
+#         pending_public_id (HF-publish crash stamps) dropped everywhere.
 #
 # WARNING for future bumps: the DDL block below is CREATE ... IF NOT EXISTS
 # only — it NEVER changes an existing table. Any column/default/constraint
 # change needs an explicit migration step (rebuild-and-copy, like
 # _migrate_pre_v23) keyed on the stored version, or existing databases will be
 # stamped with the new version while silently keeping the old shape.
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 # Baseline taxonomy kept general and shared across rules/CEs.
 # NOT seeded locally — HF (categories.json) is the source of truth; this list
@@ -174,7 +182,6 @@ _CRITICAL_TABLES = (
 _CRITICAL_INDEXES = (
     "idx_rule_ce_link_rule",
     "idx_rule_ce_link_ce",
-    "idx_rule_ce_link_role",
     "idx_rule_set_member_rule",
     "uq_rules_public_id",
     "uq_ces_public_id",
@@ -325,6 +332,349 @@ def _migrate_pre_v23():
     print("[init_database] v23 rebuild done.")
 
 
+def _needs_v24_rebuild() -> bool:
+    """Detect the pre-v24 PHYSICAL shapes (role-column junctions, missing
+    ce_groups/condition, pending_public_id still present)."""
+    ddl = _table_ddl("rule_ce_link")
+    if ddl and "role" in ddl:
+        return True
+    ddl = _table_ddl("rules")
+    if ddl and ("ce_groups" not in ddl or "pending_public_id" in ddl):
+        return True
+    ddl = _table_ddl("rule_setup")
+    if ddl and "ce_groups" not in ddl:
+        return True
+    ddl = _table_ddl("cognitive_elements")
+    if ddl and ("tags" not in ddl or "pending_public_id" in ddl):
+        return True
+    return False
+
+
+def _roles_to_groups_condition(links: list) -> tuple:
+    """Convert one rule's legacy role links into the v24 (ce_groups,
+    condition) pair, mirroring gavel-rules tools/migrate_rules_v1_to_v2.py:
+
+      necessary        -> group 'required',  referenced 'all of required'
+      fallback group i -> group 'option_i',  referenced '1 of option_i'
+      sufficient       -> group 'supporting' — kept for display/membership but
+                          NOT referenced by the condition (matches the old
+                          firing predicate, which always excluded sufficient)
+
+    links: [{ce_name, role, fallback_group}]. Returns (groups dict, condition
+    str or None). A rule with no necessary/fallback links gets condition None
+    (legacy no-logic rule; its stored predicate is left untouched)."""
+    necessary, sufficient = [], []
+    fallback: dict = {}
+    for link in links or []:
+        name = link.get("ce_name")
+        if not name:
+            continue
+        role = (link.get("role") or "necessary").lower()
+        if role == "sufficient":
+            sufficient.append(name)
+        elif role == "fallback":
+            fallback.setdefault(int(link.get("fallback_group") or 0), []).append(name)
+        else:
+            necessary.append(name)
+
+    groups: dict = {}
+    parts: list = []
+    if necessary:
+        groups["required"] = sorted(set(necessary))
+        parts.append("all of required")
+    for i, gid in enumerate(sorted(fallback.keys()), start=1):
+        groups[f"option_{i}"] = sorted(set(fallback[gid]))
+        parts.append(f"1 of option_{i}")
+    if sufficient:
+        groups["supporting"] = sorted(set(sufficient))
+    return groups, (" and ".join(parts) if parts else None)
+
+
+def _migrate_v23_to_v24():
+    """Upgrade a v23 database to the gavel-rules data model.
+
+    Order is chosen for crash tolerance — a re-run resumes safely at any
+    point because every step is guarded by the physical state it changes:
+
+      A. read the legacy role links into memory (only possible while the
+         junction tables still carry role columns);
+      B. snapshot which trained guardrails are currently drift-free under the
+         OLD fingerprint (stored == recomputed) — after the junctions are
+         rebuilt the old fingerprint can never be computed again;
+      C. rebuild rules / cognitive_elements / rule_setup / rule_sets /
+         test_datasets into their v24 shapes (adds ce_groups/condition/title/
+         role/tags, drops pending_public_id);
+      D. write the converted (ce_groups, condition) + re-rendered predicate
+         onto rules and rule_setup (guarded by condition IS NULL);
+      E. rewrite trained_policy_fingerprint with the v2 fingerprint for the
+         guardrails snapshotted as drift-free in B, so semantically-unchanged
+         guardrails stay 'active' instead of flipping to needs_retraining;
+      F. rebuild the two junction tables as pure membership (dedup by
+         (parent, ce_id): a CE could appear under several roles/groups).
+    """
+    import hashlib as _hashlib
+    from utils.rule_condition import ConditionError, parse as _parse, render_predicate as _render
+
+    print("[init_database] migrating to v24 (gavel-rules groups+condition model)…")
+
+    def _old_link_rows(table: str, key_col: str, parent_join: str) -> dict:
+        """{parent_id: [{ce_name, role, fallback_group}]} from an OLD-shaped
+        junction table; {} when the table is already membership-only."""
+        if "role" not in _table_ddl(table):
+            return {}
+        rows = exec_query(
+            f"""
+            SELECT l.{key_col}, ce.name, l.role, COALESCE(l.fallback_group, 0)
+            FROM {table} l JOIN cognitive_elements ce ON ce.ce_id = l.ce_id
+            {parent_join}
+            """
+        ) or []
+        by_parent: dict = {}
+        for pid, ce_name, role, fb in rows:
+            by_parent.setdefault(pid, []).append(
+                {"ce_name": ce_name, "role": role, "fallback_group": fb}
+            )
+        return by_parent
+
+    def _old_rule_fp(links: list) -> str:
+        """The retired N:|F:|S: fingerprint over ce_ids — inlined so this
+        migration stays runnable after the old junction code is deleted."""
+        necessary, sufficient = [], []
+        fallback: dict = {}
+        for link in links:
+            role = (link.get("role") or "necessary").lower()
+            cid = link["ce_id"]
+            if role == "sufficient":
+                sufficient.append(cid)
+            elif role == "fallback":
+                fallback.setdefault(int(link.get("fallback_group") or 0), []).append(cid)
+            else:
+                necessary.append(cid)
+        fb_norm = sorted(tuple(sorted(g)) for g in fallback.values())
+        return f"N:{tuple(sorted(necessary))}|F:{fb_norm}|S:{tuple(sorted(sufficient))}"
+
+    # --- A. legacy links into memory --------------------------------------
+    rule_links = _old_link_rows("rule_ce_link", "rule_id", "")
+    setup_links = _old_link_rows("setup_ce_link", "setup_id", "")
+
+    # --- B. drift-free snapshot under the OLD fingerprint ------------------
+    in_sync_classifiers: list = []
+    if "role" in _table_ddl("setup_ce_link"):
+        cls_rows = exec_query(
+            "SELECT classifier_id, trained_policy_fingerprint FROM classifiers "
+            "WHERE trained_policy_fingerprint IS NOT NULL AND trained_policy_fingerprint <> ''"
+        ) or []
+        for classifier_id, stored_fp in cls_rows:
+            link_rows = exec_query(
+                """
+                SELECT rs.setup_id, scl.ce_id, scl.role, COALESCE(scl.fallback_group, 0)
+                FROM rule_setup rs
+                JOIN setup_ce_link scl ON rs.setup_id = scl.setup_id
+                WHERE rs.classifier_id = %s AND rs.is_active = TRUE
+                """,
+                (classifier_id,),
+            ) or []
+            by_setup: dict = {}
+            for sid, cid, role, fb in link_rows:
+                by_setup.setdefault(sid, []).append(
+                    {"ce_id": cid, "role": role, "fallback_group": fb}
+                )
+            fps = sorted(_old_rule_fp(links) for links in by_setup.values())
+            canonical = ";".join(fps)
+            current = _hashlib.sha256(canonical.encode("utf-8")).hexdigest() if canonical else ""
+            if current == stored_fp:
+                in_sync_classifiers.append(classifier_id)
+
+    exec_query("PRAGMA foreign_keys = OFF")
+    try:
+        # --- C. parent-table rebuilds --------------------------------------
+        _rebuild_table(
+            "rules",
+            """
+            rule_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            name                TEXT NOT NULL UNIQUE,
+            title               TEXT,
+            predicate           TEXT NOT NULL,
+            description         TEXT,
+            categories          JSONB DEFAULT '[]',
+            tags                JSONB DEFAULT '[]',
+            ce_groups           JSONB DEFAULT '{}',
+            condition           TEXT,
+            embedding           BLOB,
+            type                TEXT,
+            public_id           TEXT,
+            published_at        TIMESTAMPTZ,
+            is_local_draft      BOOLEAN NOT NULL DEFAULT TRUE,
+            is_ready            BOOLEAN NOT NULL DEFAULT TRUE,
+            created_by_username TEXT COLLATE NOCASE,
+            created_at          TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            """,
+            "rule_id, name, predicate, description, categories, embedding, type, "
+            "public_id, published_at, is_local_draft, is_ready, created_by_username, created_at",
+        )
+        _rebuild_table(
+            "cognitive_elements",
+            """
+            ce_id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            name                TEXT NOT NULL UNIQUE,
+            title               TEXT,
+            definition          TEXT,
+            role                TEXT,
+            category            TEXT DEFAULT 'CONTEXT',
+            categories          JSONB DEFAULT '[]',
+            tags                JSONB DEFAULT '[]',
+            note                TEXT,
+            examples            JSONB DEFAULT '[]',
+            embedding           BLOB,
+            type                TEXT,
+            public_id           TEXT,
+            published_at        TIMESTAMPTZ,
+            is_local_draft      BOOLEAN NOT NULL DEFAULT TRUE,
+            is_ready            BOOLEAN NOT NULL DEFAULT TRUE,
+            created_by_username TEXT COLLATE NOCASE,
+            created_at          TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            """,
+            "ce_id, name, definition, category, categories, note, examples, embedding, "
+            "type, public_id, published_at, is_local_draft, is_ready, created_by_username, created_at",
+        )
+        _rebuild_table(
+            "rule_setup",
+            """
+            setup_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            classifier_id INTEGER REFERENCES classifiers(classifier_id) ON DELETE CASCADE,
+            rule_id       INTEGER REFERENCES rules(rule_id) ON DELETE SET NULL,
+            custom_name   TEXT,
+            predicate     TEXT NOT NULL,
+            ce_groups     JSONB DEFAULT '{}',
+            condition     TEXT,
+            is_active     BOOLEAN DEFAULT TRUE
+            """,
+            "setup_id, classifier_id, rule_id, custom_name, predicate, is_active",
+        )
+        _rebuild_table(
+            "rule_sets",
+            """
+            rule_set_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name                TEXT NOT NULL UNIQUE,
+            title               TEXT,
+            description         TEXT,
+            categories          JSONB DEFAULT '[]',
+            public_id           TEXT,
+            published_at        TIMESTAMPTZ,
+            is_local_draft      BOOLEAN NOT NULL DEFAULT TRUE,
+            is_ready            BOOLEAN NOT NULL DEFAULT TRUE,
+            created_by_username TEXT COLLATE NOCASE,
+            created_at          TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            """,
+            "rule_set_id, name, description, categories, public_id, published_at, "
+            "is_local_draft, is_ready, created_by_username, created_at",
+        )
+        _rebuild_table(
+            "test_datasets",
+            """
+            dataset_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id           INTEGER REFERENCES rules(rule_id) ON DELETE CASCADE,
+            user_id           INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+            dataset_type      TEXT NOT NULL,
+            scenario_name     TEXT,
+            config            JSONB,
+            conversations     JSONB,
+            status            TEXT DEFAULT 'pending',
+            generation_log    TEXT,
+            is_default        BOOLEAN NOT NULL DEFAULT FALSE,
+            public_id         TEXT,
+            published_at      TIMESTAMPTZ,
+            created_at        TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            """,
+            "dataset_id, rule_id, user_id, dataset_type, scenario_name, config, "
+            "conversations, status, generation_log, is_default, public_id, published_at, created_at",
+        )
+
+        # --- D. role links -> ce_groups + condition ------------------------
+        def _convert(parent_table: str, key_col: str, by_parent: dict):
+            for pid, links in by_parent.items():
+                groups, condition = _roles_to_groups_condition(links)
+                if not groups:
+                    continue
+                predicate = None
+                if condition:
+                    try:
+                        predicate = _render(_parse(condition), groups)
+                    except (ConditionError, KeyError):
+                        predicate = None
+                if predicate is not None:
+                    exec_query(
+                        f"UPDATE {parent_table} SET ce_groups = %s, condition = %s, "
+                        f"predicate = %s WHERE {key_col} = %s AND condition IS NULL",
+                        (groups, condition, predicate, pid),
+                    )
+                else:
+                    exec_query(
+                        f"UPDATE {parent_table} SET ce_groups = %s, condition = %s "
+                        f"WHERE {key_col} = %s AND condition IS NULL",
+                        (groups, condition, pid),
+                    )
+
+        _convert("rules", "rule_id", rule_links)
+        _convert("rule_setup", "setup_id", setup_links)
+
+        # --- E. rewrite trained fingerprints for drift-free guardrails -----
+        if in_sync_classifiers:
+            from sql_scripts.junction_scripts import compute_rule_fingerprint_v2
+
+            for classifier_id in in_sync_classifiers:
+                setup_rows = exec_query(
+                    """
+                    SELECT ce_groups, condition FROM rule_setup
+                    WHERE classifier_id = %s AND is_active = TRUE
+                    """,
+                    (classifier_id,),
+                ) or []
+                fps = sorted(
+                    compute_rule_fingerprint_v2(groups, condition)
+                    for groups, condition in setup_rows
+                    if groups
+                )
+                canonical = ";".join(fps)
+                new_fp = _hashlib.sha256(canonical.encode("utf-8")).hexdigest() if canonical else ""
+                exec_query(
+                    "UPDATE classifiers SET trained_policy_fingerprint = %s WHERE classifier_id = %s",
+                    (new_fp, classifier_id),
+                )
+
+        # --- F. junction tables -> pure membership -------------------------
+        def _rebuild_membership(table: str, key_col: str, parent_ref: str):
+            tmp = f"_mig_{table}"
+            body = f"""
+                {key_col}  INTEGER NOT NULL REFERENCES {parent_ref} ON DELETE CASCADE,
+                ce_id      INTEGER NOT NULL REFERENCES cognitive_elements(ce_id) ON DELETE CASCADE,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY ({key_col}, ce_id)
+            """
+            if not _table_exists(table):
+                if _table_exists(tmp):
+                    exec_query(f"ALTER TABLE {tmp} RENAME TO {table}")
+                return
+            if "role" not in _table_ddl(table):
+                return  # already membership-only
+            exec_query(f"DROP TABLE IF EXISTS {tmp}")
+            exec_query(f"CREATE TABLE {tmp} ({body})")
+            exec_query(
+                f"INSERT INTO {tmp} ({key_col}, ce_id, created_at) "
+                f"SELECT {key_col}, ce_id, MIN(created_at) FROM {table} "
+                f"WHERE {key_col} IS NOT NULL AND ce_id IS NOT NULL "
+                f"GROUP BY {key_col}, ce_id"
+            )
+            exec_query(f"DROP TABLE {table}")
+            exec_query(f"ALTER TABLE {tmp} RENAME TO {table}")
+
+        _rebuild_membership("rule_ce_link", "rule_id", "rules(rule_id)")
+        _rebuild_membership("setup_ce_link", "setup_id", "rule_setup(setup_id)")
+    finally:
+        exec_query("PRAGMA foreign_keys = ON")
+    print("[init_database] v24 migration done.")
+
+
 def ensure_local_user():
     """Guarantee the single local user row exists.
 
@@ -367,6 +717,9 @@ def init_database():
         rebuilt = False
         if _needs_v23_rebuild():
             _migrate_pre_v23()
+            rebuilt = True
+        if _needs_v24_rebuild():
+            _migrate_v23_to_v24()
             rebuilt = True
         if not rebuilt and stored == SCHEMA_VERSION and _critical_tables_present():
             # Still (cheaply) re-assert the local user on the fast path — it is
@@ -412,22 +765,25 @@ def init_database():
         );
     """)
 
-    # 3. GLOBAL COGNITIVE ELEMENTS (Public library, HF-synced).
-    # embedding: float32 BLOB (MiniLM, 384 dims) — consumed by
-    # services/library_search.py. Publish-state columns:
-    #   public_id         — HF registry identity (partial UNIQUE below)
-    #   is_local_draft    — TRUE = unpublished draft
-    #   pending_public_id — crash-recovery "intent stamp" set right before an
-    #                       HF push, cleared on success/failure
-    #   is_ready          — FALSE while an AI pipeline is generating; boot
-    #                       recovery deletes FALSE rows
+    # 3. GLOBAL COGNITIVE ELEMENTS (Public library, synced from the
+    # gavel-rules registry). embedding: float32 BLOB (MiniLM, 384 dims) —
+    # consumed by services/library_search.py. Library-state columns:
+    #   public_id      — permanent registry identity (partial UNIQUE below)
+    #   is_local_draft — TRUE = the user's own unsynced draft
+    #   is_ready       — FALSE while an AI pipeline is generating; boot
+    #                    recovery deletes FALSE rows
+    #   title/role/tags — v2 discovery metadata (role is the closed enum
+    #                    directive_to_user/llm_task/llm_behavior/topic)
     exec_query("""
         CREATE TABLE IF NOT EXISTS cognitive_elements (
             ce_id               INTEGER PRIMARY KEY AUTOINCREMENT,
             name                TEXT NOT NULL UNIQUE,
+            title               TEXT,
             definition          TEXT,
+            role                TEXT,
             category            TEXT DEFAULT 'CONTEXT',
             categories          JSONB DEFAULT '[]',
+            tags                JSONB DEFAULT '[]',
             note                TEXT,
             examples            JSONB DEFAULT '[]',
             embedding           BLOB,
@@ -435,7 +791,6 @@ def init_database():
             public_id           TEXT,
             published_at        TIMESTAMPTZ,
             is_local_draft      BOOLEAN NOT NULL DEFAULT TRUE,
-            pending_public_id   TEXT,
             is_ready            BOOLEAN NOT NULL DEFAULT TRUE,
             created_by_username TEXT COLLATE NOCASE,
             created_at          TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
@@ -476,21 +831,29 @@ def init_database():
         );
     """)
 
-    # 4. GLOBAL RULES (Public library, HF-synced). Same publish-state column
-    # set as cognitive_elements.
+    # 4. GLOBAL RULES (Public library, synced from the gavel-rules registry).
+    # Same library-state column set as cognitive_elements. The rule's LOGIC is
+    # (ce_groups, condition): ce_groups is a JSON object mapping group name ->
+    # [CE names]; condition is the v2 grammar string over those group names
+    # (utils/rule_condition.py). predicate is a DERIVED human-readable
+    # rendering (render_predicate) kept for FTS/search/display — never the
+    # source of truth.
     exec_query("""
         CREATE TABLE IF NOT EXISTS rules (
             rule_id             INTEGER PRIMARY KEY AUTOINCREMENT,
             name                TEXT NOT NULL UNIQUE,
+            title               TEXT,
             predicate           TEXT NOT NULL,
             description         TEXT,
             categories          JSONB DEFAULT '[]',
+            tags                JSONB DEFAULT '[]',
+            ce_groups           JSONB DEFAULT '{}',
+            condition           TEXT,
             embedding           BLOB,
             type                TEXT,
             public_id           TEXT,
             published_at        TIMESTAMPTZ,
             is_local_draft      BOOLEAN NOT NULL DEFAULT TRUE,
-            pending_public_id   TEXT,
             is_ready            BOOLEAN NOT NULL DEFAULT TRUE,
             created_by_username TEXT COLLATE NOCASE,
             created_at          TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
@@ -599,7 +962,9 @@ def init_database():
     exec_query("CREATE INDEX IF NOT EXISTS classifiers_user_idx ON classifiers (user_id);")
     exec_query("CREATE INDEX IF NOT EXISTS classifiers_folder_idx ON classifiers (folder_id);")
 
-    # 7. RULE SETUP (Private per-guardrail copy of a rule).
+    # 7. RULE SETUP (Private per-guardrail copy of a rule). Carries its own
+    # (ce_groups, condition) copy so per-guardrail edits never mutate the
+    # global rule; predicate is the derived rendering, as on rules.
     exec_query("""
         CREATE TABLE IF NOT EXISTS rule_setup (
             setup_id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -607,40 +972,36 @@ def init_database():
             rule_id       INTEGER REFERENCES rules(rule_id) ON DELETE SET NULL,
             custom_name   TEXT,
             predicate     TEXT NOT NULL,
+            ce_groups     JSONB DEFAULT '{}',
+            condition     TEXT,
             is_active     BOOLEAN DEFAULT TRUE
         );
     """)
 
-    # 8. JUNCTIONS: role-aware CE wiring. role ∈ {necessary, fallback,
-    # sufficient}; fallback_group groups OR-sets (0 for non-fallback roles).
-    # NOT NULL is explicit on the key columns: in Postgres a PRIMARY KEY
-    # implied it, but SQLite's rowid tables (legacy quirk) accept NULLs in PK
-    # columns — and NULLs also bypass PK uniqueness AND FK enforcement.
+    # 8. JUNCTIONS: pure CE membership (the union of a rule's/setup's group
+    # members) for FK cascades and role-agnostic queries — training labels,
+    # counts, dependency lookups, lazy dataset walkers. The logic itself
+    # lives in ce_groups/condition on the parent row. NOT NULL is explicit on
+    # the key columns: SQLite's rowid tables (legacy quirk) accept NULLs in
+    # PK columns — and NULLs also bypass PK uniqueness AND FK enforcement.
     exec_query("""
         CREATE TABLE IF NOT EXISTS setup_ce_link (
-            setup_id       INTEGER NOT NULL REFERENCES rule_setup(setup_id) ON DELETE CASCADE,
-            ce_id          INTEGER NOT NULL REFERENCES cognitive_elements(ce_id) ON DELETE CASCADE,
-            role           TEXT NOT NULL DEFAULT 'necessary'
-                           CHECK (role IN ('necessary','fallback','sufficient')),
-            fallback_group INTEGER NOT NULL DEFAULT 0,
-            created_at     TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (setup_id, ce_id, role, fallback_group)
+            setup_id   INTEGER NOT NULL REFERENCES rule_setup(setup_id) ON DELETE CASCADE,
+            ce_id      INTEGER NOT NULL REFERENCES cognitive_elements(ce_id) ON DELETE CASCADE,
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (setup_id, ce_id)
         );
     """)
     exec_query("""
         CREATE TABLE IF NOT EXISTS rule_ce_link (
-            rule_id        INTEGER NOT NULL REFERENCES rules(rule_id) ON DELETE CASCADE,
-            ce_id          INTEGER NOT NULL REFERENCES cognitive_elements(ce_id) ON DELETE CASCADE,
-            role           TEXT NOT NULL DEFAULT 'necessary'
-                           CHECK (role IN ('necessary','fallback','sufficient')),
-            fallback_group INTEGER NOT NULL DEFAULT 0,
-            created_at     TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (rule_id, ce_id, role, fallback_group)
+            rule_id    INTEGER NOT NULL REFERENCES rules(rule_id) ON DELETE CASCADE,
+            ce_id      INTEGER NOT NULL REFERENCES cognitive_elements(ce_id) ON DELETE CASCADE,
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (rule_id, ce_id)
         );
     """)
     exec_query("CREATE INDEX IF NOT EXISTS idx_rule_ce_link_rule ON rule_ce_link(rule_id);")
     exec_query("CREATE INDEX IF NOT EXISTS idx_rule_ce_link_ce ON rule_ce_link(ce_id);")
-    exec_query("CREATE INDEX IF NOT EXISTS idx_rule_ce_link_role ON rule_ce_link(role);")
 
     # 9. BOOKMARKS (local; drafts are bookmarkable).
     exec_query("""
@@ -662,8 +1023,8 @@ def init_database():
     """)
     exec_query("CREATE INDEX IF NOT EXISTS ce_bookmarks_user_idx ON ce_bookmarks (user_id, created_at DESC);")
 
-    # 10. SYNC STATE — key/value store for the HF registry sync (last manifest
-    # hash etc.).
+    # 10. SYNC STATE — key/value store for the gavel-rules registry sync
+    # (last synced commit SHA, per-record content hashes).
     exec_query("""
         CREATE TABLE IF NOT EXISTS sync_state (
             key        TEXT PRIMARY KEY,
@@ -740,7 +1101,6 @@ def init_database():
             is_default        BOOLEAN NOT NULL DEFAULT FALSE,
             public_id         TEXT,
             published_at      TIMESTAMPTZ,
-            pending_public_id TEXT,
             created_at        TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
     """)
@@ -791,12 +1151,12 @@ def init_database():
         CREATE TABLE IF NOT EXISTS rule_sets (
             rule_set_id         INTEGER PRIMARY KEY AUTOINCREMENT,
             name                TEXT NOT NULL UNIQUE,
+            title               TEXT,
             description         TEXT,
             categories          JSONB DEFAULT '[]',
             public_id           TEXT,
             published_at        TIMESTAMPTZ,
             is_local_draft      BOOLEAN NOT NULL DEFAULT TRUE,
-            pending_public_id   TEXT,
             is_ready            BOOLEAN NOT NULL DEFAULT TRUE,
             created_by_username TEXT COLLATE NOCASE,
             created_at          TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP

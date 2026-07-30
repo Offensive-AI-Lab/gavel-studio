@@ -401,6 +401,33 @@ class TestGetPublicRecord:
 
 
 # ---------------------------------------------------------------------------
+# Publish machinery is GONE — the library is read-only from the studio side
+# (contributions go by gavel-rules pull request). Pin the removal.
+# ---------------------------------------------------------------------------
+
+
+class TestPublishEndpointsRemoved:
+    @pytest.mark.parametrize("path", [
+        "/library/publish/rule",
+        "/library/publish/ce",
+        "/library/publish/rule-set",
+    ])
+    def test_publish_routes_are_gone(self, client, auth_headers, path):
+        res = client.post(path, json={"record_id": 1}, headers=auth_headers)
+        assert res.status_code == 404
+
+    def test_adopt_public_route_is_gone(self, client, auth_headers):
+        res = client.post("/library/ce/1/adopt-public", json={}, headers=auth_headers)
+        assert res.status_code == 404
+
+    def test_rename_endpoints_are_gone(self, client, auth_headers):
+        for path in ("/ai/rename-ce", "/ai/rename-rule"):
+            res = client.post(path, json={"old_name": "a", "new_name": "b"},
+                              headers=auth_headers)
+            assert res.status_code == 404, path
+
+
+# ---------------------------------------------------------------------------
 # /library/categories (no auth, simple read)
 # ---------------------------------------------------------------------------
 

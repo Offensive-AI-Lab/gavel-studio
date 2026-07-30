@@ -1,9 +1,8 @@
 # evaluation/ruleset_builder.py
-# Builds the unified ruleset dict from the DB (rule_setup + setup_ce_link tables).
-# Maps the platform's role names onto the reference evaluation format:
-#   necessary  → all_required
-#   fallback   → any_of (grouped by fallback_group)
-#   sufficient → supporting
+# Builds the unified ruleset dict from the DB (rule_setup.ce_groups/condition).
+# A rule's logic is named CE groups + a v2-grammar condition over the group
+# names ("all of hook and 1 of action" — utils/rule_condition.py). Member CE
+# names are sanitized to match the trained guardrail's labels-dict keys.
 import logging
 import re
 from typing import Dict, Optional
@@ -35,13 +34,18 @@ def build_unified_ruleset(classifier_id: int) -> Dict[str, dict]:
     Returns:
         {
             "use_case_name": {
-                "all_required": ["CE_Name_1"],
-                "any_of": [["CE_A", "CE_B"], ["CE_C"]],
-                "supporting": ["CE_D"],
+                "groups": {"hook": ["CE_A"], "action": ["CE_B", "CE_C"]},
+                "condition": "all of hook and 1 of action",
                 "enabled": True
             },
             ...
         }
+
+    Member names inside `groups` are sanitized to the trained labels-dict
+    vocabulary; group names pass through untouched (they only ever meet the
+    condition parser, never the model). Setups without logic (empty groups or
+    no condition — e.g. a migrated supporting-only rule) are omitted: they
+    have no firing semantics.
 
     Selection logic:
       * If the guardrail has a frozen training snapshot (trained_rule_setup_ids
@@ -63,23 +67,19 @@ def build_unified_ruleset(classifier_id: int) -> Dict[str, dict]:
     trained_ids = (snapshot[0].get("trained_rule_setup_ids") if snapshot else None) or []
 
     # Single SELECT shared between both branches — only the WHERE clause
-    # differs. Inlined as a format-string with a placeholder predicate to
-    # avoid duplicating 7 lines of column projections.
+    # differs. The logic lives on the rule_setup row itself now; the
+    # setup_ce_link junction is membership-only and not needed here.
     base_query = """
         SELECT
             rs.setup_id,
             COALESCE(rs.custom_name, r.name) AS rule_name,
             rs.is_active,
-            rs.predicate,
-            ce.name AS ce_name,
-            scl.role,
-            scl.fallback_group
+            rs.ce_groups,
+            rs.condition
         FROM rule_setup rs
         LEFT JOIN rules r ON rs.rule_id = r.rule_id
-        JOIN setup_ce_link scl ON rs.setup_id = scl.setup_id
-        JOIN cognitive_elements ce ON scl.ce_id = ce.ce_id
         WHERE {where}
-        ORDER BY rs.setup_id, scl.role, scl.fallback_group
+        ORDER BY rs.setup_id
     """
 
     rows: list = []
@@ -117,50 +117,27 @@ def build_unified_ruleset(classifier_id: int) -> Dict[str, dict]:
             (classifier_id,),
         ) or []
 
-    # Group by rule (setup_id)
-    rules: Dict[int, dict] = {}
-    for row in rows:
-        sid = row["setup_id"]
-        if sid not in rules:
-            rules[sid] = {
-                "name": row["rule_name"],
-                "enabled": bool(row["is_active"]),
-                "all_required": [],
-                "any_of_groups": {},  # fallback_group -> [ce_names]
-                "supporting": [],
-            }
-
-        # Sanitize to match the trained guardrail's labels-dict keys (see
-        # _sanitize_ce_name). No-op for names that are already underscore/word
-        # safe, so existing rulesets are unaffected.
-        ce_name = _sanitize_ce_name(row["ce_name"])
-        role = (row["role"] or "necessary").lower()
-        fb_group = row["fallback_group"] or 0
-
-        if role == "necessary":
-            rules[sid]["all_required"].append(ce_name)
-        elif role == "fallback":
-            rules[sid]["any_of_groups"].setdefault(fb_group, []).append(ce_name)
-        elif role == "sufficient":
-            rules[sid]["supporting"].append(ce_name)
-        else:
-            # Unknown role — treat as necessary
-            rules[sid]["all_required"].append(ce_name)
-
-    # Build final unified dict keyed by rule name
+    # Build the unified dict keyed by rule name. Sanitize member names to
+    # the trained labels-dict vocabulary (see _sanitize_ce_name); no-op for
+    # names that are already underscore/word safe.
     unified = {}
-    for sid, rule in rules.items():
-        name = rule["name"] or f"rule_{sid}"
-        # Convert any_of_groups dict to sorted list of lists
-        any_of = [
-            group for _, group in sorted(rule["any_of_groups"].items())
-        ] if rule["any_of_groups"] else []
-
+    for row in rows:
+        groups = row.get("ce_groups") or {}
+        condition = (row.get("condition") or "").strip()
+        if not groups or not condition:
+            logger.debug(
+                "build_unified_ruleset: setup %s has no logic (groups=%s, "
+                "condition=%r) — omitted", row["setup_id"], bool(groups), condition,
+            )
+            continue
+        name = row["rule_name"] or f"rule_{row['setup_id']}"
         unified[name] = {
-            "all_required": rule["all_required"],
-            "any_of": any_of,
-            "supporting": rule["supporting"],
-            "enabled": rule["enabled"],
+            "groups": {
+                gname: [_sanitize_ce_name(m) for m in (members or [])]
+                for gname, members in groups.items()
+            },
+            "condition": condition,
+            "enabled": bool(row["is_active"]),
         }
 
     logger.info(f"Built unified ruleset for classifier {classifier_id}: {len(unified)} rules")

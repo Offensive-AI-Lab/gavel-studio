@@ -176,23 +176,25 @@ class TestRuleSetupNotFound:
 
     def test_save_edited_nonexistent_setup_404(self, client, test_user, auth_headers):
         """save_edited_rule does an explicit existence check and raises a
-        clean 404 when the setup is missing — deterministic."""
+        clean 404 when the setup is missing — deterministic. The v2 body is
+        {groups: {name: [ce_id]}, condition}; user_id is optional (defaults
+        to the fixed local user)."""
         res = client.post("/rules/setup/99999999/save-edited", json={
-            "user_id": test_user["user_id"],
-            "ce_links": [],
+            "groups": {"required": []},
+            "condition": "all of required",
         })
         assert res.status_code == 404
 
-    def test_save_edited_missing_user_id_422(self, client):
-        """user_id is required by SaveEditedRequest → 422 on omission."""
+    def test_save_edited_missing_groups_422(self, client, test_user):
+        """groups + condition are required by SaveEditedRequest → 422."""
         res = client.post("/rules/setup/99999999/save-edited", json={
-            "ce_links": [],
+            "user_id": test_user["user_id"],
         })
         assert res.status_code == 422
 
-    def test_save_edited_missing_ce_links_422(self, client, test_user):
+    def test_save_edited_missing_condition_422(self, client, test_user):
         res = client.post("/rules/setup/99999999/save-edited", json={
-            "user_id": test_user["user_id"],
+            "groups": {"required": [1]},
         })
         assert res.status_code == 422
 
@@ -234,35 +236,35 @@ class TestRuleDetailAndPredicate:
         res = client.get("/rules/99999999/detail")
         assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
-    def test_public_create_missing_predicate_422(self, client, test_user, auth_headers):
-        """CreatePublicRuleRequest requires both name and predicate."""
+    def test_public_create_without_logic_rejected(self, client, test_user, auth_headers):
+        """A create with no groups/condition (and no legacy ce_names) has no
+        logic to store — the upsert refuses it (409 via the route's
+        ValueError mapping; 400 acceptable if validation moves earlier)."""
         res = client.post("/rules/public/create", json={
-            "name": f"no_pred_rule_{_suffix()}",
+            "name": f"no_logic_rule_{_suffix()}",
             "user_id": test_user["user_id"],
         }, headers=auth_headers)
-        assert res.status_code == 422
+        assert res.status_code in (400, 409)
 
     def test_public_create_without_auth_is_allowed(self, client, test_user):
         res = client.post("/rules/public/create", json={
             "name": f"unauth_rule_{_suffix()}",
-            "predicate": "A AND B",
-            "necessary": ["A", "B"],
+            "groups": {"required": [f"unauth_ce_a_{_suffix()}", f"unauth_ce_b_{_suffix()}"]},
+            "condition": "all of required",
             "user_id": test_user["user_id"],
         })
         assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
-    def test_public_create_empty_predicate_rejected(self, client, test_user, auth_headers):
-        """An all-whitespace predicate is scrubbed to empty by the
-        clean_text field validator, which raises 400 ('predicate cannot
-        be empty'). Pydantic surfaces validator HTTPExceptions as 400 or
-        422 depending on wrapping."""
+    def test_public_create_invalid_condition_rejected(self, client, test_user, auth_headers):
+        """A condition referencing an undefined group fails logic validation
+        inside the upsert -> rejected, never stored."""
         res = client.post("/rules/public/create", json={
-            "name": f"blank_pred_rule_{_suffix()}",
-            "predicate": "   ",
-            "necessary": ["A", "B"],
+            "name": f"bad_cond_rule_{_suffix()}",
+            "groups": {"required": [f"badcond_ce_{_suffix()}"]},
+            "condition": "all of ghost_group",
             "user_id": test_user["user_id"],
         }, headers=auth_headers)
-        assert res.status_code in (400, 422)
+        assert res.status_code in (400, 409, 422)
 
 
 # NOTE — TestRegisterEdges / TestLoginEdges were removed when login was removed.

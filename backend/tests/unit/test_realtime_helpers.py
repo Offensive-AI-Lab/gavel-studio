@@ -550,3 +550,152 @@ class TestLoadSampleGroup:
         _patch_normalize(monkeypatch)
         _make_eqd(monkeypatch, lambda sql, params: [{"conversations": None}])
         assert rt._load_sample_group("testds:1") == []
+
+
+# ===========================================================================
+# rule_triggers — the v2 per-rule verdict shape the RealtimeViewer consumes
+# ===========================================================================
+
+class TestScoreSpanRuleTriggers:
+    """_score_span emits one entry per enabled rule:
+    {rule_name, fired, condition, groups: {gname: {members, hits, quantifier,
+    satisfied}}, groups_unmet}. Torch is required (compute_triggers), but no
+    DB, no LLM — the scoring context is built by hand."""
+
+    def _ctx(self, unified_ruleset):
+        torch = pytest.importorskip("torch")
+        import classifier_engine.reference  # noqa: F401 — gavel.* alias
+        from gavel.evaluation.metrics import build_ruleset_logic
+
+        labels = {"ce_a": 0, "ce_b": 1, "ce_c": 2}
+        return {
+            "idx_to_label": {v: k for k, v in labels.items()},
+            "num_topics": len(labels),
+            "thr_vec": torch.tensor([0.5, 0.5, 0.5]),
+            "patience_rate": 1,
+            "unified_ruleset": unified_ruleset,
+            "ruleset_logic": build_ruleset_logic(unified_ruleset, labels),
+        }
+
+    def _windows(self, fire_idxs):
+        # One window; ±5 logits — sigmoid 0.993 / 0.007 around the 0.5 thr.
+        logits = [-5.0, -5.0, -5.0]
+        for i in fire_idxs:
+            logits[i] = 5.0
+        return [{"logits": list(logits)}]
+
+    def test_fired_rule_reports_satisfied_groups(self):
+        ruleset = {"r": {
+            "enabled": True,
+            "groups": {"req": ["ce_a"], "opt": ["ce_b", "ce_c"]},
+            "condition": "all of req and 1 of opt",
+        }}
+        out = rt._score_span(self._ctx(ruleset), self._windows([0, 1]), [])
+        assert out["triggered_ces"] == ["ce_a", "ce_b"]
+        (rtg,) = out["rule_triggers"]
+        assert rtg["rule_name"] == "r"
+        assert rtg["fired"] is True
+        assert rtg["condition"] == "all of req and 1 of opt"
+        assert rtg["groups_unmet"] == []
+        assert rtg["groups"]["req"] == {
+            "members": ["ce_a"], "hits": ["ce_a"],
+            "quantifier": "all", "satisfied": True,
+        }
+        assert rtg["groups"]["opt"] == {
+            "members": ["ce_b", "ce_c"], "hits": ["ce_b"],
+            "quantifier": 1, "satisfied": True,
+        }
+
+    def test_unfired_rule_reports_unmet_groups(self):
+        ruleset = {"r": {
+            "enabled": True,
+            "groups": {"req": ["ce_a"], "opt": ["ce_b", "ce_c"]},
+            "condition": "all of req and 1 of opt",
+        }}
+        out = rt._score_span(self._ctx(ruleset), self._windows([0]), [])
+        (rtg,) = out["rule_triggers"]
+        assert rtg["fired"] is False
+        assert rtg["groups_unmet"] == ["opt"]
+        assert rtg["groups"]["opt"]["hits"] == []
+        assert rtg["groups"]["opt"]["satisfied"] is False
+
+    def test_unreferenced_supporting_group_is_always_satisfied(self):
+        ruleset = {"r": {
+            "enabled": True,
+            "groups": {"req": ["ce_a"], "supporting": ["ce_c"]},
+            "condition": "all of req",
+        }}
+        out = rt._score_span(self._ctx(ruleset), self._windows([0]), [])
+        (rtg,) = out["rule_triggers"]
+        assert rtg["fired"] is True
+        sup = rtg["groups"]["supporting"]
+        assert sup["quantifier"] is None      # not part of the condition
+        assert sup["satisfied"] is True       # can never block the rule
+        assert rtg["groups_unmet"] == []
+
+    def test_disabled_rules_are_omitted(self):
+        ruleset = {
+            "on": {"enabled": True, "groups": {"g": ["ce_a"]}, "condition": "all of g"},
+            "off": {"enabled": False, "groups": {"g": ["ce_b"]}, "condition": "all of g"},
+        }
+        out = rt._score_span(self._ctx(ruleset), self._windows([0, 1]), [])
+        assert [r["rule_name"] for r in out["rule_triggers"]] == ["on"]
+
+
+class TestAggregateRuleTriggers:
+    """_aggregate_rule_triggers — conversation-level rollup of per-turn
+    verdicts (pure function, no torch)."""
+
+    def _entry(self, name, fired, hits, satisfied, quantifier="all",
+               members=("ce_a", "ce_b")):
+        return {
+            "rule_name": name,
+            "fired": fired,
+            "condition": "all of g",
+            "groups": {"g": {"members": list(members), "hits": list(hits),
+                             "quantifier": quantifier, "satisfied": satisfied}},
+            "groups_unmet": [] if satisfied else ["g"],
+        }
+
+    def test_fired_on_any_turn_wins(self):
+        turns = [
+            [self._entry("r", False, [], False)],
+            [self._entry("r", True, ["ce_a", "ce_b"], True)],
+        ]
+        (agg,) = rt._aggregate_rule_triggers(turns)
+        assert agg["fired"] is True
+        assert agg["groups"]["g"]["hits"] == ["ce_a", "ce_b"]
+        assert agg["groups_unmet"] == []
+
+    def test_unfired_turns_merge_hits_across_turns(self):
+        # Neither turn fired, but different members hit on different turns —
+        # the rollup unions the hits for the "how close" hint.
+        turns = [
+            [self._entry("r", False, ["ce_a"], False)],
+            [self._entry("r", False, ["ce_b"], False)],
+        ]
+        (agg,) = rt._aggregate_rule_triggers(turns)
+        assert agg["fired"] is False
+        assert agg["groups"]["g"]["hits"] == ["ce_a", "ce_b"]
+        assert agg["groups_unmet"] == ["g"]
+
+    def test_satisfied_merge_clears_groups_unmet(self):
+        turns = [
+            [self._entry("r", False, [], False)],
+            [self._entry("r", False, ["ce_a", "ce_b"], True)],
+        ]
+        (agg,) = rt._aggregate_rule_triggers(turns)
+        assert agg["groups"]["g"]["satisfied"] is True
+        assert agg["groups_unmet"] == []
+
+    def test_order_is_first_seen(self):
+        turns = [
+            [self._entry("r1", False, [], False), self._entry("r2", True, ["ce_a"], True)],
+            [self._entry("r3", False, [], False)],
+        ]
+        agg = rt._aggregate_rule_triggers(turns)
+        assert [a["rule_name"] for a in agg] == ["r1", "r2", "r3"]
+
+    def test_empty_input(self):
+        assert rt._aggregate_rule_triggers([]) == []
+        assert rt._aggregate_rule_triggers([None, []]) == []

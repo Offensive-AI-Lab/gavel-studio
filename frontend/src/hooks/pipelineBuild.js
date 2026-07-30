@@ -39,7 +39,7 @@ export function buildRuleInBackground(tray, { run, userId }) {
         kind: 'rule',
         title: `Building “${ruleName}”`,
         runningSubtitle: 'Starting…',
-        successSubtitle: 'Rule ready — publish it from Drafts.',
+        successSubtitle: 'Rule ready — find it in your Drafts.',
         job: async (update) => {
             for (let i = 0; i < newCes.length; i += 1) {
                 const ce = newCes[i];
@@ -88,7 +88,7 @@ export function buildCeInBackground(tray, { run, userId }) {
         kind: 'ce',
         title: `Building “${ceData.name}”`,
         runningSubtitle: 'Starting…',
-        successSubtitle: 'Cognitive element ready — publish it from the library.',
+        successSubtitle: 'Cognitive element ready — find it in your library.',
         job: async (update) => {
             update({ subtitle: 'Generating training data…' });
             const res = await generateCeTraining({

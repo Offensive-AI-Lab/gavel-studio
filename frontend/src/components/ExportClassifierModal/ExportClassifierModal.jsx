@@ -174,15 +174,16 @@ const ExportClassifierModal = ({ isOpen, classifierId, classifierName, onClose }
 
         if (view === 'ready' && preflight) {
             const avail = preflight.tiers_available || [];
-            const willPublish = (preflight.unpublished && preflight.unpublished.length) || 0;
+            const unpublished = (preflight.unpublished && preflight.unpublished.length) || 0;
             return (
                 <div>
-                    {willPublish > 0 && (
+                    {unpublished > 0 && (
                         <div style={styles.noteBox}>
                             <FiAlertTriangle style={{ flexShrink: 0, marginTop: 2 }} />
                             <span>
-                                Exporting will first <strong>publish {willPublish} draft rule{willPublish === 1 ? '' : 's'}</strong> (and
-                                their cognitive elements) to the public library — this can't be undone.
+                                {unpublished} rule{unpublished === 1 ? ' is' : 's are'} not in the public library —
+                                bundles can only carry library rules. Contribute drafts via a gavel-rules pull
+                                request first.
                             </span>
                         </div>
                     )}

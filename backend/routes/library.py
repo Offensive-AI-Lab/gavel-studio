@@ -32,11 +32,15 @@ class SearchResult(BaseModel):
     name: str
     content: Optional[str]
     ces: List[str] = []
-    # Role-aware CE list for rule results. Each entry is
-    # {ce_id, name, role, fallback_group}. Empty for CE results.
+    # Group-aware CE list for rule results. Each entry is
+    # {ce_id, name, groups: [group_name, ...]} — the logic group(s) the CE
+    # belongs to in the rule's ce_groups. Empty for CE results.
     # The bare `ces` list above stays for back-compat — RuleCard
     # prefers active_ces when present and falls back to ces otherwise.
     active_ces: List[dict] = []
+    # The rule's v2 firing condition (grammar over its group names);
+    # None for CE results.
+    condition: Optional[str] = None
     categories: List[str] = []
     type: Optional[str] = None
     hybrid_score: float
@@ -78,22 +82,34 @@ def _hydrate_results(paged_candidates: List[dict]) -> List[SearchResult]:
         c_rows = execute_query_dict("SELECT category_id, name FROM categories WHERE category_id = ANY(%s)", (list(all_cat_ids),)) or []
         cat_map = {r["category_id"]: r["name"] for r in c_rows}
         
-    # 3. Batch Fetch CEs for Rules (Linked entities). Pulls role +
-    # fallback_group so the frontend RuleCard can show NECESSARY /
-    # SUFFICIENT / FALLBACK badges instead of defaulting everything to
-    # NECESSARY. We still expose the flat name list as `ces` for any
-    # caller that only needs names; new callers should use active_ces.
+    # 3. Batch Fetch CEs + logic for Rules. Each active_ces entry carries
+    # the logic group name(s) the CE belongs to (from rules.ce_groups) so
+    # the frontend RuleCard can badge members by group; the rule's firing
+    # condition rides along per row. We still expose the flat name list as
+    # `ces` for any caller that only needs names.
     rule_ce_map = {}          # rule_id -> [name, ...]
-    rule_active_ces_map = {}  # rule_id -> [{ce_id, name, role, fallback_group}, ...]
+    rule_active_ces_map = {}  # rule_id -> [{ce_id, name, groups: [gname]}, ...]
+    rule_condition_map = {}   # rule_id -> condition string
     if rule_ids:
+        logic_rows = execute_query_dict(
+            "SELECT rule_id, ce_groups, condition FROM rules WHERE rule_id = ANY(%s)",
+            (rule_ids,),
+        ) or []
+        groups_of_by_rule = {}  # rule_id -> {ce_name: [gname, ...]}
+        for r in logic_rows:
+            rule_condition_map[r["rule_id"]] = r.get("condition")
+            groups_of: dict = {}
+            for gname, members in (r.get("ce_groups") or {}).items():
+                for member in members or []:
+                    groups_of.setdefault(member, []).append(gname)
+            groups_of_by_rule[r["rule_id"]] = groups_of
+
         ce_sql = """
-        SELECT rcl.rule_id, rcl.ce_id, ce.name,
-               COALESCE(rcl.role, 'necessary')      AS role,
-               COALESCE(rcl.fallback_group, 0)      AS fallback_group
+        SELECT rcl.rule_id, rcl.ce_id, ce.name
         FROM rule_ce_link rcl
         JOIN cognitive_elements ce ON rcl.ce_id = ce.ce_id
         WHERE rcl.rule_id = ANY(%s)
-        ORDER BY rcl.rule_id, rcl.role, rcl.fallback_group, ce.name
+        ORDER BY rcl.rule_id, ce.name
         """
         ce_rows = execute_query_dict(ce_sql, (rule_ids,)) or []
         from collections import defaultdict
@@ -104,8 +120,7 @@ def _hydrate_results(paged_candidates: List[dict]) -> List[SearchResult]:
             active_map[r["rule_id"]].append({
                 "ce_id": r["ce_id"],
                 "name": r["name"],
-                "role": r["role"],
-                "fallback_group": r["fallback_group"],
+                "groups": groups_of_by_rule.get(r["rule_id"], {}).get(r["name"], []),
             })
         rule_ce_map = name_map
         rule_active_ces_map = active_map
@@ -148,6 +163,7 @@ def _hydrate_results(paged_candidates: List[dict]) -> List[SearchResult]:
             content=cand["content"],
             ces=c_ces,
             active_ces=c_active_ces,
+            condition=rule_condition_map.get(cand["id"]) if cand["asset_type"] == "rule" else None,
             categories=c_names,
             type=cand["type"],
             hybrid_score=cand.get("final_score", 0),
@@ -193,7 +209,7 @@ def _run_hybrid_search(
         msg = str(e)
         print(f"Hybrid Search Error: {msg}")
         if "no such table" in msg:
-            raise HTTPException(status_code=500, detail="Database schema outdated. Restart the backend (init_database rebuilds the schema) or run 'reseed_db_from_registry.py'.")
+            raise HTTPException(status_code=500, detail="Database schema outdated. Restart the backend (init_database rebuilds the schema), or delete backend/db/gavel.sqlite3 for a clean re-sync from the registry.")
         raise HTTPException(status_code=500, detail=msg)
 
 
@@ -475,29 +491,30 @@ class SyncResponse(BaseModel):
     changed: bool
     ces_added: int = 0
     rules_added: int = 0
+    rule_sets_added: int = 0
     # Records already present locally but re-pulled because the registry's
-    # published_at was newer (an upstream edit kept the same public_id).
+    # content_hash changed (an upstream edit kept the same public_id).
     ces_refreshed: int = 0
     rules_refreshed: int = 0
+    rule_sets_refreshed: int = 0
     categories_synced: int = 0
-    neutral_synced: int = 0
     skipped_records: List[str] = []
     errors: List[str] = []
 
 
 @router.get("/sync", response_model=SyncResponse)
 async def sync_with_registry(
-    force: bool = Query(False, description="If true, ignore the cached manifest hash and re-fetch every missing record."),
+    force: bool = Query(False, description="If true, ignore the cached HEAD SHA and re-check every record."),
     _: int = Depends(get_current_user),
 ):
-    """Pull new records from the public HF registry into the local DB.
+    """Pull new records from the gavel-rules registry into the local DB.
 
-    Idempotent and safe to call on every login. Cheap when the registry
-    has not changed since the last sync (a single small fetch + a hash
-    compare); fetches only the deltas otherwise. See
-    services/hf_sync.py for the algorithm.
+    Idempotent and safe to call at any time. Cheap when the registry has
+    not changed since the last sync (a single HEAD-SHA probe); fetches
+    only the deltas otherwise. See services/library_sync.py for the
+    algorithm.
     """
-    from services.hf_sync import sync_library
+    from services.library_sync import sync_library
 
     try:
         result = sync_library(force=force)
@@ -510,12 +527,12 @@ async def sync_with_registry(
 def check_updates(_: int = Depends(get_current_user)):
     """Cheap "is the local cache out of date?" probe.
 
-    Compares the cached `last_manifest_hash` against HF's current
-    manifest hash without pulling any records. Retained as a manual
-    fallback; the live UI now learns about updates via the push stream
-    below (`/library/events`) instead of a timer.
+    Compares the cached `last_synced_sha` against the gavel-rules repo's
+    current HEAD commit SHA without pulling any records. Retained as a
+    manual fallback; the live UI now learns about updates via the push
+    stream below (`/library/events`) instead of a timer.
     """
-    from services.hf_sync import check_for_updates
+    from services.library_sync import check_for_updates
     return check_for_updates()
 
 
@@ -531,26 +548,26 @@ def _sse_frame(obj: dict) -> str:
 @router.get("/events")
 async def library_events_stream(request: Request):
     """Server-Sent-Events stream that pushes an `update_available` / `synced`
-    signal the instant the central server's version_update lands — so the
-    sidebar can surface a "click to sync" badge with zero polling (this mirrors
-    the central -> backend control plane one layer down). It never applies the
-    update; the user clicks to sync.
+    signal the instant the registry poller notices the gavel-rules repo moved
+    ahead of the local cache — so the sidebar can surface a "click to sync"
+    badge with zero polling by the frontend. It never applies the update; the
+    user clicks to sync.
 
     Public + non-sensitive by design: the stream carries only a
     "you are / aren't behind the registry" signal, never library content, and
-    the backend is a localhost single-user process (same rationale as the
-    central server's public /hf/head-sha). EventSource also cannot attach an
-    Authorization header, so gating this on the JWT would force a
+    the backend is a localhost single-user process. EventSource also cannot
+    attach an Authorization header, so gating this on a token would force a
     token-in-querystring dance for no real security gain.
     """
     from services import library_events as bus
 
     async def _initial_available() -> bool:
         # Greet with the freshest state so a tab that opened AFTER an update
-        # still shows the badge. Cheap (one manifest-hash compare); off-loop
-        # because it does blocking HF I/O. Falls back to the last pushed state.
+        # still shows the badge. Cheap (one HEAD-SHA compare); off-loop
+        # because it does blocking network I/O. Falls back to the last pushed
+        # state.
         try:
-            from services.hf_sync import check_for_updates
+            from services.library_sync import check_for_updates
             st = await asyncio.to_thread(check_for_updates)
             if st.get("checked"):
                 return bool(st.get("available"))
@@ -585,159 +602,17 @@ async def library_events_stream(request: Request):
 
 
 # -----------------------------------------------------------------------------
-# REGISTRY PUBLISH (push local drafts to HF)
-# -----------------------------------------------------------------------------
-
-
-class PublishConflictInfo(BaseModel):
-    type: str
-    name: str
-    public_id: str
-    # For a CE-name clash inside a rule publish: the local draft CE's id, so the
-    # UI can offer a one-click "adopt the existing public CE" (replace the draft
-    # in place and re-publish the rule). None for plain rule/CE name conflicts.
-    local_ce_id: Optional[int] = None
-
-
-class PublishResponse(BaseModel):
-    status: str  # "success" | "conflict" | "race" | "error"
-    public_id: Optional[str] = None
-    name: Optional[str] = None
-    conflict_with: Optional[PublishConflictInfo] = None
-    error: Optional[str] = None
-
-
-@router.post("/publish/ce/{ce_id}", response_model=PublishResponse)
-async def publish_ce_endpoint(
-    ce_id: int,
-    user_id: int = Depends(get_current_user),
-):
-    """Push a local CE draft (and its excitation dataset) to the HF
-    registry atomically. The actual HF write goes through the central
-    server, which holds the HF write token. The user's bearer token is
-    forwarded so the central server can verify the request and bump
-    that user's contribution counter."""
-    from services.hf_publish import publish_ce
-    try:
-        result = publish_ce(ce_id, publisher_user_id=user_id)
-        return PublishResponse(**result.to_dict())
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.post("/publish/rule/{rule_id}", response_model=PublishResponse)
-async def publish_rule_endpoint(
-    rule_id: int,
-    user_id: int = Depends(get_current_user),
-):
-    """Push a local rule draft + any draft CE dependencies to the HF
-    registry atomically (via the central server's HF write proxy)."""
-    from services.hf_publish import publish_rule
-    try:
-        result = publish_rule(rule_id, publisher_user_id=user_id)
-        return PublishResponse(**result.to_dict())
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.post("/publish/rule-set/{classifier_id}", response_model=PublishResponse)
-async def publish_rule_set_endpoint(
-    classifier_id: int,
-    user_id: int = Depends(get_current_user),
-):
-    """Share a private rule set (a model-less guardrail / classifier) to the
-    public registry as a model-agnostic collection of already-published rules.
-
-    Only the rule selection is published — never the model or training. The
-    private classifiers row is the caller's and stays untouched; the published
-    artifact is a separate `rule_sets` record. Every member rule must already
-    be public (the service refuses otherwise)."""
-    from utils.ownership import assert_owns_classifier
-    from services.hf_publish import publish_rule_set
-    assert_owns_classifier(user_id, classifier_id)
-    try:
-        result = publish_rule_set(classifier_id, publisher_user_id=user_id)
-        return PublishResponse(**result.to_dict())
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-class AdoptCERequest(BaseModel):
-    public_id: str
-
-
-@router.post("/ce/{ce_id}/adopt-public")
-def adopt_public_ce(ce_id: int, req: AdoptCERequest, _: int = Depends(get_current_user)):
-    """Replace a local DRAFT cognitive element with the existing PUBLIC CE it
-    name-clashed with, converting the row IN PLACE.
-
-    There is no rule editor, so when a rule's draft CE collides with a public CE
-    of the same name, the user can't manually swap it. This pulls the public CE's
-    definition + training data + public_id into the existing draft row and flips
-    it to non-draft. Because the rule's rule_ce_link still points at this ce_id,
-    the rule now references the public CE automatically — no re-linking, no
-    orphaned draft. Re-publishing the rule then only adds the new rule.
-    """
-    rows = execute_query_dict(
-        "SELECT ce_id, name, is_local_draft FROM cognitive_elements WHERE ce_id = %s",
-        (ce_id,),
-    )
-    if not rows:
-        raise HTTPException(status_code=404, detail="Cognitive element not found.")
-    draft = rows[0]
-    if not draft.get("is_local_draft"):
-        raise HTTPException(status_code=400, detail="This CE is already published — nothing to adopt.")
-
-    from services.hf_sync import _resolve_token, _fetch_record, ensure_excitation
-    from services.library_schemas import CERecord
-    from utils.DButils import normalize_and_upsert_categories
-    from utils.embedding_utils import trigger_embedding
-
-    token = _resolve_token()  # None is fine — public repo reads work anonymously
-    try:
-        payload = _fetch_record(token, f"public_ces/{req.public_id}.json")
-        rec = CERecord.model_validate(payload)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Could not fetch the public CE from the registry: {exc}")
-
-    if rec.name != draft["name"]:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Name mismatch: this draft is '{draft['name']}' but the public CE is '{rec.name}'.",
-        )
-
-    final_categories = normalize_and_upsert_categories(list(rec.categories), allow_new=True)
-    execute_query(
-        """
-        UPDATE cognitive_elements
-        SET definition = %s, category = %s, categories = %s, examples = %s::jsonb,
-            public_id = %s, published_at = %s, is_local_draft = FALSE,
-            created_by_username = COALESCE(created_by_username, %s)
-        WHERE ce_id = %s
-        """,
-        (rec.definition, rec.category, final_categories, json.dumps(rec.examples),
-         rec.public_id, rec.published_at, rec.created_by_username, ce_id),
-    )
-    # Pull the public CE's training data so the adopted row is complete, and
-    # refresh its embedding. Both best-effort — the adopt itself already landed.
-    try:
-        ensure_excitation(ce_id)
-    except Exception:
-        pass
-    try:
-        trigger_embedding("ce", ce_id, rec.name, rec.definition)
-    except Exception:
-        pass
-    return {"status": "adopted", "ce_id": ce_id, "public_id": rec.public_id, "name": rec.name}
-
-
-# -----------------------------------------------------------------------------
 # NAME-CONFLICT LOOKUPS (used by AI pipeline early-detection + UI rename inputs)
+#
+# There is no in-studio publish anymore — contributions to the public library
+# go by pull request to the gavel-rules GitHub repository. These probes exist
+# so a draft doesn't silently shadow (or get shadowed by) a library record of
+# the same name.
 # -----------------------------------------------------------------------------
 
 
 class CheckNameResponse(BaseModel):
-    """Result of a name-conflict probe against the registry."""
+    """Result of a name-conflict probe against the local library cache."""
     exists: bool
     public_id: Optional[str] = None
     # Lightweight summary of the existing record. Empty if exists=false or
@@ -799,42 +674,49 @@ def _lookup_conflict_summary(kind: str, public_id: str) -> Optional[dict]:
     return summary
 
 
+_CHECK_NAME_TABLES = {
+    "rule": "rules",
+    "ce": "cognitive_elements",
+    "rule_set": "rule_sets",
+}
+
+
 @router.get("/check-name", response_model=CheckNameResponse)
 async def check_name(
-    kind: str = Query(..., description="'rule' or 'ce'"),
-    name: str = Query(..., description="Name to probe against the registry."),
+    kind: str = Query(..., description="'rule', 'ce' or 'rule_set'"),
+    name: str = Query(..., description="Name to probe against the synced library."),
     _: int = Depends(get_current_user),
 ):
     """Lightweight name-conflict probe. Used by the AI-pipeline early-check
     and the UI rename input.
 
-    Looks up the name in the registry's manifest name index. If found,
-    also returns a summary of the existing record so the UI can preview it
-    inline. Cheap because the manifest is fetched into the local HF cache
-    on every sync — this endpoint just rereads it.
+    Purely LOCAL: looks the name up among the library records already synced
+    into the local DB (is_local_draft = FALSE rows mirror the gavel-rules
+    registry after a sync). No network, no token. If found, also returns a
+    summary of the existing record so the UI can preview it inline.
     """
-    if kind not in ("rule", "ce"):
-        raise HTTPException(status_code=400, detail="kind must be 'rule' or 'ce'")
+    table = _CHECK_NAME_TABLES.get(kind)
+    if not table:
+        raise HTTPException(status_code=400, detail="kind must be 'rule', 'ce' or 'rule_set'")
     if not name or not name.strip():
         raise HTTPException(status_code=400, detail="name is required")
 
-    # Probe via the registry manifest, read ANONYMOUSLY (public repo) — the same
-    # token-less path the sync uses. The old code routed this through the publish
-    # helper and demanded an HF_TOKEN, which 500'd on backends that don't have one
-    # even though the read needs no auth at all.
     try:
-        from services.hf_sync import _fetch_manifest_bytes
-        manifest = json.loads(_fetch_manifest_bytes())
+        rows = execute_query_dict(
+            f"""
+            SELECT public_id FROM {table}
+            WHERE name = %s AND is_local_draft = FALSE AND public_id IS NOT NULL
+            """,
+            (name.strip(),),
+        ) or []
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Could not read registry: {exc}")
+        raise HTTPException(status_code=500, detail=f"Could not read the local library: {exc}")
 
-    index_key = "rule_names" if kind == "rule" else "ce_names"
-    name_index = manifest.get(index_key, {}) or {}
-    pid = name_index.get(name.strip())
-    if not pid:
+    if not rows:
         return CheckNameResponse(exists=False)
 
-    summary = _lookup_conflict_summary(kind, pid)
+    pid = rows[0]["public_id"]
+    summary = _lookup_conflict_summary(kind, pid)  # rule/ce only; None otherwise
     return CheckNameResponse(exists=True, public_id=pid, summary=summary)
 
 
@@ -848,17 +730,18 @@ class CleanupResponse(BaseModel):
 @router.get("/drafts")
 async def list_local_drafts(_: int = Depends(get_current_user)):
     """Return every rule and CE in the local DB that's still
-    is_local_draft = TRUE — i.e., user-created content that hasn't been
-    pushed to the HF registry yet.
+    is_local_draft = TRUE — i.e., user-created content that isn't part of
+    the public gavel-rules library (contributions go by pull request).
 
-    Powers the "My Drafts" page where the user reviews everything pending
-    publish. Read-only; no DB writes happen here.
+    Powers the "My Drafts" page where the user reviews their local-only
+    work. Read-only; no DB writes happen here.
     """
     try:
         rule_rows = execute_query_dict(
             """
             SELECT
                 r.rule_id, r.name, r.predicate, r.description,
+                r.ce_groups, r.condition,
                 r.created_at,
                 (SELECT json_group_array(c.name) FROM categories c
                  WHERE c.category_id IN (SELECT value FROM json_each(r.categories))
@@ -867,9 +750,7 @@ async def list_local_drafts(_: int = Depends(get_current_user)):
                     json_group_array(
                         json_object(
                             'ce_id', ce.ce_id,
-                            'name', ce.name,
-                            'role', COALESCE(rl.role, 'necessary'),
-                            'fallback_group', COALESCE(rl.fallback_group, 0)
+                            'name', ce.name
                         )
                     ) FILTER (WHERE ce.ce_id IS NOT NULL),
                     '[]'
@@ -881,7 +762,7 @@ async def list_local_drafts(_: int = Depends(get_current_user)):
               -- Hide a draft while its default test/calibration set is still
               -- being generated (in the background). It pops into Drafts/Browse
               -- only once the sets are ready, so the user never sees a
-              -- half-generated rule (or a premature Publish button).
+              -- half-generated rule.
               AND NOT EXISTS (
                   SELECT 1 FROM test_datasets td
                   WHERE td.rule_id = r.rule_id
@@ -892,6 +773,17 @@ async def list_local_drafts(_: int = Depends(get_current_user)):
             ORDER BY r.created_at DESC NULLS LAST, r.rule_id DESC
             """
         ) or []
+
+        # Attach the logic group name(s) each member CE belongs to (from
+        # ce_groups); `condition` stays a top-level field on the row. The
+        # raw ce_groups column is dropped in favor of the annotated list.
+        for row in rule_rows:
+            groups_of: dict = {}
+            for gname, members in (row.pop("ce_groups", None) or {}).items():
+                for member in members or []:
+                    groups_of.setdefault(member, []).append(gname)
+            for entry in row.get("active_ces") or []:
+                entry["groups"] = groups_of.get(entry.get("name"), [])
 
         ce_rows = execute_query_dict(
             """
@@ -922,8 +814,8 @@ async def list_local_drafts(_: int = Depends(get_current_user)):
 @router.delete("/drafts/rule/{rule_id}")
 async def delete_draft_rule(rule_id: int, _: int = Depends(get_current_user)):
     """Delete a single local-draft rule. Refuses if the row is already
-    published (is_local_draft = FALSE) — published rows live on HF and
-    can't be removed from the local cache without a re-sync.
+    published (is_local_draft = FALSE) — published rows mirror the
+    gavel-rules registry and would just reappear on the next sync.
 
     Cascade rules in the schema take care of rule_ce_link rows.
     """
@@ -1040,38 +932,31 @@ async def cleanup_local_drafts(_: int = Depends(get_current_user)):
     """Sweep stranded local drafts left behind by interrupted AI pipelines,
     cancelled flows, or backend crashes.
 
-    A draft is "stranded" when its name is NOT in the public registry's
-    name index — that means there is nothing on HF for the user to lose.
-    Drafts whose name IS in the registry are left alone: those are either
-    same-name collisions the user must resolve via the publish-time
-    CONFLICT modal, or ghost-published rows that the recovery step in
-    sync_library will heal forward on its own.
+    Purely LOCAL — no network, no token. A draft is "stranded" when its name
+    does NOT collide with a synced library record of the same kind (the
+    is_local_draft = FALSE rows mirror the gavel-rules registry after a
+    sync), so deleting it loses nothing that exists upstream. Drafts whose
+    name IS taken by a library record are kept: that collision is something
+    the user must resolve (rename the draft, or drop it deliberately).
 
-    Always called AFTER sync_library so the manifest cache is fresh and
-    pending_public_id rows have already been recovered.
+    Best called AFTER /library/sync so the local mirror is fresh.
     """
-    from services.hf_publish import _resolve_token, _fetch_head_sha_and_manifest
-
-    token = _resolve_token()
-    if not token:
-        raise HTTPException(status_code=500, detail="HF_TOKEN not set on server")
-    try:
-        _sha, manifest = _fetch_head_sha_and_manifest()
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Could not read registry: {exc}")
-
-    rule_names_idx = manifest.get("rule_names", {}) or {}
-    ce_names_idx = manifest.get("ce_names", {}) or {}
+    def _published_names(table: str) -> set:
+        rows = execute_query_dict(
+            f"SELECT name FROM {table} WHERE is_local_draft = FALSE"
+        ) or []
+        return {r["name"] for r in rows}
 
     rules_deleted = 0
     ces_deleted = 0
     kept = 0
 
+    library_rule_names = _published_names("rules")
     drafts = execute_query_dict(
         "SELECT rule_id, name FROM rules WHERE is_local_draft = TRUE"
     ) or []
     for d in drafts:
-        if d["name"] in rule_names_idx:
+        if d["name"] in library_rule_names:
             kept += 1
             continue
         try:
@@ -1080,11 +965,12 @@ async def cleanup_local_drafts(_: int = Depends(get_current_user)):
         except Exception:
             pass
 
+    library_ce_names = _published_names("cognitive_elements")
     drafts = execute_query_dict(
         "SELECT ce_id, name FROM cognitive_elements WHERE is_local_draft = TRUE"
     ) or []
     for d in drafts:
-        if d["name"] in ce_names_idx:
+        if d["name"] in library_ce_names:
             kept += 1
             continue
         try:

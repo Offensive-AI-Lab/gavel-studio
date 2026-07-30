@@ -33,14 +33,14 @@ def test_build_poller_bad_interval_falls_back(monkeypatch):
 
 def test_notifier_checks_and_pushes_badge_without_mutating(monkeypatch):
     seen = []
-    monkeypatch.setattr("services.hf_sync.check_for_updates",
+    monkeypatch.setattr("services.library_sync.check_for_updates",
                         lambda: {"available": True, "checked": True, "reason": None})
     monkeypatch.setattr("services.library_events.set_available",
                         lambda available: seen.append(available))
     # The notifier must NEVER pull records — that's the user's click.
     def _no_sync(*a, **k):
         raise AssertionError("reconcile must not sync_library")
-    monkeypatch.setattr("services.hf_sync.sync_library", _no_sync)
+    monkeypatch.setattr("services.library_sync.sync_library", _no_sync)
 
     out = wiring._LibraryUpdateNotifier().reconcile()
 
@@ -50,7 +50,7 @@ def test_notifier_checks_and_pushes_badge_without_mutating(monkeypatch):
 
 def test_notifier_pushes_synced_when_up_to_date(monkeypatch):
     seen = []
-    monkeypatch.setattr("services.hf_sync.check_for_updates",
+    monkeypatch.setattr("services.library_sync.check_for_updates",
                         lambda: {"available": False, "checked": True, "reason": None})
     monkeypatch.setattr("services.library_events.set_available",
                         lambda available: seen.append(available))
@@ -59,10 +59,10 @@ def test_notifier_pushes_synced_when_up_to_date(monkeypatch):
 
 
 def test_notifier_skips_badge_when_probe_unchecked(monkeypatch):
-    """A transient HF outage (checked=False) must not touch the badge — a
-    stale 'synced' beats a phantom 'updates available'."""
+    """A transient registry outage (checked=False) must not touch the badge —
+    a stale 'synced' beats a phantom 'updates available'."""
     seen = []
-    monkeypatch.setattr("services.hf_sync.check_for_updates",
+    monkeypatch.setattr("services.library_sync.check_for_updates",
                         lambda: {"available": False, "checked": False, "reason": "down"})
     monkeypatch.setattr("services.library_events.set_available",
                         lambda available: seen.append(available))
@@ -77,7 +77,7 @@ def test_built_poller_runs_freshness_checks(monkeypatch):
 
     monkeypatch.delenv("ENABLE_REGISTRY_POLLER", raising=False)
     checks = []
-    monkeypatch.setattr("services.hf_sync.check_for_updates",
+    monkeypatch.setattr("services.library_sync.check_for_updates",
                         lambda: checks.append(1) or {"available": False, "checked": True})
     monkeypatch.setattr("services.library_events.set_available", lambda available: None)
 

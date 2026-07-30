@@ -250,23 +250,16 @@ describe('CognitiveElementCard — bookmark affordance', () => {
     });
 });
 
-describe('CognitiveElementCard — publish affordance', () => {
-    it('renders a Publish button only for local drafts with onPublish wired', () => {
+describe('CognitiveElementCard — publish affordance (disabled: PR-based contributions)', () => {
+    it('renders a DISABLED Publish button on a local draft with the PR tooltip', () => {
         renderCard({
             ce: baseCe({ is_local_draft: true }),
             isOpen: false,
             onToggle: vi.fn(),
-            onPublish: vi.fn(),
         });
-        expect(screen.getByRole('button', { name: /publish ce to library/i })).toBeInTheDocument();
-    });
-
-    it('calls onPublish with the ce when clicked', () => {
-        const onPublish = vi.fn();
-        const ce = baseCe({ is_local_draft: true });
-        renderCard({ ce, isOpen: false, onToggle: vi.fn(), onPublish });
-        fireEvent.click(screen.getByRole('button', { name: /publish ce to library/i }));
-        expect(onPublish).toHaveBeenCalledWith(ce);
+        const btn = screen.getByRole('button', { name: /publish ce to library/i });
+        expect(btn).toBeDisabled();
+        expect(btn).toHaveAttribute('title', expect.stringContaining('gavel-rules pull requests'));
     });
 
     it('does not render Publish for a non-draft CE', () => {
@@ -274,18 +267,39 @@ describe('CognitiveElementCard — publish affordance', () => {
             ce: baseCe({ is_local_draft: false }),
             isOpen: false,
             onToggle: vi.fn(),
-            onPublish: vi.fn(),
         });
         expect(screen.queryByRole('button', { name: /publish ce to library/i })).toBeNull();
     });
+});
 
-    it('does not render Publish when onPublish is missing', () => {
+describe('CognitiveElementCard — v2 role / title / tags', () => {
+    it('shows the role as the primary badge (underscores pretty-printed)', () => {
         renderCard({
-            ce: baseCe({ is_local_draft: true }),
+            ce: baseCe({ role: 'directive_to_user' }),
             isOpen: false,
             onToggle: vi.fn(),
         });
-        expect(screen.queryByRole('button', { name: /publish ce to library/i })).toBeNull();
+        expect(screen.getByText('directive to user')).toBeInTheDocument();
+    });
+
+    it('uses the title as the display name when present', () => {
+        renderCard({
+            ce: baseCe({ name: 'personal_information', title: 'Personal information' }),
+            isOpen: false,
+            onToggle: vi.fn(),
+        });
+        expect(screen.getByText('Personal information')).toBeInTheDocument();
+        expect(screen.queryByText('personal_information')).toBeNull();
+    });
+
+    it('renders tags as pills', () => {
+        renderCard({
+            ce: baseCe({ tags: ['phishing', 'credentials'] }),
+            isOpen: false,
+            onToggle: vi.fn(),
+        });
+        expect(screen.getByText('#phishing')).toBeInTheDocument();
+        expect(screen.getByText('#credentials')).toBeInTheDocument();
     });
 });
 
@@ -422,15 +436,14 @@ describe('CognitiveElementCard — examples (expanded content)', () => {
 
 
 describe('CognitiveElementCard — combined affordances', () => {
-    it('can show publish and delete together for a draft', () => {
+    it('can show the (disabled) publish button and delete together for a draft', () => {
         const { container } = renderCard({
             ce: baseCe({ is_local_draft: true }),
             isOpen: true,
             onToggle: vi.fn(),
-            onPublish: vi.fn(),
             onDelete: vi.fn(),
         });
-        expect(screen.getByRole('button', { name: /publish ce to library/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /publish ce to library/i })).toBeDisabled();
         expect(container.querySelector('.delete-icon')).not.toBeNull();
     });
 });

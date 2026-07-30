@@ -83,10 +83,7 @@ def _build_scoring_context(classifier_id: int, labels: dict):
     """
     import torch
     import classifier_engine.reference  # noqa: F401  — registers the gavel.* alias
-    from gavel.evaluation.metrics import (
-        convert_labels_to_tensors,
-        load_any_of_conditions,
-    )
+    from gavel.evaluation.metrics import build_ruleset_logic
     from evaluation.ruleset_builder import build_unified_ruleset
 
     idx_to_label = {v: k for k, v in labels.items()}
@@ -113,8 +110,7 @@ def _build_scoring_context(classifier_id: int, labels: dict):
     patience_rate = max(patience_vec) if patience_vec else 1
 
     unified_ruleset = build_unified_ruleset(classifier_id)
-    ruleset_tensors = convert_labels_to_tensors(unified_ruleset, labels)
-    any_of_conditions = load_any_of_conditions(unified_ruleset, labels)
+    ruleset_logic = build_ruleset_logic(unified_ruleset, labels)
 
     thresholds_used = {
         idx_to_label[i]: {"threshold": float(thr_vec[i].item()), "patience": int(patience_vec[i])}
@@ -128,8 +124,7 @@ def _build_scoring_context(classifier_id: int, labels: dict):
         "patience_vec": patience_vec,
         "patience_rate": patience_rate,
         "unified_ruleset": unified_ruleset,
-        "ruleset_tensors": ruleset_tensors,
-        "any_of_conditions": any_of_conditions,
+        "ruleset_logic": ruleset_logic,
         "thresholds_used": thresholds_used,
     }
 
@@ -183,36 +178,51 @@ def _score_span(ctx: dict, windows: list, tokens: list):
             )
             t.pop("logits", None)   # see window note above
 
-    # --- Rule predicates (all_required ∧ every any_of group has a hit) ---
-    triggers_bool = triggers_tensor.bool()
+    # --- Rule conditions (groups + v2 grammar, evaluated over triggers) ---
+    from gavel.evaluation.metrics import detect_usecase
+    from utils.rule_condition import selectors as condition_selectors
+
+    predicted_idxs = triggers_tensor.bool().nonzero(as_tuple=True)[0]
+    triggered_set = {idx_to_label[i] for i in predicted_idxs.tolist()}
     rule_triggers: list = []
     for rule_name, spec in ctx["unified_ruleset"].items():
         if not spec.get("enabled", True):
             continue
-        all_required = ctx["ruleset_tensors"][rule_name]["all_required_labels"].bool()
-        # A rule's required CEs are satisfied when EVERY required CE has
-        # triggered — i.e. required implies triggered for every label.
-        # (The old `(all_required & triggers_bool).all()` was only true when
-        # *every* CE in the guardrail was both required AND triggered, so any
-        # rule requiring a subset never fired even with all its CEs lit.)
-        all_required_ok = bool((~all_required | triggers_bool).all().item())
-        any_of_groups = ctx["any_of_conditions"].get(rule_name, []) or []
-        any_of_ok = True
-        unmet_groups: list = []
-        for g_idx, group in enumerate(any_of_groups):
-            mask = torch.zeros(num_topics, dtype=torch.bool)
-            mask[group] = True
-            if not bool((mask & triggers_bool).any().item()):
-                any_of_ok = False
-                unmet_groups.append(g_idx)
+        entry = ctx["ruleset_logic"].get(rule_name) or {"ast": None, "groups_idx": {}}
+        fired = detect_usecase(ctx["ruleset_logic"], rule_name, predicted_idxs)
+
+        # Per-group explanation for the UI: which members hit, what the
+        # selector demands ('all' / k / None for unreferenced groups), and
+        # whether it is satisfied. A group referenced by several selectors
+        # reports its first positive selector's quantifier.
+        quantifiers: dict = {}
+        if entry["ast"] is not None:
+            for _, quant, gname in condition_selectors(entry["ast"]):
+                quantifiers.setdefault(gname, quant)
+        groups_report: dict = {}
+        unmet: list = []
+        for gname, members in (spec.get("groups") or {}).items():
+            hits = sorted(m for m in (members or []) if m in triggered_set)
+            quant = quantifiers.get(gname)
+            if quant is None:
+                satisfied = True      # unreferenced (e.g. supporting) group
+            else:
+                k = len(members or []) if quant == "all" else int(quant)
+                satisfied = len(hits) >= k
+                if not satisfied:
+                    unmet.append(gname)
+            groups_report[gname] = {
+                "members": list(members or []),
+                "hits": hits,
+                "quantifier": quant,
+                "satisfied": satisfied,
+            }
         rule_triggers.append({
             "rule_name": rule_name,
-            "fired": bool(all_required_ok and any_of_ok),
-            "all_required": list(spec.get("all_required") or []),
-            "all_required_satisfied": all_required_ok,
-            "any_of_groups": spec.get("any_of") or [],
-            "any_of_groups_unmet": unmet_groups,
-            "supporting": list(spec.get("supporting") or []),
+            "fired": bool(fired),
+            "condition": spec.get("condition") or "",
+            "groups": groups_report,
+            "groups_unmet": unmet,
         })
 
     return {
@@ -251,8 +261,24 @@ def _aggregate_rule_triggers(per_turn_rule_triggers: list) -> list:
                 if rt.get("fired") and not cur.get("fired"):
                     agg[name] = dict(rt)  # prefer a firing turn's detail
                 elif not cur.get("fired"):
-                    # keep the union of satisfied flags for a clearer hint
-                    cur["all_required_satisfied"] = cur.get("all_required_satisfied") or rt.get("all_required_satisfied")
+                    # merge per-group hits/satisfied across turns for a
+                    # clearer "how close did it get" hint
+                    merged = dict(cur.get("groups") or {})
+                    for gname, info in (rt.get("groups") or {}).items():
+                        if gname in merged:
+                            merged_hits = sorted(set(merged[gname].get("hits") or []) | set(info.get("hits") or []))
+                            merged[gname] = {
+                                **merged[gname],
+                                "hits": merged_hits,
+                                "satisfied": bool(merged[gname].get("satisfied") or info.get("satisfied")),
+                            }
+                        else:
+                            merged[gname] = dict(info)
+                    cur["groups"] = merged
+                    cur["groups_unmet"] = [
+                        g for g, info in merged.items()
+                        if info.get("quantifier") is not None and not info.get("satisfied")
+                    ]
     return [agg[n] for n in order]
 
 

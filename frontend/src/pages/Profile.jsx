@@ -163,8 +163,8 @@ const Profile = () => {
     // Re-fetch contributions whenever the profile or tab changes.
     // Uses the same /library/search endpoint Browse uses (with the
     // ?author=… filter from Phase 4), so we get the rich shape RuleCard
-    // and CognitiveElementCard expect — active_ces with role/fallback,
-    // is_local_draft, public_id, categories as names, etc.
+    // and CognitiveElementCard expect — active_ces membership plus the
+    // rule's groups/condition, is_local_draft, public_id, categories, etc.
     useEffect(() => {
         if (!profile) return;
         let cancelled = false;

@@ -7,6 +7,13 @@ import PipelineModal from '../components/PipelineModal/PipelineModal';
 const h = React.createElement;
 const renderPipelineHtml = (props) => renderToStaticMarkup(h(PipelineModal, props));
 
+// Group new CEs land in when the user doesn't name one explicitly. The
+// backend accepts an optional `group` on link-ce / create-ce and appends
+// the CE to that group (creating it if needed) without touching the
+// rule's condition — i.e. the CE arrives as a supporting member until
+// the user edits the condition to reference its group.
+const DEFAULT_QUICK_ADD_GROUP = 'additional';
+
 const showPipelineMessage = async ({
     icon,
     title,
@@ -26,12 +33,15 @@ const showPipelineMessage = async ({
 });
 
 /**
- * CEService: Handles logic for adding/removing Cognitive Elements.
+ * CEService: quick add/remove of Cognitive Elements on a rule setup.
+ * The backend owns the rule's logic (groups + condition) and rebuilds the
+ * derived predicate itself — these flows only maintain membership and the
+ * local active_ces list for immediate UI feedback.
  */
 export const handleAddCEFlow = async (userId, currentRules, ruleIndex, updateState) => {
     const rule = currentRules[ruleIndex];
     const setupId = rule.setup_id;
-    
+
     // 1. FILTER LOGIC: Get IDs of CEs already in this rule setup
     const existingCeIds = rule.active_ces.map(ce => ce.ce_id);
 
@@ -76,7 +86,10 @@ export const handleAddCEFlow = async (userId, currentRules, ruleIndex, updateSta
 
         if (ceId) {
             try {
-                await api.post(`/rules/setup/${setupId}/link-ce`, { ce_id: ceId });
+                await api.post(`/rules/setup/${setupId}/link-ce`, {
+                    ce_id: ceId,
+                    group: DEFAULT_QUICK_ADD_GROUP,
+                });
                 updateLocalUI(currentRules, ruleIndex, options[ceId], ceId, updateState);
             } catch {
                 await showPipelineMessage({
@@ -91,7 +104,11 @@ export const handleAddCEFlow = async (userId, currentRules, ruleIndex, updateSta
         const { value: name } = await Swal.fire({ title: 'Create CE', input: 'text', showCancelButton: true });
         if (name) {
             try {
-                const res = await api.post(`/rules/setup/${setupId}/create-ce`, { name, user_id: userId });
+                const res = await api.post(`/rules/setup/${setupId}/create-ce`, {
+                    name,
+                    user_id: userId,
+                    group: DEFAULT_QUICK_ADD_GROUP,
+                });
                 updateLocalUI(currentRules, ruleIndex, name, res.data.ce_id, updateState);
             } catch {
                 await showPipelineMessage({
@@ -109,15 +126,11 @@ export const handleRemoveCEFlow = async (setupId, ceId, ceName, currentRules, ru
     try {
         await api.delete(`/rules/setup/${setupId}/ce/${ceId}`);
         const newRules = [...currentRules];
-        
-        // Remove from array
+
+        // Remove from the local membership list; the backend has already
+        // dropped the CE from its group(s) and re-derived the predicate,
+        // which arrives on the next fetch.
         newRules[ruleIndex].active_ces = newRules[ruleIndex].active_ces.filter(c => c.ce_id !== ceId);
-        
-        // 3. REBUILD Logic String: Re-joins the remaining names correctly
-        const remaining = newRules[ruleIndex].active_ces.map(c => c.name);
-        newRules[ruleIndex].predicate = remaining.length > 0 
-            ? `IF ${remaining.join(' AND ')} THEN BLOCK` 
-            : "IF TRUE THEN BLOCK";
 
         updateState(newRules);
     } catch {
@@ -133,10 +146,5 @@ export const handleRemoveCEFlow = async (setupId, ceId, ceName, currentRules, ru
 const updateLocalUI = (rules, index, name, id, updateState) => {
     const newRules = [...rules];
     newRules[index].active_ces.push({ name, ce_id: id });
-    
-    // Clean string rebuild
-    const ceNames = newRules[index].active_ces.map(c => c.name);
-    newRules[index].predicate = `IF ${ceNames.join(' AND ')} THEN BLOCK`;
-    
     updateState(newRules);
 };

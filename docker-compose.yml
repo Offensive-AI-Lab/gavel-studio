@@ -1,8 +1,8 @@
 # Single-command bring-up for the WHOLE stack (the alternative to ./run.sh).
 #
 # ONE env file for everything: backend/.env. Point compose at it with
-# --env-file so its ${VAR} interpolation (HF_TOKEN,
-# SLURM_SSH_KEY_FILE) comes from that same file — there is NO repo-root .env.
+# --env-file so its ${VAR} interpolation (SLURM_SSH_KEY_FILE) comes from that
+# same file — there is NO repo-root .env.
 #
 #   docker compose --env-file backend/.env up --build
 #
@@ -22,16 +22,17 @@
 # backend on first boot. It lives inside the ./backend bind mount, so it
 # persists across container restarts and rebuilds with no named volume.
 # Clean slate = delete backend/db/gavel.sqlite3 (the library re-syncs from
-# HuggingFace on the next boot).
+# the gavel-rules GitHub repo on the next boot).
 #
 # How the pieces talk:
 #   browser → localhost:5173 (frontend) and localhost:8000 (backend)
-#   backend → SQLite file on disk  and  → HuggingFace (library reads;
-#             publishes too, directly, when HF_TOKEN is set in backend/.env)
+#   backend → SQLite file on disk  and  → GitHub (read-only gavel-rules
+#             library sync; contributions go by pull request, not the app)
 #
 # Config: everything works out-of-the-box with built-in defaults. To enable
-# AI generation / HF publishing, fill the values in backend/.env; compose
-# substitutes ${VAR} from that SAME file (via --env-file backend/.env).
+# AI generation (OPENAI_API_KEY) / private-repo library reads (GITHUB_TOKEN),
+# fill the values in backend/.env; compose substitutes ${VAR} from that SAME
+# file (via --env-file backend/.env).
 # (Native dev also uses backend/.env — see ./run.sh. One file, both modes.)
 #
 # This stack = backend + frontend. That is the WHOLE app.
@@ -54,7 +55,7 @@ services:
     # backend/.env is bind-mounted at /app/.env (see volumes) and loaded by the
     # backend's load_dotenv. load_dotenv does NOT override variables that are
     # already set, so the handful of CONTAINER-ONLY values in `environment:`
-    # below win, and EVERYTHING ELSE (OPENAI_API_KEY, HF_TOKEN,
+    # below win, and EVERYTHING ELSE (OPENAI_API_KEY, GITHUB_TOKEN,
     # SLURM_HOST, SLURM_USER, the optional SLURM_* tuning, ...)
     # comes from backend/.env. So you edit ONE file — backend/.env — whether you
     # run with Docker or natively. There is no separate repo-root app config.

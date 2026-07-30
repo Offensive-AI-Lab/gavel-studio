@@ -3,7 +3,7 @@
 // Browse lists both the public rule library AND the requester's own local
 // drafts (merged, drafts first), drives a live debounced search through
 // useLibrarySearch (which calls searchLibrary from ../api), supports
-// bookmarking public rules, publishing drafts (delegated to RuleService),
+// bookmarking public rules,
 // category filtering, pagination, and the two dedicated header CTAs
 // ("Create Rule with AI" + "Build Rule from CEs").
 //
@@ -42,10 +42,6 @@ vi.mock('../../src/api', () => ({
     searchLibrary: vi.fn(() => empty({ results: [], total_results: 0 })),
 }));
 
-// ---- Publish service: assert it's called, never run the real pipeline ----
-vi.mock('../../src/services/RuleService', () => ({
-    publishDraftRule: vi.fn(),
-}));
 
 // ---- confirm dialog helpers ----
 const mockShowAlertDialog = vi.fn(() => Promise.resolve());
@@ -76,7 +72,6 @@ vi.mock('sweetalert2', () => ({
 
 import Browse from '../../src/pages/Browse';
 import * as api from '../../src/api';
-import * as RuleService from '../../src/services/RuleService';
 
 const setUser = () => {
     sessionStorage.setItem('token', 'fake-token');
@@ -300,14 +295,14 @@ describe('Browse — bookmark on a public rule', () => {
     });
 });
 
-describe('Browse — publish a draft rule', () => {
+describe('Browse — no publish affordance on public rules', () => {
     // Drafts no longer appear in Browse (they live in Your Library), so the only
     // remaining expectation here is that public rules never show a Publish button.
     it('does not show a Publish button on a public (non-draft) rule', async () => {
         api.getPublicRules.mockResolvedValue({ data: { rules: [publicRule()] } });
         renderBrowse();
         await screen.findByText('Public Safety Rule');
-        expect(screen.queryByRole('button', { name: 'Publish rule to library' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /Publish rule to library/ })).not.toBeInTheDocument();
     });
 });
 

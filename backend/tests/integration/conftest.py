@@ -28,9 +28,37 @@ automatically removes children. The deletion order in `_TRACKED_TABLES` is
 children-first to avoid relying on cascade behavior, which keeps the cleanup
 robust if a future migration weakens any FK to RESTRICT.
 """
+import threading
 import uuid
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# Boot-recovery barrier — MUST be installed BEFORE `from main import app`.
+#
+# Importing main spawns daemon threads; one of them runs full crash recovery
+# ~20s later (after model warmup), and IncompletePipelineRecovery wipes every
+# `is_ready = FALSE` rule/CE it finds. A test holding an in-flight draft at
+# that moment loses it mid-test (observed: finalize-draft 404s because the
+# draft vanished). We wrap run_all_recovery to flag completion, and the
+# session fixture below blocks until the boot pass is done before any test
+# creates state it cares about.
+# ---------------------------------------------------------------------------
+import utils.crash_recovery as _crash_recovery
+
+_BOOT_RECOVERY_DONE = threading.Event()
+_real_run_all_recovery = _crash_recovery.run_all_recovery
+
+
+def _tracked_run_all_recovery(*args, **kwargs):
+    try:
+        return _real_run_all_recovery(*args, **kwargs)
+    finally:
+        _BOOT_RECOVERY_DONE.set()
+
+
+_crash_recovery.run_all_recovery = _tracked_run_all_recovery
+
 from fastapi.testclient import TestClient
 
 from main import app
@@ -52,9 +80,10 @@ from utils.auth import (
 # rows leaked across the whole session).
 _TRACKED_TABLES = [
     # Junction tables (reference rules / cognitive_elements / classifiers).
-    # COMPOSITE keys — see note above.
-    ("setup_ce_link", ("setup_id", "ce_id", "role", "fallback_group")),
-    ("rule_ce_link", ("rule_id", "ce_id", "role", "fallback_group")),
+    # COMPOSITE keys — see note above. Membership-only since schema v24:
+    # the role/fallback_group columns died with the groups+condition model.
+    ("setup_ce_link", ("setup_id", "ce_id")),
+    ("rule_ce_link", ("rule_id", "ce_id")),
     # Bookmarks are local tables again (login removal moved them back off the
     # central server), so they need per-test cleanup. Ratings are gone entirely.
     ("rule_bookmarks", ("user_id", "rule_id")),
@@ -132,7 +161,15 @@ def _restore_to(snapshot: dict) -> None:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _session_baseline():
+def _await_boot_recovery():
+    """Block until main's boot-time crash-recovery daemon has finished, so it
+    can't wipe a test's in-flight (is_ready=FALSE) draft mid-test. Bounded:
+    a stuck warmup shouldn't deadlock the suite."""
+    _BOOT_RECOVERY_DONE.wait(timeout=180)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _session_baseline(_await_boot_recovery):
     """Outer safety net. Snapshot at session start, restore at session end so
     the dev database returns exactly to the state we found it — including
     rows that the session-scoped fixtures (test_user et al.) created."""

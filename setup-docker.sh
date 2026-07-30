@@ -10,7 +10,7 @@
 # fills in backend/.env so a fresh clone can run the whole stack without
 # hand-editing:
 #   * creates backend/.env (from backend/.env.example, or fresh) if missing,
-#   * prompts for the optional parameters (OpenAI / HuggingFace token),
+#   * prompts for the optional parameters (OpenAI / GitHub token),
 #     explaining what each unlocks,
 #   * offers to run `docker compose --env-file backend/.env up --build`.
 #
@@ -33,7 +33,7 @@ warn() { echo "${C_Y}! $*${C_O}"; }
 
 # Single source of truth for app config: backend/.env. Docker reads it via
 # `docker compose --env-file backend/.env`, so compose's ${VAR} interpolation
-# (HF_TOKEN, SLURM_SSH_KEY_FILE) comes from this SAME file —
+# (SLURM_SSH_KEY_FILE) comes from this SAME file —
 # there is no separate repo-root .env.
 ENV="backend/.env"
 
@@ -64,7 +64,7 @@ fi
 # --- 2. optional parameters (prompt only if interactive + not already set) ---
 prompt_kv() {   # key, human label
   local key="$1" label="$2" cur; cur="$(get_kv "$key")"
-  case "$cur" in hf_xxxxxxxx*|sk-xxxx*|changeme*) cur="";; esac
+  case "$cur" in ghp_xxxx*|github_pat_xxxx*|sk-xxxx*|changeme*) cur="";; esac
   if [ -n "$cur" ]; then ok "$key already set — keeping it"; return; fi
   if [ -t 0 ]; then
     printf "  %s%s (Enter to skip): %s" "$C_D" "$label" "$C_O"
@@ -77,13 +77,14 @@ prompt_kv() {   # key, human label
 step "Optional parameters (press Enter to skip)"
 # OpenAI drives AI generation in the backend — always relevant.
 prompt_kv OPENAI_API_KEY     "OpenAI API key      — enables AI rule/CE generation"
-# HF_TOKEN is WRITE-scope and used ONLY to PUBLISH to the HF registry. The
-# backend read-syncs the public library anonymously, so leave blank to run
-# fully self-contained (everything works except publishing).
-prompt_kv HF_TOKEN           "HuggingFace token   — write-scope, only needed to PUBLISH (blank = no publishing)"
+# GITHUB_TOKEN is READ-access and only needed while the gavel-rules library
+# repo is private (it also lifts GitHub API rate limits). Once the repo is
+# public, leave it blank — the library syncs anonymously. Contributions to
+# the library go by pull request to gavel-rules, not through the app.
+prompt_kv GITHUB_TOKEN       "GitHub token        — read access to the gavel-rules library repo, only needed while it is private"
 
 ok "$ENV is ready"
-echo "    ${C_D}Edit by hand in backend/.env: OPENAI_API_KEY (AI generation), HF_TOKEN + HF_REPO_ID (publishing only).${C_O}"
+echo "    ${C_D}Edit by hand in backend/.env: OPENAI_API_KEY (AI generation), GITHUB_TOKEN (private gavel-rules repo access).${C_O}"
 
 # --- 3. offer to launch ------------------------------------------------------
 _DC="docker compose --env-file backend/.env up --build"

@@ -7,37 +7,29 @@ from sql_scripts.definition_scripts import create_global_rule
 
 # --- POLICY DRIFT / RETRAINING ---------------------------------------------
 
-def compute_classifier_policy_fingerprint(classifier_id: int) -> str:
+def compute_classifier_policy_fingerprint_v2(classifier_id: int) -> str:
     """Deterministic content fingerprint of a guardrail's CURRENT active policy.
 
-    Each rule is captured by its CE composition (CE ids + roles + fallback
-    grouping) via `compute_rule_fingerprint_from_links`, the per-rule
-    fingerprints are sorted, and the whole thing is hashed. Independent of
-    setup_id churn and rule order, so re-adding a removed rule (which mints a
-    new setup_id) does NOT register as a change. Returns '' when there are no
-    active rule links.
-    """
-    from sql_scripts.junction_scripts import compute_rule_fingerprint_from_links
+    sha256 over the sorted per-setup (ce_groups, condition) fingerprints
+    (compute_rule_fingerprint_v2) of the guardrail's ACTIVE setups.
+    Independent of setup_id churn and rule order, so re-adding a removed rule
+    (which mints a new setup_id) does NOT register as a change. Returns ''
+    when no active setup carries logic."""
+    from sql_scripts.junction_scripts import compute_rule_fingerprint_v2
 
     rows = execute_query_dict(
         """
-        SELECT rs.setup_id, scl.ce_id, scl.role,
-               COALESCE(scl.fallback_group, 0) AS fallback_group
-        FROM rule_setup rs
-        JOIN setup_ce_link scl ON rs.setup_id = scl.setup_id
-        WHERE rs.classifier_id = %s AND rs.is_active = TRUE
+        SELECT ce_groups, condition FROM rule_setup
+        WHERE classifier_id = %s AND is_active = TRUE
         """,
         (classifier_id,),
     ) or []
-    by_setup: dict = {}
-    for r in rows:
-        by_setup.setdefault(r["setup_id"], []).append(
-            {"ce_id": r["ce_id"], "role": r["role"], "fallback_group": r["fallback_group"]}
-        )
-    rule_fingerprints = sorted(
-        compute_rule_fingerprint_from_links(links) for links in by_setup.values()
+    fps = sorted(
+        compute_rule_fingerprint_v2(r["ce_groups"], r["condition"])
+        for r in rows
+        if r["ce_groups"]
     )
-    canonical = ";".join(rule_fingerprints)
+    canonical = ";".join(fps)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest() if canonical else ""
 
 
@@ -68,7 +60,7 @@ def reconcile_classifier_status(classifier_id: int) -> str:
     trained_fp = rows[0].get("trained_policy_fingerprint")
     if status not in ("active", "needs_retraining") or not trained_fp:
         return status
-    current_fp = compute_classifier_policy_fingerprint(classifier_id)
+    current_fp = compute_classifier_policy_fingerprint_v2(classifier_id)
     new_status = "active" if current_fp == trained_fp else "needs_retraining"
     if new_status != status:
         execute_query(
@@ -108,7 +100,7 @@ def commit_trained_policy_snapshot(classifier_id: int) -> None:
     ) or []
     setup_ids = [r["setup_id"] for r in rows]
     names = [r["rule_name"] for r in rows]
-    fingerprint = compute_classifier_policy_fingerprint(classifier_id)
+    fingerprint = compute_classifier_policy_fingerprint_v2(classifier_id)
     execute_query(
         """
         UPDATE classifiers
@@ -237,79 +229,83 @@ def clone_classifier_policy(source_classifier_id: int, target_model_id: int,
         (user_id, target_model_id, candidate))[0]
     new_classifier_id = new["classifier_id"]
 
-    # Copy each rule_setup, then remap its setup_ce_link rows to the new setup_id
+    # Copy each rule_setup (incl. its per-guardrail ce_groups/condition logic
+    # copy), then remap its setup_ce_link membership rows to the new setup_id
     # (per-row, because each insert mints a fresh setup_id).
     setups = execute_query_dict(
-        "SELECT setup_id, rule_id, custom_name, predicate, is_active "
+        "SELECT setup_id, rule_id, custom_name, predicate, ce_groups, condition, is_active "
         "FROM rule_setup WHERE classifier_id = %s ORDER BY setup_id",
         (source_classifier_id,)) or []
     for s in setups:
         new_setup_id = execute_query_dict(
-            "INSERT INTO rule_setup (classifier_id, rule_id, custom_name, predicate, is_active) "
-            "VALUES (%s, %s, %s, %s, %s) RETURNING setup_id",
-            (new_classifier_id, s["rule_id"], s["custom_name"], s["predicate"], s["is_active"]),
+            "INSERT INTO rule_setup (classifier_id, rule_id, custom_name, predicate, ce_groups, condition, is_active) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING setup_id",
+            (new_classifier_id, s["rule_id"], s["custom_name"], s["predicate"],
+             s["ce_groups"], s["condition"], s["is_active"]),
         )[0]["setup_id"]
         execute_query(
-            "INSERT INTO setup_ce_link (setup_id, ce_id, role, fallback_group) "
-            "SELECT %s, ce_id, role, fallback_group FROM setup_ce_link WHERE setup_id = %s",
+            "INSERT INTO setup_ce_link (setup_id, ce_id) "
+            "SELECT %s, ce_id FROM setup_ce_link WHERE setup_id = %s",
             (new_setup_id, s["setup_id"]),
         )
     return new
 
 # --- RULE LINKING LOGIC ---
 
-def _build_predicate_from_roles(ce_roles: list, name_map: dict) -> str:
-    """Construct the boolean-logic (firing) predicate from role assignments.
+def resolve_editor_logic(groups: dict, condition: str):
+    """Translate the rule editor's logic shape ({group_name: [ce_id]},
+    condition) into the stored v2 shape.
 
-    Mirrors the reference detection semantics exactly (gavel detect_uc =
-    has_all_required AND passes_any_of): the predicate is
-        necessary CEs (AND)  AND  each fallback group ((OR within) AND across).
-    'sufficient' CEs are HELPFUL signals only — they raise confidence when
-    present but never trigger a rule on their own, so they are intentionally
-    NOT part of the boolean logic (the reference ignores 'supporting' CEs when
-    deciding whether a use case fired)."""
-    necessary = []
-    fallback_groups = {}
+    The frontend holds ce_ids; the DB stores CE NAMES inside ce_groups
+    (names are the identity the condition grammar and trained label keys
+    speak). Resolves every referenced ce_id to its name, validates the
+    (ce_groups, condition) pair via rule_condition.validate_condition, and
+    renders the display predicate.
 
-    for item in ce_roles:
-        ce_id = item.get("ce_id")
-        role = item.get("role", "necessary")
-        # Keep the raw group id so distinct groups stay distinct (the old
-        # max(fb, 1) collapsed groups 0 and 1 into one).
-        fallback_group = int(item.get("fallback_group", 0) or 0)
-        ce_name = name_map.get(ce_id, f"CE_{ce_id}")
-
-        if role == "fallback":
-            fallback_groups.setdefault(fallback_group, []).append(ce_name)
-        elif role == "sufficient":
-            continue  # helpful-only; excluded from the firing predicate
-        else:
-            necessary.append(ce_name)
-
-    predicate_parts = []
-    if necessary:
-        predicate_parts.append(" AND ".join(necessary))
-    for group_id in sorted(fallback_groups.keys()):
-        names = fallback_groups[group_id]
-        if names:
-            predicate_parts.append("(" + " OR ".join(names) + ")")
-
-    return " AND ".join(predicate_parts)
-
-
-def predicate_from_role_lists(necessary: list, fallback_groups: list) -> str:
-    """Build the firing predicate from NAME lists (the HF record / publish
-    payload shape): `necessary` is a list of CE names, `fallback_groups` is a
-    list of name-lists (one per group). Helpful/'sufficient' CEs are NOT a
-    parameter — they are never part of the boolean logic. Delegates to
-    _build_predicate_from_roles so there is ONE predicate-format source of truth.
+    Returns (ce_groups, condition, predicate, ce_ids) where ce_groups is
+    {group_name: [CE names]} and ce_ids is the sorted membership union.
+    Raises ValueError on unknown ce_ids or invalid logic.
     """
-    ce_roles = [{"ce_id": n, "role": "necessary"} for n in (necessary or [])]
-    for gi, group in enumerate(fallback_groups or []):
-        for n in (group or []):
-            ce_roles.append({"ce_id": n, "role": "fallback", "fallback_group": gi})
-    name_map = {r["ce_id"]: r["ce_id"] for r in ce_roles}  # names are the identity here
-    return _build_predicate_from_roles(ce_roles, name_map)
+    from utils.rule_condition import parse, render_predicate, validate_condition
+
+    groups = groups or {}
+    condition = (condition or "").strip()
+
+    ce_ids = sorted({int(cid) for members in groups.values() for cid in (members or [])})
+    name_map: dict = {}
+    if ce_ids:
+        rows = execute_query_dict(
+            "SELECT ce_id, name FROM cognitive_elements WHERE ce_id = ANY(%s)",
+            (ce_ids,),
+        ) or []
+        name_map = {r["ce_id"]: r["name"] for r in rows}
+        missing = [str(cid) for cid in ce_ids if cid not in name_map]
+        if missing:
+            raise ValueError(f"Unknown CE id(s): {', '.join(missing)}")
+
+    ce_groups = {
+        gname: [name_map[int(cid)] for cid in (members or [])]
+        for gname, members in groups.items()
+    }
+
+    problems = validate_condition(condition, ce_groups)
+    if problems:
+        raise ValueError("Invalid rule logic: " + "; ".join(problems))
+
+    predicate = render_predicate(parse(condition), ce_groups)
+    return ce_groups, condition, predicate, ce_ids
+
+
+def _replace_setup_membership(setup_id: int, ce_ids: list):
+    """Rebuild a setup's membership links (pure membership — the logic lives
+    in rule_setup.ce_groups/condition)."""
+    execute_query("DELETE FROM setup_ce_link WHERE setup_id = %s", (setup_id,))
+    for ce_id in ce_ids:
+        execute_query(
+            "INSERT INTO setup_ce_link (setup_id, ce_id) VALUES (%s, %s) "
+            "ON CONFLICT DO NOTHING",
+            (setup_id, ce_id),
+        )
 
 
 # 1. LINK EXISTING PUBLIC RULE (User selects from list)
@@ -319,19 +315,26 @@ def add_rule_to_classifier(classifier_id: int, public_rule_id: int):
     if not result:
         raise ValueError(f"Rule {public_rule_id} not found")
     pub_rule = result[0]
-    
-    # Create a local copy in rule_setup linked to the public rule
+
+    # Create a local copy in rule_setup linked to the public rule. The
+    # per-guardrail ce_groups/condition copy starts as a verbatim snapshot of
+    # the rule's logic; private edits later diverge it without touching the
+    # library rule.
     query_setup = """
-        INSERT INTO rule_setup (classifier_id, rule_id, custom_name, predicate)
-        VALUES (%s, %s, %s, %s) RETURNING setup_id
+        INSERT INTO rule_setup (classifier_id, rule_id, custom_name, predicate, ce_groups, condition)
+        VALUES (%s, %s, %s, %s, %s, %s) RETURNING setup_id
     """
-    setup_id = execute_query_dict(query_setup, (classifier_id, public_rule_id, pub_rule['name'], pub_rule['predicate']))[0]['setup_id']
-    
-    # Copy the Cognitive Elements tags from public to private, preserving role and fallback grouping
+    setup_id = execute_query_dict(
+        query_setup,
+        (classifier_id, public_rule_id, pub_rule['name'], pub_rule['predicate'],
+         pub_rule.get('ce_groups') or {}, pub_rule.get('condition')),
+    )[0]['setup_id']
+
+    # Copy the CE membership rows from public to private.
     execute_query(
         """
-        INSERT INTO setup_ce_link (setup_id, ce_id, role, fallback_group)
-        SELECT %s, ce_id, role, fallback_group FROM rule_ce_link WHERE rule_id = %s
+        INSERT INTO setup_ce_link (setup_id, ce_id)
+        SELECT %s, ce_id FROM rule_ce_link WHERE rule_id = %s
         """,
         (setup_id, public_rule_id),
     )
@@ -383,13 +386,14 @@ def fork_public_rule_set_to_classifier(rule_set_public_id: str, user_id: int,
 
 # 2. CREATE MANUALLY (User types by hand -> Local only)
 def create_custom_rule_setup(classifier_id: int, name: str):
-    """Creates a private rule. rule_id is NULL."""
+    """Creates a private rule. rule_id is NULL; logic starts empty
+    (ce_groups = {}, condition = NULL) until the editor saves it."""
     query = """
-        INSERT INTO rule_setup (classifier_id, custom_name, predicate, rule_id)
-        VALUES (%s, %s, '', NULL) 
+        INSERT INTO rule_setup (classifier_id, custom_name, predicate, rule_id, ce_groups, condition)
+        VALUES (%s, %s, '', NULL, %s, NULL)
         RETURNING setup_id
     """
-    result = execute_query_dict(query, (classifier_id, name))
+    result = execute_query_dict(query, (classifier_id, name, {}))
     return result[0]['setup_id'] if result else None
 
 # 3. CREATE WITH AI (Global Table -> Then Link)
@@ -397,11 +401,26 @@ def create_and_link_global_rule(classifier_id: int, name: str, predicate: str, c
     """
     1. Creates rule in 'rules' table (Global).
     2. Links it to this guardrail using add_rule_to_classifier logic.
+
+    Legacy path: the caller speaks a flat ce_id list, which maps to a single
+    'required' group with condition 'all of required' (every CE necessary —
+    the pre-v24 default for role-less links).
     """
+    names = []
+    if ce_ids:
+        rows = execute_query_dict(
+            "SELECT ce_id, name FROM cognitive_elements WHERE ce_id = ANY(%s)",
+            (list(ce_ids),),
+        ) or []
+        names = sorted(r["name"] for r in rows)
+
+    ce_groups = {"required": names} if names else {}
+    condition = "all of required" if names else None
+
     # Step A: Create in Global Table
     # Note: create_global_rule comes from definition_scripts.py
-    global_rule_id = create_global_rule(name, predicate, ce_ids)
-    
+    global_rule_id = create_global_rule(name, predicate, ce_groups=ce_groups, condition=condition)
+
     # Step B: Link to Guardrail
     setup_id = add_rule_to_classifier(classifier_id, global_rule_id)
     return setup_id
@@ -409,13 +428,24 @@ def create_and_link_global_rule(classifier_id: int, name: str, predicate: str, c
 # --- FETCHING & UPDATING ---
 
 def get_classifier_rules(classifier_id: int):
+    """Rule setups for a guardrail's Policy Logic page.
+
+    Each row carries:
+      * `logic` — {"groups": {group_name: [{ce_id, name}]}, "condition",
+        "predicate"} built from the setup's ce_groups/condition columns
+        (the v2 logic contract the rule editor speaks).
+      * `active_ces` — flat [{ce_id, name}] membership list (kept so CE-count
+        displays and membership-only consumers keep working).
+    """
     query = """
-        SELECT 
+        SELECT
             rs.setup_id,
             rs.classifier_id,
             rs.rule_id as source_rule_id,
             rs.custom_name,
             rs.predicate,
+            rs.ce_groups,
+            rs.condition,
             rs.is_active,
             -- Surface the source rule's draft flag so the UI can show a
             -- "Publish to library" button on local drafts. Setups whose
@@ -449,9 +479,7 @@ def get_classifier_rules(classifier_id: int):
                 json_group_array(
                     json_object(
                         'ce_id', ce.ce_id,
-                        'name', ce.name,
-                        'role', COALESCE(link.role, 'necessary'),
-                        'fallback_group', COALESCE(link.fallback_group, 0)
+                        'name', ce.name
                     )
                 ) FILTER (WHERE ce.ce_id IS NOT NULL),
                 '[]'
@@ -470,96 +498,115 @@ def get_classifier_rules(classifier_id: int):
                  r.description, r.created_by_username
         ORDER BY rs.setup_id ASC
     """
-    return execute_query_dict(query, (classifier_id,))
-
-def update_private_setup(setup_id: int, new_predicate: str | None = None, new_ce_ids: list | None = None, ce_roles: list | None = None):
-    """
-    Update predicate and CE links for a private setup.
-    If ce_roles is provided, predicate will be rebuilt from roles. Returns final predicate.
-    """
-    execute_query("DELETE FROM setup_ce_link WHERE setup_id = %s", (setup_id,))
-
-    predicate = new_predicate or ""
-
-    if ce_roles:
-        ce_ids = [item.get("ce_id") for item in ce_roles if item.get("ce_id") is not None]
-        placeholders = ",".join(["%s"] * len(ce_ids)) if ce_ids else None
-        name_rows = execute_query_dict(
-            f"SELECT ce_id, name FROM cognitive_elements WHERE ce_id IN ({placeholders})" if placeholders else "SELECT ce_id, name FROM cognitive_elements WHERE false",
-            tuple(ce_ids) if placeholders else (),
+    rows = execute_query_dict(query, (classifier_id,)) or []
+    for row in rows:
+        row["logic"] = _build_logic_payload(
+            row.pop("ce_groups", None),
+            row.pop("condition", None),
+            row.get("predicate"),
+            row.get("active_ces") or [],
         )
-        name_map = {row["ce_id"]: row["name"] for row in name_rows}
+    return rows
 
-        for item in ce_roles:
-            ce_id = item.get("ce_id")
-            role = item.get("role", "necessary")
-            fallback_group = int(item.get("fallback_group", 0) or 0)
-            insert_group = fallback_group if role == "fallback" else 0
+
+def _build_logic_payload(ce_groups, condition, predicate, membership: list) -> dict:
+    """Shape a stored (ce_groups, condition, predicate) triple into the
+    editor/read contract: {"groups": {group_name: [{ce_id, name}]},
+    "condition", "predicate"}. `membership` is the flat [{ce_id, name}]
+    list used to resolve member names back to ce_ids (a name missing from
+    membership — which shouldn't happen — degrades to ce_id None instead of
+    dropping the member)."""
+    name_to_id = {m["name"]: m["ce_id"] for m in membership if m.get("name")}
+    groups = {
+        gname: [{"ce_id": name_to_id.get(n), "name": n} for n in (members or [])]
+        for gname, members in (ce_groups or {}).items()
+    }
+    return {
+        "groups": groups,
+        "condition": condition or "",
+        "predicate": predicate or "",
+    }
+
+
+def update_private_setup(setup_id: int, groups: dict, condition: str):
+    """Update a setup's logic from the editor shape ({group_name: [ce_id]},
+    condition string).
+
+    Resolves ids -> names, validates the (ce_groups, condition) pair, then
+    rewrites the setup's membership links + ce_groups/condition/predicate.
+    If the setup is backed by the user's own LOCAL DRAFT rule, the draft's
+    rules row + rule_ce_link membership are patched in place too (the
+    in-place edit path — no new rule entity, no draft clutter). A setup
+    backed by a PUBLIC rule only gets its private copy updated; forking is
+    the caller's job (fork_setup_to_draft).
+
+    Returns the derived display predicate. Raises ValueError on invalid
+    logic or unknown ce_ids.
+    """
+    ce_groups, condition, predicate, ce_ids = resolve_editor_logic(groups, condition)
+
+    _replace_setup_membership(setup_id, ce_ids)
+    execute_query(
+        "UPDATE rule_setup SET ce_groups = %s, condition = %s, predicate = %s WHERE setup_id = %s",
+        (ce_groups, condition, predicate, setup_id),
+    )
+
+    # In-place path: keep the backing draft rule in lockstep so My Drafts
+    # always shows the logic the user last saved.
+    backing = execute_query_dict(
+        """
+        SELECT r.rule_id
+        FROM rule_setup rs
+        JOIN rules r ON rs.rule_id = r.rule_id
+        WHERE rs.setup_id = %s AND r.is_local_draft = TRUE
+        """,
+        (setup_id,),
+    ) or []
+    if backing:
+        rule_id = backing[0]["rule_id"]
+        execute_query(
+            "UPDATE rules SET ce_groups = %s, condition = %s, predicate = %s WHERE rule_id = %s",
+            (ce_groups, condition, predicate, rule_id),
+        )
+        execute_query("DELETE FROM rule_ce_link WHERE rule_id = %s", (rule_id,))
+        for ce_id in ce_ids:
             execute_query(
-                "INSERT INTO setup_ce_link (setup_id, ce_id, role, fallback_group) VALUES (%s, %s, %s, %s)",
-                (setup_id, ce_id, role, insert_group),
+                "INSERT INTO rule_ce_link (rule_id, ce_id) VALUES (%s, %s) "
+                "ON CONFLICT DO NOTHING",
+                (rule_id, ce_id),
             )
 
-        predicate = _build_predicate_from_roles(ce_roles, name_map)
-
-    elif new_ce_ids:
-        for ce_id in new_ce_ids:
-            execute_query("INSERT INTO setup_ce_link (setup_id, ce_id) VALUES (%s, %s)", (setup_id, ce_id))
-
-    execute_query("UPDATE rule_setup SET predicate = %s WHERE setup_id = %s", (predicate, setup_id))
     return predicate
 
 
-def create_draft_rule_from_bookmarked(name: str, ce_roles: list, categories: list | None = None, description: str = ""):
-    """Create a GUARDRAIL-AGNOSTIC draft rule from bookmarked CEs with roles.
+def create_draft_rule_from_bookmarked(name: str, groups: dict, condition: str,
+                                      categories: list | None = None, description: str = ""):
+    """Create a GUARDRAIL-AGNOSTIC draft rule from bookmarked CEs.
+
+    `groups` is the editor shape {group_name: [ce_id]}; `condition` is the v2
+    grammar string over those group names. Ids are translated to CE names for
+    storage.
 
     Does NOT attach the rule to any guardrail — it only writes the canonical
-    `rules` row + `rule_ce_link` entries (via `upsert_rule_with_links`), exactly
-    like the AI rule pipeline. The result is a local draft (is_ready=FALSE until
-    finalized) that lands in the user's Drafts; the user adds it to a guardrail
-    later.
+    `rules` row + `rule_ce_link` membership entries (via
+    `upsert_rule_with_links`), exactly like the AI rule pipeline. The result
+    is a local draft (is_ready=FALSE until finalized) that lands in the
+    user's Drafts; the user adds it to a guardrail later.
 
     `mark_pending=True` keeps it hidden until the wizard finalizes it, and lets
     the boot-time IncompletePipelineRecovery wipe it cleanly if the user
     abandons the wizard. Structural dedup is enforced globally inside
     `upsert_rule_with_links`. Returns (rule_id, predicate).
     """
-    if not ce_roles:
-        raise ValueError("ce_roles cannot be empty")
+    if not groups or not any(members for members in groups.values()):
+        raise ValueError("groups cannot be empty")
 
-    ce_ids = [item.get("ce_id") for item in ce_roles if item.get("ce_id") is not None]
-    placeholders = ",".join(["%s"] * len(ce_ids))
-    ce_rows = execute_query_dict(
-        f"SELECT ce_id, name FROM cognitive_elements WHERE ce_id IN ({placeholders})",
-        tuple(ce_ids),
-    ) if ce_ids else []
-    name_map = {row["ce_id"]: row["name"] for row in ce_rows}
+    ce_groups, condition, predicate, _ = resolve_editor_logic(groups, condition)
 
-    role_buckets = {"necessary": [], "sufficient": []}
-    fallback_groups: dict[int, list[str]] = {}
-    for item in ce_roles:
-        ce_id = item.get("ce_id")
-        role = item.get("role", "necessary")
-        fallback_group = int(item.get("fallback_group", 0) or 0)
-        ce_name = name_map.get(ce_id)
-        if not ce_name:
-            continue
-        if role == "fallback":
-            grp = max(fallback_group, 1)
-            fallback_groups.setdefault(grp, []).append(ce_name)
-        elif role == "sufficient":
-            role_buckets["sufficient"].append(ce_name)
-        else:
-            role_buckets["necessary"].append(ce_name)
-
-    predicate = _build_predicate_from_roles(ce_roles, name_map)
-    fallback_ordered = [fallback_groups[k] for k in sorted(fallback_groups)] if fallback_groups else []
     rule_data = {
         "rule_name": name,
-        "predicate": predicate,
-        "necessary": role_buckets["necessary"],
-        "fallback": fallback_ordered,
-        "sufficient": role_buckets["sufficient"],
+        "ce_groups": ce_groups,
+        "condition": condition,
         "description": description or "",
         "categories": categories or [],
     }
@@ -572,11 +619,15 @@ def fork_setup_to_draft(
     setup_id: int,
     user_id: int,
     new_name: str,
-    ce_roles: list,
+    groups: dict,
+    condition: str,
     add_bookmark: bool = False,
 ):
     """
     Promote an in-progress setup edit into a NEW private draft rule.
+
+    `groups` is the editor shape {group_name: [ce_id]}; `condition` is the
+    v2 grammar string over those group names.
 
     Used by the rule-editor Save flow when the source rule is either
     (a) a public library rule the user is forking, or (b) a manual setup
@@ -589,17 +640,19 @@ def fork_setup_to_draft(
       1. Validate `new_name` is non-empty and free of name conflicts in
          the global rules table (the column has a UNIQUE constraint, so
          we probe up-front for a clean error message).
-      2. Compute the structural fingerprint and reject duplicates of any
-         rule the user could observe — same logic the editor's pre-save
-         check applies, but we re-run server-side because the client
-         could be stale.
-      3. Build the new rules row + rule_ce_link entries via
+      2. Resolve/validate the logic, compute the v2 structural fingerprint
+         and reject duplicates of any rule the user could observe — same
+         logic the editor's pre-save check applies, but re-run server-side
+         because the client could be stale. The per-guardrail scan reads
+         sibling rule_setup.ce_groups/condition copies.
+      3. Build the new rules row + membership links via
          `upsert_rule_with_links` (gives us is_local_draft=TRUE for free).
-      4. Replace the setup_ce_link rows on the existing setup_id, and
-         repoint setup.rule_id + setup.custom_name to the new rule.
+      4. Replace the setup's membership rows + ce_groups/condition/
+         predicate, and repoint setup.rule_id + setup.custom_name to the
+         new rule.
       5. Optionally insert a bookmark for the user so the rule shows up
          in My Bookmarks for reuse on other guardrails.
-      6. Return the new rule_id + the computed predicate.
+      6. Return the new rule_id + the derived predicate.
     """
     name = (new_name or "").strip()
     if not name:
@@ -629,111 +682,54 @@ def fork_setup_to_draft(
             f"to save your edit as a new draft."
         )
 
-    # 2. Structural dedup. Mirrors the route-level check_rule_duplicate
-    # endpoint but re-runs here so a stale client can't smuggle a
-    # duplicate past us. Excludes the setup we're editing.
-    from sql_scripts.junction_scripts import (
-        compute_rule_fingerprint_from_links,
-        find_existing_rule_by_fingerprint,
-        find_existing_rule_setup_by_fingerprint,
-    )
-    fingerprint = compute_rule_fingerprint_from_links(ce_roles)
+    # 2. Resolve + validate the logic, then structural dedup. Mirrors the
+    # route-level check_rule_duplicate endpoint but re-runs here so a stale
+    # client can't smuggle a duplicate past us.
+    ce_groups, condition, predicate, ce_ids = resolve_editor_logic(groups, condition)
 
-    # Within the guardrail's other setups (excluding the one we're
-    # editing).
-    sibling_rows = execute_query_dict(
-        """
-        SELECT rs.setup_id, rs.custom_name,
-               COALESCE(
-                   json_group_array(
-                       json_object(
-                           'ce_id', scl.ce_id,
-                           'role', scl.role,
-                           'fallback_group', scl.fallback_group
-                       )
-                   ) FILTER (WHERE scl.ce_id IS NOT NULL),
-                   '[]'
-               ) AS "links [JSONB]"
-        FROM rule_setup rs
-        LEFT JOIN setup_ce_link scl ON scl.setup_id = rs.setup_id
-        WHERE rs.classifier_id = %s AND rs.setup_id <> %s
-        GROUP BY rs.setup_id, rs.custom_name
-        """,
-        (classifier_id, setup_id),
-    ) or []
-    for row in sibling_rows:
-        if compute_rule_fingerprint_from_links(row["links"]) == fingerprint:
-            raise ValueError(
-                f"Same logic as another rule in this guardrail "
-                f"('{row['custom_name'] or 'unnamed'}'). Differentiate the "
-                f"logic before forking."
-            )
+    from sql_scripts.junction_scripts import (
+        compute_rule_fingerprint_v2,
+        find_existing_rule_by_fingerprint_v2,
+        find_existing_rule_setup_by_fingerprint_v2,
+    )
+    fingerprint = compute_rule_fingerprint_v2(ce_groups, condition)
+
+    # Within the guardrail's other setups (excluding the one we're editing).
+    sibling = find_existing_rule_setup_by_fingerprint_v2(
+        classifier_id, fingerprint, exclude_setup_id=setup_id
+    )
+    if sibling is not None:
+        raise ValueError(
+            f"Same logic as another rule in this guardrail "
+            f"('{sibling.get('custom_name') or 'unnamed'}'). Differentiate the "
+            f"logic before forking."
+        )
     # And against the global rules table (excluding by NAME — none of
     # our existing rule names match `name` since we just probed for that).
-    global_dup = find_existing_rule_by_fingerprint(fingerprint)
+    global_dup = find_existing_rule_by_fingerprint_v2(fingerprint)
     if global_dup is not None:
         raise ValueError(
             f"Same logic as existing rule '{global_dup.get('name')}'. "
             f"Modify the rule structure before forking."
         )
 
-    # 3. Build the new rules row. Translate ce_roles → role-bucketed
-    # CE NAMES for upsert_rule_with_links (which speaks names).
-    ce_ids = [item.get("ce_id") for item in ce_roles if item.get("ce_id") is not None]
-    name_rows = execute_query_dict(
-        "SELECT ce_id, name FROM cognitive_elements WHERE ce_id = ANY(%s)",
-        (ce_ids,),
-    ) if ce_ids else []
-    name_map = {r["ce_id"]: r["name"] for r in name_rows}
-
-    necessary, sufficient = [], []
-    fallback_groups: dict[int, list[str]] = {}
-    for item in ce_roles:
-        ce_id = item.get("ce_id")
-        role = (item.get("role") or "necessary").lower()
-        ce_name = name_map.get(ce_id)
-        if not ce_name:
-            continue
-        if role == "necessary":
-            necessary.append(ce_name)
-        elif role == "sufficient":
-            sufficient.append(ce_name)
-        elif role == "fallback":
-            grp = max(int(item.get("fallback_group", 0) or 0), 1)
-            fallback_groups.setdefault(grp, []).append(ce_name)
-
-    fallback_ordered = [fallback_groups[k] for k in sorted(fallback_groups)] if fallback_groups else []
-    predicate = _build_predicate_from_roles(ce_roles, name_map)
-
+    # 3. Build the new rules row + membership links.
     rule_data = {
         "rule_name": name,
-        "predicate": predicate,
-        "necessary": necessary,
-        "fallback": fallback_ordered,
-        "sufficient": sufficient,
+        "ce_groups": ce_groups,
+        "condition": condition,
         "description": "",
         "categories": [],
     }
     from gavel_pipeline.db_access import upsert_rule_with_links
     new_rule_id = upsert_rule_with_links(rule_data)
 
-    # 4. Replace setup_ce_link rows and repoint the setup at the new rule.
-    execute_query("DELETE FROM setup_ce_link WHERE setup_id = %s", (setup_id,))
-    for item in ce_roles:
-        ce_id = item.get("ce_id")
-        if ce_id is None:
-            continue
-        role = (item.get("role") or "necessary").lower()
-        fallback_group = int(item.get("fallback_group", 0) or 0)
-        insert_group = fallback_group if role == "fallback" else 0
-        execute_query(
-            "INSERT INTO setup_ce_link (setup_id, ce_id, role, fallback_group) VALUES (%s, %s, %s, %s)",
-            (setup_id, ce_id, role, insert_group),
-        )
-
+    # 4. Replace the setup's membership + logic and repoint at the new rule.
+    _replace_setup_membership(setup_id, ce_ids)
     execute_query(
-        "UPDATE rule_setup SET rule_id = %s, custom_name = %s, predicate = %s WHERE setup_id = %s",
-        (new_rule_id, name, predicate, setup_id),
+        "UPDATE rule_setup SET rule_id = %s, custom_name = %s, predicate = %s, "
+        "ce_groups = %s, condition = %s WHERE setup_id = %s",
+        (new_rule_id, name, predicate, ce_groups, condition, setup_id),
     )
 
     # Editing the policy means the trained guardrail no longer matches
@@ -747,7 +743,7 @@ def fork_setup_to_draft(
     if add_bookmark:
         try:
             from services.bookmarks import BookmarkService
-            BookmarkService.add("rule", user_id, new_rule_id)
+            BookmarkService.add("rule", new_rule_id)
         except Exception:
             # Bookmark is opt-in convenience; a duplicate-bookmark race
             # or transient failure shouldn't roll back the fork itself.

@@ -108,7 +108,7 @@ describe('Community — initial render & layout', () => {
 
     it('shows the empty state for search mode with no query', async () => {
         renderAt();
-        expect(await screen.findByText(/No artists yet\. Be the first to publish!/i)).toBeInTheDocument();
+        expect(await screen.findByText(/No artists yet — contributors appear once their work lands in the library\./i)).toBeInTheDocument();
     });
 });
 

@@ -334,6 +334,48 @@ class TestDefaultEvalPairsPerRule:
             assert types == {"positive", "negative"}
 
 
+class TestNeutralSplitOptional:
+    """The gavel-rules registry ships no neutral corpus. An EMPTY local
+    neutral_corpus table must not hard-fail an evaluation run any more —
+    the split is skipped with a warning and the run proceeds.
+
+    We don't train a model here: with the neutral hard-fail gone, an
+    untrained guardrail's run now proceeds PAST the data-fetch phase and
+    fails at the trained-labels check instead. Asserting the recorded error
+    is about the model — never about the corpus — pins the new behavior
+    deterministically."""
+
+    def test_empty_neutral_corpus_does_not_abort_the_run(
+        self, client, test_model, test_user, auth_headers, monkeypatch
+    ):
+        from utils.sqlite_db import execute_query_dict
+        import evaluation.neutral_corpus as nc
+        from routes.evaluation import _run_evaluation
+
+        # Simulate a fresh install: no neutral rows regardless of dev-DB state.
+        monkeypatch.setattr(nc, "load_neutral_corpus_by_category", lambda: {})
+
+        cid = execute_query_dict(
+            "INSERT INTO classifiers (model_id, user_id, name, status) "
+            "VALUES (%s, %s, %s, 'untrained') RETURNING classifier_id",
+            (test_model["model_id"], test_user["user_id"], f"neutral_opt_{_uniq()}"),
+        )[0]["classifier_id"]
+
+        # Must not raise even with include_neutral=True and zero corpus rows.
+        _run_evaluation(cid, [], include_neutral=True)
+
+        rows = execute_query_dict(
+            "SELECT metrics FROM evaluation_results "
+            "WHERE classifier_id = %s AND eval_type = 'evaluation_error'",
+            (cid,),
+        ) or []
+        assert rows, "run should have recorded its (untrained-model) error"
+        err = ((rows[0]["metrics"] or {}).get("error") or "").lower()
+        assert "neutral" not in err and "corpus" not in err
+        # The run proceeded to the trained-model stage before failing.
+        assert "model" in err or "label" in err or "classifier_meta" in err
+
+
 class TestEvalDetailedEndpointRemoved:
     """The standalone 'Detailed eval' / detailed-calibration endpoint was
     removed. Any guess at its old path must 404 (route absent) — never 200."""

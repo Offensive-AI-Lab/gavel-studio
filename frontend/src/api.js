@@ -1,7 +1,12 @@
 // frontend/src/api.js
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+// Unset (the default) means same-origin: in dev the Vite proxy forwards every
+// backend prefix to :8000, so the browser only ever needs to reach :5173 —
+// crucial when the studio is viewed through a forwarded/tunneled port. Set
+// VITE_API_URL only when the frontend is served from a different host than
+// the backend.
+const API_URL = import.meta.env.VITE_API_URL ?? "";
 
 const api = axios.create({
     baseURL: API_URL,
@@ -147,12 +152,12 @@ export const getRuleDetail = async (ruleId) => api.get(`/rules/${ruleId}/detail`
 export const addRuleToClassifier = async (classifierId, publicRuleId) =>
     withNotify(api.post(`/classifiers/${classifierId}/rules/add`, { rule_id: publicRuleId }));
 
-// 3. Update the boolean logic/CEs of a specific rule instance (role-aware)
-// Accepts an options object: { predicate, active_ces, ce_links }
-export const updateRuleLogic = async (setupId, userId, options = {}) => {
-    const payload = { user_id: userId, ...options };
-    return withNotify(api.put(`/rules/setup/${setupId}`, payload));
-};
+// 3. Update the firing logic of a specific rule instance (groups + condition).
+// `groups` is { group_name: [ce_id, ...] }; `condition` is the v2 grammar
+// expression over the group names. The backend resolves ids -> names, derives
+// the display predicate and validates the condition (400 on bad grammar).
+export const updateRuleLogic = async (setupId, { groups, condition }) =>
+    withNotify(api.put(`/rules/setup/${setupId}`, { groups, condition }));
 
 // 4. Delete a rule from the guardrail
 export const deleteRuleSetup = async (setupId) =>
@@ -160,18 +165,6 @@ export const deleteRuleSetup = async (setupId) =>
 
 // 5. Public Library (for the "Add Rule" dropdown)
 export const getPublicRules = async () => api.get(`/rules/public/library`);
-export const createPublicRule = async (name, predicate, { necessary = [], fallback = [], sufficient = [], ceNames = [], categories = [] } = {}, userId, definition = "") =>
-    withNotify(api.post(`/rules/public/create`, {
-        name,
-        predicate,
-        user_id: userId,
-        necessary,
-        fallback,
-        sufficient,
-        ce_names: ceNames, // legacy for backward compatibility
-        definition,
-        categories,
-    }));
 export const addRuleBookmark = async (userId, ruleId) =>
     withNotify(api.post(`/rules/public/bookmark`, { user_id: userId, rule_id: ruleId }));
 export const getRuleBookmarks = async (userId) => api.get(`/rules/public/bookmarks/${userId}`);
@@ -189,9 +182,6 @@ export const addRuleSetBookmark = async (userId, ruleSetId) =>
 export const getRuleSetBookmarks = async (userId) => api.get(`/rules/public/rule-set/bookmarks/${userId}`);
 export const removeRuleSetBookmark = async (userId, ruleSetId) =>
     withNotify(api.delete(`/rules/public/rule-set/bookmark/${userId}/${ruleSetId}`));
-// Publish a private rule set (model-less classifier) to the community.
-export const publishRuleSet = async (classifierId) =>
-    withNotify(api.post(`/library/publish/rule-set/${classifierId}`));
 // Fork a public rule set into a new private, model-less rule set.
 export const forkPublicRuleSet = async (ruleSetPublicId, name = null) =>
     withNotify(api.post(`/classifiers/from-rule-set`, { rule_set_public_id: ruleSetPublicId, name }));
@@ -213,29 +203,31 @@ export const searchLibrary = async ({ q, categories, asset_types, author, page=1
 };
 export const getAllCategories = async () => api.get(`/library/categories`);
 
-// --- Library Sync + Publish ---
-// Sync pulls deltas from the HF registry into the local DB. Idempotent and
-// cheap when nothing has changed. Wire this into the login flow so the
-// user always lands on the latest library.
-// syncLibrary intentionally does NOT use withNotify. Called from two
-// paths today: (1) login fire-and-forget for a fresh start, and (2)
-// the manual "Sync now" fallback. Neither path wants
-// gavel:libraryChanged dispatched on a no-op pull, so we gate the
-// dispatch on actual deltas. Ongoing live updates do NOT come through
-// here — they arrive via the SSE stream (LibrarySyncStream), which the
-// backend pushes when its registry update poll spots a change.
+// --- Library Sync ---
+// Sync pulls deltas from the gavel-rules GitHub library into the local DB.
+// Idempotent and cheap when nothing has changed.
+// syncLibrary intentionally does NOT use withNotify: the manual "Sync now"
+// path doesn't want gavel:libraryChanged dispatched on a no-op pull, so we
+// gate the dispatch on actual deltas (SyncResponse counters). Ongoing live
+// updates do NOT come through here — they arrive via the SSE stream
+// (LibrarySyncStream), which the backend pushes when its registry update
+// poll spots a change.
 export const syncLibrary = async ({ force = false } = {}) => {
     const res = await api.get(`/library/sync`, { params: force ? { force: true } : {} });
     const data = res?.data || {};
     const changed = (data.rules_added || 0) > 0
                  || (data.ces_added || 0) > 0
+                 || (data.rule_sets_added || 0) > 0
+                 || (data.rules_refreshed || 0) > 0
+                 || (data.ces_refreshed || 0) > 0
+                 || (data.rule_sets_refreshed || 0) > 0
                  || (data.categories_synced || 0) > 0;
     if (changed) notifyLibrary();
     return res;
 };
 
-// Cheap probe: "does HF have content the local DB hasn't seen?"
-// Returns { available: bool, checked: bool, reason: string|null }.
+// Cheap probe: "does the gavel-rules repo have content the local DB hasn't
+// seen?" Returns { available: bool, checked: bool, reason: string|null }.
 // Retained as a manual fallback; the live path is now the SSE stream,
 // not a timer. Doesn't mutate anything; never fires gavel:libraryChanged.
 export const checkLibraryUpdates = async () =>
@@ -250,65 +242,37 @@ export const getComputeStatus = async () =>
 export const getComputeTargets = async (workload = 'training') =>
     api.get(`/compute/targets`, { params: { workload } });
 
-// Probe whether a given CE/role/fallback shape collides with any rule
+// Probe whether a given groups/condition shape collides with any rule
 // the user could observe (their guardrail setups + the global rules
 // table). Used by the rule editor on Save to surface "this duplicates
 // rule X" before the user invests in retraining a copy. See backend
 // route POST /rules/check-duplicate.
-export const checkRuleDuplicate = async ({ ce_links, classifier_id = null, exclude_setup_id = null }) =>
+export const checkRuleDuplicate = async ({ groups, condition, classifier_id = null, exclude_setup_id = null }) =>
     api.post(`/rules/check-duplicate`, {
-        ce_links,
+        groups,
+        condition,
         classifier_id,
         exclude_setup_id,
     });
 
-// Save user-edited rule logic. The backend decides between an in-place
-// patch (when editing the user's own draft) and a fork (when the
-// source is a public rule or a manual setup with no backing rule yet);
-// in the fork case it creates a new draft rule under `new_name` and
-// optionally bookmarks it for cross-guardrail reuse. Wrapped with
-// withNotify so My Drafts / My Bookmarks / sidebar all refresh on
-// success without callers needing to know.
-export const saveEditedRule = async (setupId, { user_id, ce_links, new_name = null, add_bookmark = false }) =>
+// Save user-edited rule logic ({groups: {name: [ce_id]}, condition}). The
+// backend decides between an in-place patch (when editing the user's own
+// draft) and a fork (when the source is a public rule or a manual setup
+// with no backing rule yet); in the fork case it creates a new draft rule
+// under `new_name` and optionally bookmarks it for cross-guardrail reuse.
+// Wrapped with withNotify so My Drafts / My Bookmarks / sidebar all
+// refresh on success without callers needing to know.
+export const saveEditedRule = async (setupId, { groups, condition, new_name = null, add_bookmark = false }) =>
     withNotify(api.post(`/rules/setup/${setupId}/save-edited`, {
-        user_id,
-        ce_links,
+        groups,
+        condition,
         new_name,
         add_bookmark,
     }));
 
-// Publish pushes a local draft to the HF registry. Atomic: succeeds with a
-// public_id, returns CONFLICT if the name is already taken, RACE if another
-// user pushed between our sync and our push, or ERROR (and the local draft
-// is removed) on hard failure. See backend/services/hf_publish.py.
-export const publishCE = async (ceId) => withNotify(api.post(`/library/publish/ce/${ceId}`));
-export const publishRule = async (ruleId) => withNotify(api.post(`/library/publish/rule/${ruleId}`));
-
-// Replace a local DRAFT CE with the existing PUBLIC CE it name-clashed with
-// (in place). Used by the rule-publish "adopt existing CE" resolution so a rule
-// can point at a shared CE without a rule editor. See routes/library.py.
-export const adoptPublicCE = async (ceId, publicId) =>
-    api.post(`/library/ce/${ceId}/adopt-public`, { public_id: publicId });
-
-// Probe whether a rule/CE name is already taken in the registry. Used by
-// the AI pipeline's early-conflict modal and the rename input. Returns
-// { exists, public_id?, summary? }.
-export const checkLibraryName = async ({ kind, name }) =>
-    api.get(`/library/check-name`, { params: { kind, name } });
-
-// Fetch a single public record's summary by public_id (from local cache).
-// Used by the conflict-modal preview pane.
-export const getPublicRecord = async (kind, publicId) =>
-    api.get(`/library/record/${kind}/${encodeURIComponent(publicId)}`);
-
-// Cleanup orphan local drafts left over from interrupted AI pipelines /
-// cancels / crashes. Should be called AFTER /library/sync so the manifest
-// cache is fresh and ghost-published rows have already been healed.
-// Returns { rules_deleted, ces_deleted, kept_for_conflict }.
-export const cleanupLocalDrafts = async () => withNotify(api.post(`/library/cleanup-local-drafts`));
-
 // List every local-draft rule and CE — powers the "My Drafts" page where
-// the user reviews everything still private and decides what to publish.
+// the user reviews everything still private. Contributing a draft to the
+// shared library happens via a gavel-rules pull request, outside Studio.
 // Returns { rules: [...], ces: [...] }.
 export const listLocalDrafts = async () => api.get(`/library/drafts`);
 
@@ -352,14 +316,13 @@ export const generateGavelPipeline = async (scenario, userId, classifierId = nul
 // Flips is_ready=TRUE on the rule and its CEs, computes embeddings, and
 // kicks off generation of the rule's DEFAULT test/calibration set from the
 // ideation `scenario` (if omitted, the backend derives one from the CEs).
-export const embedResources = async ({ ruleId, ceIds = [], userId, classifierId = null, ruleCategories = [], assistantRoles = {}, scenario = null }) =>
+export const embedResources = async ({ ruleId, ceIds = [], userId, classifierId = null, ruleCategories = [], scenario = null }) =>
     api.post(`/ai/embed-resources`, {
         rule_id: ruleId,
         ce_ids: ceIds,
         user_id: userId,
         classifier_id: classifierId,
         rule_categories: ruleCategories,
-        assistant_role_assignments: assistantRoles,
         scenario,
     });
 
@@ -384,19 +347,6 @@ export const generateCe = async (description, preferType = null, history = []) =
 export const generateCeTraining = async ({ ce_id, ce_name, definition, category = 'CONTEXT', categories = [], examples = [], target_samples = 500, related_ce_names = [], defer_ready = false }) =>
     withNotify(api.post(`/ai/ce-training/generate`, { ce_id, ce_name, definition, category, categories, examples, target_samples, related_ce_names, defer_ready }));
 
-
-// 6. Create Manual Rule (Private/Local Only)
-export const createManualRule = async (classifierId, name) =>
-    withNotify(api.post(`/classifiers/${classifierId}/rules/manual`, { name }));
-
-// 7. Create AI Rule (Global -> Local)
-export const createAIRule = async (classifierId, name, predicate, activeCes, userId) =>
-    withNotify(api.post(`/classifiers/${classifierId}/rules/ai`, {
-        name,
-        predicate,
-        active_ces: activeCes,
-        user_id: userId
-    }));
 
 // 8. Delete Classifier
 export const deleteClassifier = (classifierId) => {
@@ -438,7 +388,8 @@ export const downloadClassifier = async (classifierId, classifierName) => {
 export const getExportPreflight = (classifierId) =>
     api.get(`/classifiers/${classifierId}/export/preflight`);
 
-// Kick off an export job (publishes drafts if needed, then builds the bundle).
+// Kick off an export job (requires every policy rule/CE to already be in the
+// public library — drafts can't be bundled; the preflight reports them).
 // tier: 'model' | 'model+calibration' | 'full'. Returns { job_id }.
 export const startExport = (classifierId, tier) =>
     api.post(`/classifiers/${classifierId}/export/start`, null, { params: { tier } });
@@ -509,8 +460,8 @@ export const listClassifierTestDatasets = (classifierId) =>
     api.get(`/ai/test-sets/by-classifier/${classifierId}`);
 
 // --- Rule default test/calibration sets (schema v9) ---
-// Every rule carries a default set, generated at rule-creation time and
-// published to HF when the rule goes public.
+// Every rule carries a default set, generated at rule-creation time
+// (library rules ship theirs in the gavel-rules repo).
 export const deriveScenario = (ruleId) =>
     api.post(`/ai/derive-scenario`, { rule_id: ruleId });
 export const generateRuleDefaults = (ruleId, scenarioInstructions, opts = {}) =>
@@ -528,9 +479,10 @@ export const getRuleDefaultsStatus = (ruleId) =>
 export const discardUnreadyRule = (ruleId) =>
     api.post(`/ai/rules/${ruleId}/discard-unready`);
 // Guardrail-agnostic build-from-CEs: create a draft rule (is_ready=FALSE)
-// from bookmarked CEs with roles. `ceLinks` = [{ce_id, role, fallback_group}].
-export const createDraftRuleFromBookmarks = (name, ceLinks, categories = [], description = '') =>
-    api.post(`/ai/rules/from-bookmarked-ce`, { name, ce_links: ceLinks, categories, description });
+// from bookmarked CEs. `groups` = { group_name: [ce_id, ...] }; `condition`
+// is the v2 grammar expression over the group names.
+export const createDraftRuleFromBookmarks = (name, groups, condition, categories = [], description = '') =>
+    api.post(`/ai/rules/from-bookmarked-ce`, { name, groups, condition, categories, description });
 // Finalize a build-from-CEs draft once its default set is ready: embeds the
 // rule and flips is_ready=TRUE so it shows up in Drafts.
 export const finalizeRule = (ruleId, ceIds = []) =>

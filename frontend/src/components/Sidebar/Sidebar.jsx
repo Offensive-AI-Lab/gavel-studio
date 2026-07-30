@@ -103,7 +103,7 @@ const Sidebar = () => {
                 }
                 title={
                     syncPulling ? 'Pulling…' :
-                    syncStatus === 'available' ? 'Click to apply the latest library updates from Hugging Face.' :
+                    syncStatus === 'available' ? 'Click to apply the latest library updates from the gavel-rules repository.' :
                     'Local library is up to date with the public registry.'
                 }
             >

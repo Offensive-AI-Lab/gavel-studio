@@ -31,11 +31,29 @@ class TestRuleSetupEndpoints:
         return res.json().get("setup_id")
 
     def test_update_rule_logic(self, client, fresh_rule_setup, test_user, auth_headers):
-        res = client.put(f"/rules/setup/{fresh_rule_setup}", json={
+        # v2 contract: {groups: {name: [ce_id]}, condition}. A CE must exist
+        # for the groups to resolve; create one.
+        ce_res = client.post("/cognitive/create", json={
             "user_id": test_user["user_id"],
-            "ce_links": [],
+            "name": f"cov_logic_ce_{int(time.time() * 1000) % 1000000}",
+            "definition": "for update-logic",
         }, headers=auth_headers)
-        assert res.status_code in (200, 400, 422, 500)
+        if ce_res.status_code != 200:
+            pytest.skip("CE creation failed")
+        res = client.put(f"/rules/setup/{fresh_rule_setup}", json={
+            "groups": {"required": [ce_res.json()["ce_id"]]},
+            "condition": "all of required",
+        }, headers=auth_headers)
+        assert res.status_code in (200, 400)
+        if res.status_code == 200:
+            assert "predicate" in res.json()
+
+    def test_update_rule_logic_invalid_condition_400(self, client, fresh_rule_setup, auth_headers):
+        res = client.put(f"/rules/setup/{fresh_rule_setup}", json={
+            "groups": {},
+            "condition": "all of ghost_group",
+        }, headers=auth_headers)
+        assert res.status_code == 400
 
     def test_link_then_unlink_ce_to_setup(self, client, fresh_rule_setup, test_user, auth_headers):
         # Create CE
@@ -48,9 +66,9 @@ class TestRuleSetupEndpoints:
             pytest.skip("CE creation failed")
         ce_id = ce_res.json()["ce_id"]
 
-        # Link
+        # Link (v2: the CE joins a logic group; default 'additional')
         link_res = client.post(f"/rules/setup/{fresh_rule_setup}/link-ce", json={
-            "ce_id": ce_id, "role": "necessary", "fallback_group": 0,
+            "ce_id": ce_id,
         }, headers=auth_headers)
         assert link_res.status_code in (200, 400, 500)
 
@@ -65,8 +83,7 @@ class TestRuleSetupEndpoints:
             "user_id": test_user["user_id"],
             "name": f"inline_ce_{suffix}",
             "definition": "Created via rule setup endpoint",
-            "role": "necessary",
-            "fallback_group": 0,
+            "group": "additional",
         }, headers=auth_headers)
         assert res.status_code in (200, 400, 422, 500)
 

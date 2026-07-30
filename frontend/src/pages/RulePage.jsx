@@ -16,7 +16,8 @@ import {
 } from '../api';
 import Breadcrumb from '../components/Breadcrumb/Breadcrumb';
 import BuildRuleFromCEsModal from './BuildRuleFromCEsModal';
-import { roleLabel } from '../utils/roleLabels';
+import RuleLogicPreview from '../components/RuleLogicPreview/RuleLogicPreview';
+import { extractLogic } from '../utils/ruleLogic';
 import { recordRecent } from '../utils/recents';
 import { useTutorialContent } from '../contexts/TutorialContext';
 
@@ -96,19 +97,18 @@ function TestSetView({ set }) {
     );
 }
 
-function CeRow({ ce, bookmarked, onToggleBookmark }) {
+function CeRow({ ce, groupNames, bookmarked, onToggleBookmark }) {
     const [open, setOpen] = useState(false);
-    const roleColor = ce.role === 'fallback' ? '#fbbf24' : (ce.role === 'sufficient' ? '#34d399' : '#60a5fa');
-    // Display-only labels (necessary→Necessary, fallback→Any of, sufficient→
-    // Supporting). Fallback groups are 0-indexed in the DB and shown 1-indexed.
-    const roleText = roleLabel(ce.role);
-    const groupSuffix = ce.role === 'fallback' ? ` · G${(ce.fallback_group || 0) + 1}` : '';
+    // Which of the rule's groups this CE belongs to (may be several).
+    const groups = groupNames || [];
     return (
         <div style={{ borderBottom: '1px solid rgba(148,163,184,0.1)' }}>
             <button onClick={() => setOpen(o => !o)} style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, background: 'none', border: 'none', cursor: 'pointer', padding: '10px 2px', color: '#e2e8f0' }}>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                     <span style={{ fontWeight: 600, fontSize: 13 }}>{ce.name}</span>
-                    <span style={chipS('rgba(148,163,184,0.14)', roleColor)}>{roleText}{groupSuffix}</span>
+                    {groups.map((g) => (
+                        <span key={g} style={{ ...chipS('rgba(148,163,184,0.14)', '#c7d2fe'), fontFamily: 'monospace' }}>{g}</span>
+                    ))}
                 </span>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                     {onToggleBookmark && ce.ce_id != null && (
@@ -245,6 +245,18 @@ export default function RulePage() {
     const ruleName = detail?.name || `Rule #${ruleId}`;
     const ces = detail?.ces || [];
 
+    // The rule's logic in the groups + condition model (null groups for
+    // legacy rows — then the derived predicate string is shown instead).
+    const logic = extractLogic(detail);
+    // ce name -> [group names it belongs to] for the per-CE chips below.
+    const ceGroupNames = {};
+    Object.entries(logic.groups || {}).forEach(([gname, members]) => {
+        members.forEach((m) => {
+            if (!ceGroupNames[m.name]) ceGroupNames[m.name] = [];
+            ceGroupNames[m.name].push(gname);
+        });
+    });
+
     // "Edit" = fork this rule into a NEW draft (prefilled build-from-CEs wizard,
     // forced to a new name). Available to a signed-in user once the rule has CEs.
     const [editOpen, setEditOpen] = useState(false);
@@ -252,7 +264,9 @@ export default function RulePage() {
     const canEdit = !!user?.user_id && editableCes.length > 0;
     const editBase = {
         name: detail?.name,
-        ces: editableCes.map((c) => ({ ce_id: c.ce_id, name: c.name, role: c.role, fallback_group: c.fallback_group, category: c.category })),
+        ces: editableCes.map((c) => ({ ce_id: c.ce_id, name: c.name, category: c.category })),
+        groups: logic.groups,
+        condition: logic.condition,
         categories: detail?.categories || [],
     };
 
@@ -266,7 +280,7 @@ export default function RulePage() {
                     detail?.description
                         ? '"What this rule detects" explains, in plain words, what makes the rule fire.'
                         : 'This rule has no written explanation yet.',
-                    'Boolean Logic shows the exact predicate over its cognitive elements (CEs).',
+                    'Firing Logic shows the rule\'s named CE groups and the condition over them that makes it fire.',
                     `Cognitive Elements (${ces.length}) — click any to expand its definition and examples.`,
                     'Test & Calibration Set holds the auto-generated positive / negative / calibration dialogues.',
                 ],
@@ -275,9 +289,9 @@ export default function RulePage() {
                 heading: 'Tips',
                 bullets: [
                     detail?.public_id
-                        ? 'This is a published rule — you can rate it and Save (bookmark) it for reuse on your rule sets.'
-                        : 'This is a local draft — publish it from Browse or Drafts to share it.',
-                    'Roles: Necessary (AND) · Any of (OR within a group, AND across groups) · Supporting (raises confidence, not part of the boolean logic).',
+                        ? 'This is a library rule — you can Save (bookmark) it for reuse on your rule sets.'
+                        : 'This is a local draft — contributing it to the shared library happens via a gavel-rules pull request (submission from Studio coming soon).',
+                    'Logic: CEs are organized into named groups; the condition (e.g. "all of required and 1 of option_1") decides when the rule fires. Groups not in the condition are supporting-only.',
                 ],
             },
         ],
@@ -346,10 +360,15 @@ export default function RulePage() {
                         </div>
                     )}
 
-                    {detail?.predicate && (
+                    {(logic.groups || detail?.predicate) && (
                         <div style={card}>
-                            <div style={sectionTitle}><FiCpu /> Boolean Logic</div>
-                            <code style={{ display: 'block', background: 'rgba(2,6,23,0.6)', padding: 10, borderRadius: 8, color: '#cbd5e1', fontSize: 12.5, wordBreak: 'break-word' }}>{detail.predicate}</code>
+                            <div style={sectionTitle}><FiCpu /> Firing Logic</div>
+                            {logic.groups ? (
+                                <RuleLogicPreview title={null} groups={logic.groups} condition={logic.condition} />
+                            ) : (
+                                // Legacy row without groups — derived predicate only.
+                                <code style={{ display: 'block', background: 'rgba(2,6,23,0.6)', padding: 10, borderRadius: 8, color: '#cbd5e1', fontSize: 12.5, wordBreak: 'break-word' }}>{detail.predicate}</code>
+                            )}
                         </div>
                     )}
 
@@ -359,6 +378,7 @@ export default function RulePage() {
                             <CeRow
                                 key={ce.ce_id}
                                 ce={ce}
+                                groupNames={ceGroupNames[ce.name]}
                                 bookmarked={ceBmIds.has(ce.ce_id)}
                                 onToggleBookmark={user?.user_id ? () => toggleCeBookmark(ce.ce_id) : undefined}
                             />
@@ -371,8 +391,8 @@ export default function RulePage() {
                             <TestSetView set={testSet} />
                         ) : (
                             <div style={{ ...muted, fontSize: 12.5 }}>
-                                No test set yet. The test set is generated when a rule is created or published;
-                                seeded library rules pull theirs from HF when first opened.
+                                No test set yet. The test set is generated when a rule is created;
+                                synced library rules pull theirs from the gavel-rules repository when first opened.
                             </div>
                         )}
                     </div>

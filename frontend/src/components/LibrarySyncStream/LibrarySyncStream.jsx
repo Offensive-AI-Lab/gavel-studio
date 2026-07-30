@@ -1,7 +1,7 @@
 // LibrarySyncStream — opens a Server-Sent-Events stream to the backend and
 // reacts to live freshness push events. No polling.
 //
-// The backend periodically probes the HF registry for changes (without
+// The backend periodically probes the gavel-rules repository for changes (without
 // touching the DB) and pushes `update_available` / `synced` here over SSE. So
 // the sidebar surfaces a "click to sync" badge when an update is
 // published — and the user applies it on their click (handled in the Sidebar),
@@ -14,7 +14,9 @@
 import { useEffect } from 'react';
 import { useSyncStatus } from '../../contexts/SyncStatusContext';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+// Unset = same-origin (the Vite dev proxy forwards /library to the backend);
+// keep in sync with src/api.js.
+const API_URL = import.meta.env.VITE_API_URL ?? '';
 const RECONNECT_MS = 3000;
 
 const LibrarySyncStream = () => {

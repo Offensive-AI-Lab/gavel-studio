@@ -149,6 +149,18 @@
     box-shadow: 0 4px 14px -2px rgba(16, 185, 129, 0.45);
 }
 
+/* Publishing from Studio is disabled (contributions go via gavel-rules
+ * PRs) — the button stays visible but muted, tooltip explains why. */
+.bookmark-btn.publish-btn:disabled,
+.bookmark-btn.publish-btn:disabled:hover {
+    background: rgba(148, 163, 184, 0.12);
+    color: #94a3b8;
+    border-color: rgba(148, 163, 184, 0.28);
+    box-shadow: none;
+    cursor: not-allowed;
+    opacity: 0.75;
+}
+
 .delete-icon {
     color: #f87171;
     cursor: pointer;
@@ -336,35 +348,22 @@
 }
 
 
-/* ----- Role badges (necessary / fallback / sufficient) ----------------- */
+/* ----- Group + condition logic display ---------------------------------
+ * The role badges (necessary / fallback / sufficient) are gone — a rule's
+ * logic now renders as named-group chip clusters + the condition line
+ * (see RuleLogicPreview, which carries its own inline styling). The
+ * classes below style the condition line wherever a card shows one
+ * standalone. */
 
-.ce-role-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
-    border-radius: 999px;
-    font-size: 0.72rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    border: 1px solid transparent;
-}
-
-.ce-role-badge.necessary {
-    background: rgba(14, 165, 233, 0.18);
-    color: #67e8f9;
-    border-color: rgba(34, 211, 238, 0.42);
-}
-
-.ce-role-badge.fallback {
-    background: rgba(245, 158, 11, 0.18);
-    color: #fcd34d;
-    border-color: rgba(251, 191, 36, 0.42);
-}
-
-.ce-role-badge.sufficient {
-    background: rgba(16, 185, 129, 0.18);
-    color: #6ee7b7;
-    border-color: rgba(52, 211, 153, 0.42);
+.rule-condition-line {
+    display: block;
+    background: rgba(2, 6, 23, 0.6);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-family: monospace;
+    font-size: 0.82rem;
+    color: #e2e8f0;
+    word-break: break-word;
+    white-space: pre-wrap;
 }

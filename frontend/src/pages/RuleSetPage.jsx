@@ -11,7 +11,8 @@ import {
     getRuleSetDetail, getRuleSetBookmarks, addRuleSetBookmark, removeRuleSetBookmark,
 } from '../api';
 import Breadcrumb from '../components/Breadcrumb/Breadcrumb';
-import { roleLabel } from '../utils/roleLabels';
+import RuleLogicPreview from '../components/RuleLogicPreview/RuleLogicPreview';
+import { extractLogic } from '../utils/ruleLogic';
 import { showAlertDialog } from '../components/ConfirmDialog/confirmDialog';
 import { useTutorialContent } from '../contexts/TutorialContext';
 
@@ -30,6 +31,7 @@ const chipS = (bg, c) => ({ display: 'inline-flex', alignItems: 'center', gap: 5
 function MemberRule({ rule }) {
     const [open, setOpen] = useState(false);
     const ces = Array.isArray(rule.active_ces) ? rule.active_ces : [];
+    const logic = extractLogic(rule);
     return (
         <div style={{ border: '1px solid rgba(148,163,184,0.14)', borderRadius: 10, background: 'rgba(2,6,23,0.45)', marginBottom: 8 }}>
             <button
@@ -43,15 +45,17 @@ function MemberRule({ rule }) {
             </button>
             {open && (
                 <div style={{ padding: '0 14px 14px' }}>
-                    {rule.predicate && (
+                    {logic.groups ? (
+                        <RuleLogicPreview title={null} groups={logic.groups} condition={logic.condition} style={{ marginBottom: 10 }} />
+                    ) : rule.predicate ? (
+                        // Legacy row without groups — derived predicate only.
                         <div style={{ ...muted, fontSize: 12.5, marginBottom: 10, fontFamily: 'monospace' }}>{rule.predicate}</div>
-                    )}
+                    ) : null}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                         {ces.map((ce) => (
-                            <div key={`${ce.ce_id}-${ce.role}-${ce.fallback_group}`} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <div key={ce.ce_id ?? ce.name} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                 <FiCpu size={13} style={{ color: '#67e8f9', flexShrink: 0 }} />
                                 <span style={{ color: '#e2e8f0', fontSize: 13 }}>{ce.name}</span>
-                                <span style={chipS('rgba(99,102,241,0.16)', '#c7d2fe')}>{roleLabel(ce.role)}</span>
                             </div>
                         ))}
                         {ces.length === 0 && <span style={muted}>No cognitive elements.</span>}

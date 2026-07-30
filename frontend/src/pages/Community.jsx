@@ -48,7 +48,7 @@ const Community = () => {
                 heading: 'Two views',
                 bullets: [
                     'Search — find an artist by username or display name. Empty query shows recently-active artists.',
-                    'Leaderboard — top contributors by how much they have published into the library.',
+                    'Leaderboard — top contributors by how much of their work is in the library.',
                 ],
             },
             {
@@ -145,7 +145,7 @@ const Community = () => {
                 </div>
             ) : (
                 <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px 18px', marginBottom: '16px', color: '#94a3b8', fontSize: '0.85rem' }}>
-                    Contributors in your synced library, most published first.
+                    Contributors in your synced library, most contributions first.
                 </div>
             )}
 
@@ -156,7 +156,7 @@ const Community = () => {
                 <div style={emptyStateStyle}>
                     <div style={{ marginBottom: '16px' }}>
                         {mode === 'search'
-                            ? (urlQuery ? `No artists match "${urlQuery}".` : 'No artists yet. Be the first to publish!')
+                            ? (urlQuery ? `No artists match "${urlQuery}".` : 'No artists yet — contributors appear once their work lands in the library.')
                             : 'No leaderboard data yet — needs more contributions.'}
                     </div>
                     <Link to="/workspace" style={communityCtaStyle}>

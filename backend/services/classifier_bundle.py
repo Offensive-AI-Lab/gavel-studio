@@ -2,20 +2,23 @@
 
 A bundle is a plain `.zip` that lets one user hand a trained guardrail to
 another. It carries the trained RNN weights + architecture meta, REFERENCES the
-policy (rules + CEs) by their HuggingFace `public_id`, and — depending on the
-tier the exporter chose — the calibration thresholds and/or evaluation results.
+policy (rules + CEs) by their public library `public_id` (permanent ids minted
+by the gavel-rules registry), and — depending on the tier the exporter chose —
+the calibration thresholds and/or evaluation results.
 
 Hard invariants (decided with the team):
-  * A guardrail can only be exported once its ENTIRE policy is published to the
-    public library. Manual (rule_id IS NULL) rules can never be exported. The
-    export caller is expected to publish any draft rules first (with the user's
-    approval) — `assess_export` reports exactly what's outstanding.
+  * A guardrail can only be exported once its ENTIRE policy is in the public
+    library (every rule and CE carries a public_id). Manual (rule_id IS NULL)
+    rules can never be exported. There is no in-studio publish: anything still
+    local-only must be contributed to gavel-rules via a pull request and
+    re-synced first — `assess_export` reports exactly what's outstanding.
   * Export is only offered when the live policy still matches the policy the
     model was trained on (no drift). `assess_export` enforces this.
-  * On import we SYNC with HF first, then resolve every referenced rule/CE by
-    public_id. Anything that resolves is linked with its full library data;
-    anything that does NOT resolve (a private rule that was never published) is
-    a hard block — we name it and refuse, rather than import a broken guardrail.
+  * On import we SYNC the library (gavel-rules) first, then resolve every
+    referenced rule/CE by public_id. Anything that resolves is linked with its
+    full library data; anything that does NOT resolve (a private rule that
+    never made it into the library) is a hard block — we name it and refuse,
+    rather than import a broken guardrail.
 
 Layout inside the zip:
     bundle_manifest.json            (always)
@@ -37,7 +40,11 @@ from datetime import datetime, timezone
 from utils.sqlite_db import execute_query, execute_query_dict
 
 FORMAT = "gavel.classifier.bundle"
-FORMAT_VERSION = 1
+# v2: policy rules are described by (ce_groups, condition) — the gavel-rules
+# groups/condition model — and rule fingerprints are compute_rule_fingerprint_v2
+# over public-id-translated group members. v1 bundles (role/fallback-shaped
+# ce_links, role-based fingerprints) cannot be verified anymore and are refused.
+FORMAT_VERSION = 2
 
 TIER_MODEL = "model"
 TIER_CALIBRATION = "model+calibration"
@@ -141,55 +148,72 @@ def _latest_eval(classifier_id: int, eval_type: str, trained_at):
 # Policy fingerprinting (machine-INDEPENDENT — keyed on CE public_id)
 # ---------------------------------------------------------------------------
 
-def _rule_fp_from_public_links(links: list) -> str:
-    """Per-rule fingerprint over CE public_ids + roles + fallback grouping.
+def _rule_public_logic(rule_id: int) -> dict:
+    """A rule's firing logic with its group members translated to CE public_ids.
 
-    Unlike `compute_rule_fingerprint_from_links` (which hashes local ce_ids and
-    is therefore meaningless across machines), this hashes the stable public_ids
-    so the exporter and importer compute the SAME value for the same published
-    rule. Used purely as an integrity check on import.
+    Reads the rule's own (ce_groups, condition) — not any guardrail's local
+    setup copy — so the result reflects the immutable library rule, which is
+    exactly what the importer will re-derive from its own synced copy.
+
+    Returns {
+        "ce_groups": {group_name: [{"name": ce_name, "ce_public_id": pid|None}]},
+        "condition": str,
+        "missing":   [ce names that have no public_id locally],
+    }
     """
-    necessary, sufficient, fb = [], [], {}
-    for l in links or []:
-        pid = l.get("ce_public_id")
-        if not pid:
-            continue
-        role = (l.get("role") or "necessary").lower()
-        if role == "sufficient":
-            sufficient.append(pid)
-        elif role == "fallback":
-            g = int(l.get("fallback_group", 0) or 0)
-            fb.setdefault(g, []).append(pid)
-        else:
-            necessary.append(pid)
-    nec = sorted(necessary)
-    suf = sorted(sufficient)
-    fbn = sorted(tuple(sorted(g)) for g in fb.values())
-    canonical = f"N:{tuple(nec)}|F:{fbn}|S:{tuple(suf)}"
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _public_rule_links(rule_id: int) -> list:
-    """The canonical CE composition of a PUBLISHED rule, by CE public_id.
-
-    Reads the rule's own rule_ce_link (not any guardrail's local setup), so the
-    fingerprint reflects the immutable published rule — which is exactly what the
-    importer will re-derive from the pulled copy."""
-    return execute_query_dict(
-        """
-        SELECT ce.public_id AS ce_public_id, ce.name AS name, rcl.role,
-               COALESCE(rcl.fallback_group, 0) AS fallback_group
-        FROM rule_ce_link rcl
-        JOIN cognitive_elements ce ON rcl.ce_id = ce.ce_id
-        WHERE rcl.rule_id = %s
-        ORDER BY ce.name
-        """,
-        (rule_id,),
+    rows = execute_query_dict(
+        "SELECT ce_groups, condition FROM rules WHERE rule_id = %s", (rule_id,)
     ) or []
+    raw_groups = (rows[0].get("ce_groups") if rows else None) or {}
+    if isinstance(raw_groups, str):  # defensive: JSONB column as text
+        try:
+            raw_groups = json.loads(raw_groups) or {}
+        except Exception:
+            raw_groups = {}
+    condition = ((rows[0].get("condition") if rows else None) or "").strip()
+
+    member_names = sorted({m for members in raw_groups.values() for m in (members or [])})
+    name_pub = {}
+    if member_names:
+        for r in execute_query_dict(
+            "SELECT name, public_id FROM cognitive_elements WHERE name = ANY(%s)",
+            (member_names,),
+        ) or []:
+            if r.get("public_id"):
+                name_pub[r["name"]] = r["public_id"]
+
+    ce_groups = {
+        gname: [
+            {"name": n, "ce_public_id": name_pub.get(n)}
+            for n in sorted(set(members or []))
+        ]
+        for gname, members in raw_groups.items()
+    }
+    missing = [n for n in member_names if n not in name_pub]
+    return {"ce_groups": ce_groups, "condition": condition, "missing": missing}
+
+
+def _rule_public_fingerprint(logic: dict) -> str:
+    """Machine-independent structural fingerprint of a library rule.
+
+    compute_rule_fingerprint_v2 canonicalizes (groups, condition) over its
+    member identities; feeding it the stable PUBLIC_IDS (instead of the local
+    CE names) makes the exporter and importer compute the SAME value for the
+    same library rule on different machines. Used purely as an integrity
+    check on import. A member without a public_id gets a '?name' placeholder,
+    which can never match a fully-public fingerprint — the desired outcome.
+    """
+    from sql_scripts.junction_scripts import compute_rule_fingerprint_v2
+
+    groups_by_pid = {
+        gname: [m["ce_public_id"] or f"?{m['name']}" for m in members]
+        for gname, members in (logic.get("ce_groups") or {}).items()
+    }
+    return compute_rule_fingerprint_v2(groups_by_pid, logic.get("condition"))
 
 
 def _local_rule_public_fp(rule_id: int) -> str:
-    return _rule_fp_from_public_links(_public_rule_links(rule_id))
+    return _rule_public_fingerprint(_rule_public_logic(rule_id))
 
 
 # ---------------------------------------------------------------------------
@@ -201,10 +225,11 @@ def _inspect_policy(classifier_id: int, meta: dict) -> dict:
 
     Returns:
         {
-          "rules":   [manifest rule dicts that are FULLY published],
+          "rules":   [manifest rule dicts that are FULLY in the public library],
           "ces":     [manifest ce dicts (public_id+name+label_index)],
           "manual":  [rule names that can never be exported (rule_id IS NULL)],
-          "unpublished_rules": [{"rule_id", "name"}],   # draft → publishable
+          "unpublished_rules": [{"rule_id", "name"}],  # not in the public
+                     # library — needs a gavel-rules PR + re-sync first
           "unpublished_ces":   [ce names lacking a public_id, not covered above],
         }
     """
@@ -225,25 +250,28 @@ def _inspect_policy(classifier_id: int, meta: dict) -> dict:
         if not r.get("public_id"):
             unpublished_rules.append({"rule_id": rid, "name": name})
             continue
-        links = _public_rule_links(rid)
-        if any(not l.get("ce_public_id") for l in links):
-            # A published rule with an unpublished CE shouldn't happen, but never
-            # emit a dangling reference — treat as still-needing-publish.
+        logic = _rule_public_logic(rid)
+        if logic["missing"]:
+            # A library rule referencing a CE without a public_id shouldn't
+            # happen, but never emit a dangling reference — treat the rule as
+            # not-in-the-library.
             unpublished_rules.append({"rule_id": rid, "name": name})
             continue
         manifest_rules.append({
             "public_id": r["public_id"],
             "name": name,
-            "rule_fingerprint": _rule_fp_from_public_links(links),
-            "ce_links": [
-                {
-                    "ce_public_id": l["ce_public_id"],
-                    "name": l.get("name"),
-                    "role": l.get("role") or "necessary",
-                    "fallback_group": int(l.get("fallback_group") or 0),
-                }
-                for l in links
-            ],
+            "rule_fingerprint": _rule_public_fingerprint(logic),
+            # The rule's firing logic, v2 shape: named CE groups + a condition
+            # over them ("all of required and 1 of option_1"). Members carry
+            # both the stable public_id and the human-readable name.
+            "condition": logic["condition"],
+            "ce_groups": {
+                gname: [
+                    {"ce_public_id": m["ce_public_id"], "name": m["name"]}
+                    for m in members
+                ]
+                for gname, members in logic["ce_groups"].items()
+            },
         })
 
     # policy.ces — every output head of the trained model, by name → public_id.
@@ -279,8 +307,9 @@ def assess_export(classifier_id: int) -> dict:
 
     The Export button is only shown (and the export only proceeds) when
     `can_export` is True. When it's False, `reason` explains why; `unpublished`
-    lists draft rules the caller can offer to publish; `blockers` lists things
-    that can't be auto-fixed (manual rules, drift).
+    lists policy rules that are not in the public library yet (they need a
+    gavel-rules pull request + re-sync — there is no in-studio publish);
+    `blockers` lists things that can't be fixed at all (manual rules, drift).
     """
     c = _classifier_row(classifier_id)
     if not c:
@@ -323,9 +352,9 @@ def assess_export(classifier_id: int) -> dict:
             f"Rule “{nm}” was created manually and isn't in the public library, so it can't be exported."
         )
     for nm in pol["unpublished_ces"]:
-        # Not tied to a draft rule we can publish → genuine blocker.
         result["blockers"].append(
-            f"Cognitive element “{nm}” (an output of the trained model) isn't published and isn't covered by a draft rule."
+            f"Cognitive element “{nm}” (an output of the trained model) is not in the public library — "
+            "contribute it via a gavel-rules pull request first, then re-sync."
         )
     result["unpublished"] = [
         {"type": "rule", "rule_id": r["rule_id"], "name": r["name"]}
@@ -352,10 +381,10 @@ def assess_export(classifier_id: int) -> dict:
         result["reason"] = result["blockers"][0]
         return result
     if result["unpublished"]:
-        result["reason"] = ("Some rules in this rule set's policy aren't published yet. "
-                            "Publish them to the library to export.")
-        # can_export stays False until they're published, but it's a SOFT block:
-        # the caller can publish then re-assess.
+        result["reason"] = ("Some rules in this rule set's policy are not in the public library — "
+                            "contribute them via a gavel-rules pull request first, then re-sync.")
+        # can_export stays False until the rules land in the library. Kept
+        # separate from `blockers` so the UI can list the exact rules.
         return result
 
     result["can_export"] = True
@@ -392,7 +421,7 @@ def build_bundle_zip(classifier_id: int, tier: str):
 
     pol = _inspect_policy(classifier_id, meta)
     if pol["manual"] or pol["unpublished_rules"] or pol["unpublished_ces"]:
-        raise BundleError("The rule set's policy isn't fully published; cannot export.", 409)
+        raise BundleError("The rule set's policy isn't fully in the public library; cannot export.", 409)
 
     files = {
         "model/trained_rnn.pth": pth_bytes,
@@ -522,6 +551,14 @@ def parse_and_validate_bundle(zip_bytes: bytes) -> dict:
             f"This bundle was made by a newer version (format v{manifest.get('format_version')}). "
             "Update the app, then import again.", 400
         )
+    if int(manifest.get("format_version", 0)) < FORMAT_VERSION:
+        # v1 bundles describe rules with role/fallback ce_links and role-based
+        # fingerprints; those can't be verified against the groups/condition
+        # library model.
+        raise BundleError(
+            f"This bundle uses the retired format v{manifest.get('format_version')}. "
+            "Ask the sender to re-export it with the current version of the app.", 400
+        )
     tier = manifest.get("tier")
     if tier not in _TIERS:
         raise BundleError(f"Unknown bundle tier '{tier}'.", 400)
@@ -632,7 +669,7 @@ def import_bundle(zip_bytes: bytes, user_id: int, *, sync: bool = True,
     if sync:
         _phase("Syncing the public library…")
         try:
-            from services.hf_sync import sync_library
+            from services.library_sync import sync_library
             sync_library(force=True)
         except Exception as e:
             raise BundleError(f"Couldn't sync with the public library before import: {e}", 503)
@@ -670,7 +707,8 @@ def import_bundle(zip_bytes: bytes, user_id: int, *, sync: bool = True,
         if not row:
             raise BundleError(
                 f"This bundle depends on rule “{nm}” which isn't in the public library. "
-                "Ask the sender to publish it, then re-export.",
+                "Ask the sender to contribute it via a gavel-rules pull request first, "
+                "then re-sync and re-export.",
                 409,
             )
         local_rule_id = row[0]["rule_id"]
@@ -694,7 +732,8 @@ def import_bundle(zip_bytes: bytes, user_id: int, *, sync: bool = True,
         raise BundleError(
             "This bundle depends on cognitive element(s) that aren't in the public library: "
             f"{', '.join(missing_ces[:5])}{'…' if len(missing_ces) > 5 else ''}. "
-            "Ask the sender to publish them, then re-export.",
+            "Ask the sender to contribute them via a gavel-rules pull request first, "
+            "then re-sync and re-export.",
             409,
         )
 

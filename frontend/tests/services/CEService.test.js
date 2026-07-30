@@ -10,9 +10,11 @@
 //   - handleAddCEFlow: Select Existing (true) / Create New (false) / Cancel,
 //     empty vs non-empty available list, link success/failure, create
 //     success/failure, the `res.data.ces` vs `res.data` fallback, and the
-//     "already in rule" filter.
-//   - handleRemoveCEFlow: delete success (predicate with >0 and 0 remaining)
-//     and delete failure.
+//     "already in rule" filter. Quick-adds pass the backend's optional
+//     `group` name (default "additional"); the backend owns the rule's
+//     groups/condition and re-derives the predicate itself.
+//   - handleRemoveCEFlow: delete success and delete failure (membership-only
+//     local update — no client-side predicate rebuild).
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Swal from 'sweetalert2';
@@ -104,17 +106,19 @@ describe('handleAddCEFlow — Select Existing (result === true)', () => {
         expect(selectCfg.input).toBe('select');
         expect(selectCfg.inputOptions).toEqual({ 'ce-new': 'Brand New CE' });
 
-        // Linked via api.post to the right setup.
-        expect(api.post).toHaveBeenCalledWith('/rules/setup/setup-1/link-ce', { ce_id: 'ce-new' });
+        // Linked via api.post to the right setup, into the default
+        // quick-add group.
+        expect(api.post).toHaveBeenCalledWith('/rules/setup/setup-1/link-ce', { ce_id: 'ce-new', group: 'additional' });
 
-        // Local UI updated: CE appended + predicate rebuilt from names.
+        // Local UI updated: CE appended to the membership list. The
+        // predicate is server-derived now — no client-side rebuild.
         expect(updateState).toHaveBeenCalledTimes(1);
         const newRules = updateState.mock.calls[0][0];
         expect(newRules[0].active_ces).toEqual([
             { ce_id: 'ce-existing', name: 'Existing CE' },
             { name: 'Brand New CE', ce_id: 'ce-new' },
         ]);
-        expect(newRules[0].predicate).toBe('IF Existing CE AND Brand New CE THEN BLOCK');
+        expect(newRules[0].predicate).toBe('IF TRUE THEN BLOCK');
     });
 
     it('falls back to res.data when res.data.ces is absent', async () => {
@@ -129,7 +133,7 @@ describe('handleAddCEFlow — Select Existing (result === true)', () => {
 
         const selectCfg = Swal.fire.mock.calls[1][0];
         expect(selectCfg.inputOptions).toEqual({ 'ce-bare': 'Bare CE' });
-        expect(api.post).toHaveBeenCalledWith('/rules/setup/setup-1/link-ce', { ce_id: 'ce-bare' });
+        expect(api.post).toHaveBeenCalledWith('/rules/setup/setup-1/link-ce', { ce_id: 'ce-bare', group: 'additional' });
         expect(updateState).toHaveBeenCalledTimes(1);
     });
 
@@ -214,12 +218,12 @@ describe('handleAddCEFlow — Create New (result === false)', () => {
         expect(api.post).toHaveBeenCalledWith('/rules/setup/setup-1/create-ce', {
             name: 'My Fresh CE',
             user_id: 'user-9',
+            group: 'additional',
         });
 
         expect(updateState).toHaveBeenCalledTimes(1);
         const newRules = updateState.mock.calls[0][0];
         expect(newRules[0].active_ces).toContainEqual({ name: 'My Fresh CE', ce_id: 'ce-created' });
-        expect(newRules[0].predicate).toBe('IF Existing CE AND My Fresh CE THEN BLOCK');
     });
 
     it('does nothing when the create dialog is dismissed without a name', async () => {
@@ -254,11 +258,11 @@ describe('handleAddCEFlow — Create New (result === false)', () => {
 });
 
 describe('handleRemoveCEFlow', () => {
-    it('deletes the CE and rebuilds the predicate when CEs remain', async () => {
+    it('deletes the CE and updates the local membership list', async () => {
         const rules = [
             {
                 setup_id: 'setup-1',
-                predicate: 'IF A AND B THEN BLOCK',
+                predicate: 'A AND B',
                 active_ces: [
                     { ce_id: 'ce-a', name: 'A' },
                     { ce_id: 'ce-b', name: 'B' },
@@ -272,23 +276,9 @@ describe('handleRemoveCEFlow', () => {
         expect(updateState).toHaveBeenCalledTimes(1);
         const newRules = updateState.mock.calls[0][0];
         expect(newRules[0].active_ces).toEqual([{ ce_id: 'ce-b', name: 'B' }]);
-        expect(newRules[0].predicate).toBe('IF B THEN BLOCK');
-    });
-
-    it('falls back to "IF TRUE THEN BLOCK" when the last CE is removed', async () => {
-        const rules = [
-            {
-                setup_id: 'setup-1',
-                predicate: 'IF A THEN BLOCK',
-                active_ces: [{ ce_id: 'ce-a', name: 'A' }],
-            },
-        ];
-        const updateState = vi.fn();
-        await handleRemoveCEFlow('setup-1', 'ce-a', 'A', rules, 0, updateState);
-
-        const newRules = updateState.mock.calls[0][0];
-        expect(newRules[0].active_ces).toEqual([]);
-        expect(newRules[0].predicate).toBe('IF TRUE THEN BLOCK');
+        // Predicate is server-derived; the local copy is left untouched
+        // until the next fetch.
+        expect(newRules[0].predicate).toBe('A AND B');
     });
 
     it('shows a Remove Failed popup and does not update state on delete error', async () => {

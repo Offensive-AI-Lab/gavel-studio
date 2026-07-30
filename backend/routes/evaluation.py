@@ -253,7 +253,7 @@ def _run_calibration(classifier_id: int, patience_values: list = None):
     # generating data manually.
     set_phase("Fetching calibration data…")
     try:
-        from services.hf_sync import ensure_ce_calibrations_for_classifier, ensure_rule_aux_for_classifier
+        from services.library_sync import ensure_ce_calibrations_for_classifier, ensure_rule_aux_for_classifier
         ensure_ce_calibrations_for_classifier(classifier_id)
         try:
             ensure_rule_aux_for_classifier(classifier_id)
@@ -439,21 +439,16 @@ def _run_evaluation(classifier_id: int, dataset_pairs: list, include_neutral: bo
 
     set_phase("Fetching evaluation data…")
     try:
-        from services.hf_sync import ensure_rule_aux_for_classifier
+        from services.library_sync import ensure_rule_aux_for_classifier
         ensure_rule_aux_for_classifier(classifier_id)
     except Exception as fetch_err:
         logger.warning(f"[evaluation] rule aux lazy fetch failed: {fetch_err}")
 
-    # Make sure the FULL neutral corpus is present locally before we build the
-    # third split. The corpus is HF/DB-only (no bundled fallback): if it can't
-    # be fetched AND isn't already synced, the run hard-fails below rather than
-    # silently evaluating without the neutral split.
-    if include_neutral:
-        try:
-            from services.hf_sync import ensure_neutral_corpus
-            ensure_neutral_corpus()
-        except Exception as neutral_err:
-            logger.warning(f"[evaluation] neutral corpus lazy fetch failed: {neutral_err}")
+    # Neutral corpus: the gavel-rules registry no longer ships one (removed
+    # upstream — arbitrary role assignment made it questionable for
+    # false-positive measurement), so there is nothing to fetch. Whatever rows
+    # a previously-synced DB still holds keep working; an empty table now
+    # SKIPS the neutral split with a warning instead of hard-failing.
 
     try:
         owner_rows = execute_query_dict(
@@ -474,18 +469,17 @@ def _run_evaluation(classifier_id: int, dataset_pairs: list, include_neutral: bo
         if not ruleset:
             raise ValueError("No rules configured for this guardrail")
 
-        # Append the neutral split now — AFTER the registry fetch above — so it
-        # reflects the full corpus. All-or-nothing: if neutral data is required
-        # but unavailable, refuse to evaluate instead of silently dropping it.
+        # Append the neutral split when local data exists. The registry no
+        # longer provides this corpus, so absence is expected on fresh
+        # installs — evaluate WITHOUT the split (the benign-chat FPR rows
+        # simply don't appear) rather than refusing to run.
         if include_neutral:
             from evaluation.neutral_corpus import load_neutral_corpus_by_category, CATEGORIES
             grouped = load_neutral_corpus_by_category()
             if sum(len(grouped.get(c, [])) for c in CATEGORIES) == 0:
-                raise ValueError(
-                    "Neutral corpus is unavailable. Evaluation requires the neutral "
-                    "set (the false-positive baseline), which couldn't be fetched from "
-                    "the registry and isn't synced locally. Check your HuggingFace "
-                    "connection and retry."
+                logger.warning(
+                    "[evaluation] no neutral corpus in the local DB — running "
+                    "without the neutral (benign-chat false-positive) split"
                 )
             for cat in CATEGORIES:
                 convs = grouped.get(cat) or []
@@ -633,7 +627,7 @@ def _load_default_eval_pairs(classifier_id: int) -> list:
     from HF first so a freshly-adopted public rule works without the user
     generating anything."""
     try:
-        from services.hf_sync import ensure_rule_aux_for_classifier
+        from services.library_sync import ensure_rule_aux_for_classifier
         ensure_rule_aux_for_classifier(classifier_id)
     except Exception as e:
         logger.warning(f"[evaluation] default-eval lazy fetch failed: {e}")
@@ -885,7 +879,7 @@ def get_calibration_data_status(classifier_id: int, _: int = Depends(get_current
     forcing the user to click Calibrate first to trigger the fetch.
     """
     try:
-        from services.hf_sync import (
+        from services.library_sync import (
             ensure_ce_calibrations_for_classifier, ensure_rule_aux_for_classifier,
         )
         ensure_ce_calibrations_for_classifier(classifier_id)

@@ -84,8 +84,12 @@ class TestCloneClassifierPolicy:
         the target model (drives dedupe); `setups` are the source rule_setup rows."""
         if setups is None:
             setups = [
-                {"setup_id": 11, "rule_id": 100, "custom_name": "r1", "predicate": "CE_1", "is_active": True},
-                {"setup_id": 12, "rule_id": None, "custom_name": "manual", "predicate": "CE_2 AND CE_3", "is_active": True},
+                {"setup_id": 11, "rule_id": 100, "custom_name": "r1", "predicate": "CE_1",
+                 "ce_groups": {"required": ["CE_1"]}, "condition": "all of required",
+                 "is_active": True},
+                {"setup_id": 12, "rule_id": None, "custom_name": "manual", "predicate": "CE_2 AND CE_3",
+                 "ce_groups": {"required": ["CE_2", "CE_3"]}, "condition": "all of required",
+                 "is_active": True},
             ]
         state = {"next_setup_id": 500, "inserted_classifier": None}
 
@@ -100,7 +104,7 @@ class TestCloneClassifierPolicy:
             if s.startswith("INSERT INTO classifiers"):
                 state["inserted_classifier"] = params  # (user_id, model_id, name)
                 return [{"classifier_id": 999, "model_id": params[1], "name": params[2], "status": "untrained"}]
-            if s.startswith("SELECT setup_id, rule_id, custom_name, predicate, is_active FROM rule_setup WHERE classifier_id"):
+            if s.startswith("SELECT setup_id, rule_id, custom_name, predicate, ce_groups, condition, is_active FROM rule_setup WHERE classifier_id"):
                 return list(setups)
             if s.startswith("INSERT INTO rule_setup"):
                 state["next_setup_id"] += 1

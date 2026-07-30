@@ -147,20 +147,25 @@ def _seed_trainable_classifier(client, auth_headers, test_user, test_model):
         ce_ids.append(ce_id)
         ce_names.append(name)
 
-    # One rule requiring both CEs, attached to the classifier.
+    # One rule requiring both CEs, attached to the classifier. v2 logic:
+    # a single 'required' group with 'all of required'.
+    ce_groups = json.dumps({"required": list(ce_names)})
+    condition = "all of required"
     rule_id = execute_query_dict(
-        "INSERT INTO rules (name, predicate) VALUES (%s, %s) RETURNING rule_id",
-        (_unique("e2e_rule"), "A AND B"),
+        "INSERT INTO rules (name, predicate, ce_groups, condition) "
+        "VALUES (%s, %s, %s, %s) RETURNING rule_id",
+        (_unique("e2e_rule"), " AND ".join(ce_names), ce_groups, condition),
     )[0]["rule_id"]
     setup_id = execute_query_dict(
-        "INSERT INTO rule_setup (classifier_id, rule_id, custom_name, predicate, is_active) "
-        "VALUES (%s, %s, %s, %s, TRUE) RETURNING setup_id",
-        (classifier_id, rule_id, _unique("e2e_setup"), "A AND B"),
+        "INSERT INTO rule_setup (classifier_id, rule_id, custom_name, predicate, "
+        "ce_groups, condition, is_active) "
+        "VALUES (%s, %s, %s, %s, %s, %s, TRUE) RETURNING setup_id",
+        (classifier_id, rule_id, _unique("e2e_setup"), " AND ".join(ce_names),
+         ce_groups, condition),
     )[0]["setup_id"]
     for ce_id in ce_ids:
         execute_query(
-            "INSERT INTO setup_ce_link (setup_id, ce_id, role, fallback_group) "
-            "VALUES (%s, %s, 'necessary', 0)",
+            "INSERT INTO setup_ce_link (setup_id, ce_id) VALUES (%s, %s)",
             (setup_id, ce_id),
         )
 

@@ -12,7 +12,6 @@ import CognitiveElementCard from '../components/CognitiveElementCard/CognitiveEl
 import { FiArrowLeft, FiInbox } from 'react-icons/fi';
 import Swal from 'sweetalert2';
 import { showAlertDialog } from '../components/ConfirmDialog/confirmDialog';
-import { publishDraftCE } from '../services/RuleService';
 import { normalizeCategoryValue } from '../utils/categoryUtils';
 import { recordRecent } from '../utils/recents';
 
@@ -99,7 +98,7 @@ const BrowseCEs = () => {
                 heading: 'How CEs differ from rules',
                 bullets: [
                     'A CE is ONE detector — single concept, single signal.',
-                    'A rule combines multiple CEs with Boolean logic (AND/OR/any-of) into a rule set.',
+                    'A rule organizes multiple CEs into named groups with a firing condition (e.g. "all of required and 1 of option_1").',
                     'Building a new rule from your bookmarked CEs is the typical workflow.',
                 ],
             },
@@ -149,8 +148,8 @@ const BrowseCEs = () => {
         try {
             const res = await getCognitiveElements(user.user_id);
             const data = res.data || [];
-            // Community/Browse is the PUBLIC space — never surface unpublished
-            // drafts here; they live in "Your Library" until published.
+            // Community/Browse is the PUBLIC space — never surface local
+            // drafts here; they live in "Your Library".
             const list = (Array.isArray(data) ? data : []).filter(ce => !ce.is_local_draft);
             setCes(list);
         } catch {
@@ -308,6 +307,11 @@ const BrowseCEs = () => {
             categories: parsedCategories,
             is_local_draft: item.is_local_draft,
             examples: item.examples || [],
+            // v2 CE fields — role is the primary badge, title the display
+            // name; tags render as muted pills.
+            role: item.role,
+            title: item.title,
+            tags: item.tags,
         };
     };
 
@@ -508,7 +512,6 @@ const BrowseCEs = () => {
                                         samples={previewCache[ce.ce_id]}
                                         onBookmark={handleBookmark}
                                         isBookmarked={bookmarkIds.has(ce.ce_id)}
-                                        onPublish={(c) => publishDraftCE(c, user?.user_id, fetchCes)}
                                     />
                                 ))}
                             </div>
@@ -558,7 +561,6 @@ const BrowseCEs = () => {
                                             samples={previewCache[ce.ce_id]}
                                             onBookmark={handleBookmark}
                                             isBookmarked={bookmarkIds.has(ce.ce_id)}
-                                            onPublish={(c) => publishDraftCE(c, user?.user_id, fetchCes)}
                                         />
                                     </div>
                                 ))}
