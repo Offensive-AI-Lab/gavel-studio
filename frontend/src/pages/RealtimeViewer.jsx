@@ -83,7 +83,9 @@ export default function RealtimeViewer() {
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
     const [analyses, setAnalyses] = useState([]);
-    const [selectedCE, setSelectedCE] = useState(null);
+    // Highlighted CE set — clicking sidebar CEs toggles membership; an empty
+    // set means "no focus" and every CE is shown.
+    const [selectedCEs, setSelectedCEs] = useState(() => new Set());
 
     // --- Stored (test-samples) mode state ---
     const [sampleGroups, setSampleGroups] = useState(null); // null = not loaded
@@ -296,7 +298,7 @@ export default function RealtimeViewer() {
         } finally { setLoading(false); }
     };
 
-    const handleClear = () => { setMessages([]); setAnalyses([]); setSelectedCE(null); };
+    const handleClear = () => { setMessages([]); setAnalyses([]); setSelectedCEs(new Set()); };
 
     // Mid-session resilience: if the warm session dies, automatically re-establish
     // it down the failover ladder (the backend's session/start walks
@@ -496,8 +498,8 @@ export default function RealtimeViewer() {
                                                 <div className="rtv-msg-role">{msg.role}</div>
                                                 {!isUser && analysis ? (
                                                     <>
-                                                        <TokenText analysis={analysis} selectedCE={selectedCE} />
-                                                        <ActivationChart analysis={analysis} selectedCE={selectedCE} />
+                                                        <TokenText analysis={analysis} selectedCEs={selectedCEs} />
+                                                        <ActivationChart analysis={analysis} selectedCEs={selectedCEs} />
                                                         {analysis.rule_triggers?.length > 0 && <RuleTriggersStrip rules={analysis.rule_triggers} />}
                                                     </>
                                                 ) : (
@@ -537,7 +539,7 @@ export default function RealtimeViewer() {
                                 onPickSample={pickSample}
                                 analysis={storedAnalysis}
                                 loading={storedLoading}
-                                selectedCE={selectedCE}
+                                selectedCEs={selectedCEs}
                             />
                         )}
                     </div>
@@ -556,9 +558,13 @@ export default function RealtimeViewer() {
                             ) : allCEs.map((ce, idx) => (
                                 <div
                                     key={ce}
-                                    className={`rtv-ce-item ${selectedCE === ce ? 'active' : ''}`}
-                                    onClick={() => setSelectedCE(selectedCE === ce ? null : ce)}
-                                    style={{ color: ceColor(idx, allCEs.length), background: selectedCE === ce ? withAlpha(ceColor(idx, allCEs.length), 0.10) : undefined }}
+                                    className={`rtv-ce-item ${selectedCEs.has(ce) ? 'active' : ''}`}
+                                    onClick={() => setSelectedCEs(prev => {
+                                        const next = new Set(prev);
+                                        if (next.has(ce)) next.delete(ce); else next.add(ce);
+                                        return next;
+                                    })}
+                                    style={{ color: ceColor(idx, allCEs.length), background: selectedCEs.has(ce) ? withAlpha(ceColor(idx, allCEs.length), 0.10) : undefined }}
                                 >
                                     <span className="rtv-ce-dot" style={{ background: ceColor(idx, allCEs.length) }} />
                                     <span className="rtv-ce-name" style={{ color: '#e2e8f0' }}>{ce}</span>
@@ -627,7 +633,7 @@ export default function RealtimeViewer() {
  * Browse stored conversations the way the reference Test Sample Navigation
  * does: pick a dataset group (a rule's positive/negative/calibration set, or a
  * CE's calibration dialogues), then a conversation, then it's classified. */
-function StoredMode({ groups, activeGroupKey, onPickGroup, samples, activeSampleIdx, onPickSample, analysis, loading, selectedCE }) {
+function StoredMode({ groups, activeGroupKey, onPickGroup, samples, activeSampleIdx, onPickSample, analysis, loading, selectedCEs }) {
     return (
         <div className="rtv-stored">
             <div className="rtv-stored-pickers">
@@ -684,8 +690,8 @@ function StoredMode({ groups, activeGroupKey, onPickGroup, samples, activeSample
                                 return (
                                     <div key={ti} className="rtv-msg assistant">
                                         <div className="rtv-msg-role">assistant</div>
-                                        <TokenText analysis={ta} selectedCE={selectedCE} />
-                                        <ActivationChart analysis={ta} selectedCE={selectedCE} />
+                                        <TokenText analysis={ta} selectedCEs={selectedCEs} />
+                                        <ActivationChart analysis={ta} selectedCEs={selectedCEs} />
                                         {turn.rule_triggers?.length > 0 && <RuleTriggersStrip rules={turn.rule_triggers} />}
                                     </div>
                                 );
@@ -707,8 +713,8 @@ function StoredMode({ groups, activeGroupKey, onPickGroup, samples, activeSample
                         )}
                         <div className="rtv-msg assistant">
                             <div className="rtv-msg-role">assistant</div>
-                            <TokenText analysis={analysis} selectedCE={selectedCE} />
-                            <ActivationChart analysis={analysis} selectedCE={selectedCE} />
+                            <TokenText analysis={analysis} selectedCEs={selectedCEs} />
+                            <ActivationChart analysis={analysis} selectedCEs={selectedCEs} />
                             {analysis.rule_triggers?.length > 0 && <RuleTriggersStrip rules={analysis.rule_triggers} />}
                         </div>
                     </>
@@ -723,11 +729,11 @@ function StoredMode({ groups, activeGroupKey, onPickGroup, samples, activeSample
 
 /* ---- Per-token colored text (reference-parity render_colored_tokens) ----
  * Each token is tinted by the strongest CE above its threshold on that token.
- * Selecting a CE in the sidebar narrows the highlight to that CE. Falls back
+ * Selecting CEs in the sidebar narrows the highlight to those CEs. Falls back
  * to the per-window display if the backend didn't return per-token data. */
-function TokenText({ analysis, selectedCE }) {
+function TokenText({ analysis, selectedCEs }) {
     const tokens = analysis?.tokens || [];
-    if (!tokens.length) return <WindowDisplay analysis={analysis} selectedCE={selectedCE} />;
+    if (!tokens.length) return <WindowDisplay analysis={analysis} selectedCEs={selectedCEs} />;
     const ceNames = analysis.labels ? Object.keys(analysis.labels) : [];
     // Flowing text with per-token CE highlights: each token's leading space (when
     // it starts a new word) is rendered OUTSIDE the colour, so words read normally
@@ -739,7 +745,7 @@ function TokenText({ analysis, selectedCE }) {
                 const lead = raw.startsWith(' ') ? ' ' : '';
                 const word = lead ? raw.slice(1) : raw;
                 const triggered = t.triggered_ces || [];
-                const pool = selectedCE ? (triggered.includes(selectedCE) ? [selectedCE] : []) : triggered;
+                const pool = selectedCEs?.size ? triggered.filter(c => selectedCEs.has(c)) : triggered;
                 let ce = null, maxP = 0;
                 pool.forEach(c => { const p = t.probabilities?.[c] || 0; if (p > maxP) { maxP = p; ce = c; } });
                 const color = ce ? ceColor(ceNames.indexOf(ce), ceNames.length) : null;
@@ -779,7 +785,7 @@ function fmtProb(p) {
  * Hand-rolled SVG (no chart dependency): one polyline per CE plotting its
  * probability across token index. Hovering shows every CE's value at that token
  * (like Plotly's "x unified"); the legend toggles CEs; thresholds show per CE. */
-function ActivationChart({ analysis, selectedCE }) {
+function ActivationChart({ analysis, selectedCEs }) {
     const tokens = analysis?.tokens || [];
     const ceNames = analysis?.labels ? Object.keys(analysis.labels) : [];
     const svgRef = useRef(null);
@@ -801,7 +807,7 @@ function ActivationChart({ analysis, selectedCE }) {
     const grid = [0, 0.25, 0.5, 0.75, 1];
     // Plot the lines the user is focused on: respect the sidebar selection AND
     // the per-legend toggles. Thresholds show ONLY for a clicked CE.
-    const shownCEs = ceNames.filter(ce => (!selectedCE || ce === selectedCE) && !hidden.has(ce));
+    const shownCEs = ceNames.filter(ce => (!selectedCEs?.size || selectedCEs.has(ce)) && !hidden.has(ce));
 
     const onMove = (e) => {
         const svg = svgRef.current; if (!svg) return;
@@ -816,7 +822,7 @@ function ActivationChart({ analysis, selectedCE }) {
     // Unified hover: every visible CE's probability at the hovered token,
     // strongest first (mirrors Plotly's "x unified" tooltip in the reference).
     const hoverList = hoverIdx == null ? [] :
-        (selectedCE ? [selectedCE] : ceNames.filter(ce => !hidden.has(ce)))
+        (selectedCEs?.size ? [...selectedCEs] : ceNames.filter(ce => !hidden.has(ce)))
             .map(ce => ({ ce, p: tokens[hoverIdx].probabilities?.[ce] || 0 }))
             .sort((a, b) => b.p - a.p);
     const hoverShown = hoverList.slice(0, 12);
@@ -826,8 +832,8 @@ function ActivationChart({ analysis, selectedCE }) {
     return (
         <div ref={outerRef} style={{ marginTop: 10, width: '100%', maxWidth: '100%', boxSizing: 'border-box', position: 'relative', background: 'rgba(2,6,23,0.55)', border: '1px solid rgba(148,163,184,0.18)', borderRadius: 10, padding: '10px 12px 8px' }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: '#cbd5e1', marginBottom: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
-                <span>CE activation over tokens {selectedCE ? `· ${selectedCE}` : ''}</span>
-                <span style={{ fontSize: 10, color: '#64748b', fontWeight: 500 }}>{N} tokens · hover for values{selectedCE ? ' · dashed = threshold' : ' · click legend to toggle'}</span>
+                <span>CE activation over tokens {selectedCEs?.size ? `· ${[...selectedCEs].join(' · ')}` : ''}</span>
+                <span style={{ fontSize: 10, color: '#64748b', fontWeight: 500 }}>{N} tokens · hover for values{selectedCEs?.size ? ' · dashed = threshold' : ' · click legend to toggle'}</span>
             </div>
             <div style={{ overflowX: 'auto', overflowY: 'hidden', width: '100%' }}>
             <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" onMouseMove={onMove} onMouseLeave={() => setHoverIdx(null)} style={{ display: 'block', width: '100%', minWidth: W, height: H, cursor: 'crosshair' }}>
@@ -842,7 +848,7 @@ function ActivationChart({ analysis, selectedCE }) {
                         <text x={padL - 6} y={y(g) + 3} fontSize={9} fill="#94a3b8" textAnchor="end">{g}</text>
                     </g>
                 ))}
-                {selectedCE && shownCEs.map(ce => {
+                {selectedCEs?.size > 0 && shownCEs.map(ce => {
                     const thr = analysis.thresholds_used?.[ce]?.threshold ?? 0.5;
                     const c = ceColor(ceNames.indexOf(ce), ceNames.length);
                     return <line key={`thr-${ce}`} x1={padL} x2={W - padR} y1={y(thr)} y2={y(thr)} stroke={c} strokeOpacity={0.6} strokeDasharray="5 4" strokeWidth={1.2} />;
@@ -850,12 +856,12 @@ function ActivationChart({ analysis, selectedCE }) {
                 {shownCEs.map(ce => {
                     const c = ceColor(ceNames.indexOf(ce), ceNames.length);
                     const pts = tokens.map((t, i) => `${x(i).toFixed(1)},${y(t.probabilities?.[ce] || 0).toFixed(1)}`).join(' ');
-                    return <polyline key={ce} points={pts} fill="none" stroke={c} strokeWidth={selectedCE ? 2.4 : 1.8} opacity={0.9} strokeLinejoin="round" strokeLinecap="round" />;
+                    return <polyline key={ce} points={pts} fill="none" stroke={c} strokeWidth={selectedCEs?.size ? 2.4 : 1.8} opacity={0.9} strokeLinejoin="round" strokeLinecap="round" />;
                 })}
-                {selectedCE && tokens.map((t, i) => (
-                    <circle key={`dot-${i}`} cx={x(i)} cy={y(t.probabilities?.[selectedCE] || 0)} r={2.4}
-                        fill={ceColor(ceNames.indexOf(selectedCE), ceNames.length)} />
-                ))}
+                {selectedCEs?.size > 0 && shownCEs.map(ce => tokens.map((t, i) => (
+                    <circle key={`dot-${ce}-${i}`} cx={x(i)} cy={y(t.probabilities?.[ce] || 0)} r={2.4}
+                        fill={ceColor(ceNames.indexOf(ce), ceNames.length)} />
+                )))}
                 {/* hover crosshair + a marker on each visible line at that token */}
                 {hoverIdx != null && (
                     <g>
@@ -898,7 +904,7 @@ function ActivationChart({ analysis, selectedCE }) {
                 </div>
                 );
             })()}
-            {!selectedCE && ceNames.length > 1 && (
+            {!selectedCEs?.size && ceNames.length > 1 && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 8 }}>
                     {ceNames.map(ce => {
                         const off = hidden.has(ce);
@@ -917,7 +923,7 @@ function ActivationChart({ analysis, selectedCE }) {
 
 
 /* ---- Window Display (fallback when no per-token data) ---- */
-function WindowDisplay({ analysis, selectedCE }) {
+function WindowDisplay({ analysis, selectedCEs }) {
     if (!analysis?.windows) return <div className="rtv-msg-text">{analysis?.generated_text}</div>;
     const ceNames = analysis.labels ? Object.keys(analysis.labels) : [];
     return (
@@ -925,13 +931,11 @@ function WindowDisplay({ analysis, selectedCE }) {
             {analysis.windows.map((win, i) => {
                 const probs = win.probabilities || {};
                 const triggeredInWindow = win.window_triggered_ces || [];
-                let highlightCE = null;
-                if (selectedCE && triggeredInWindow.includes(selectedCE)) {
-                    highlightCE = selectedCE;
-                } else if (!selectedCE && triggeredInWindow.length > 0) {
-                    let maxP = 0;
-                    triggeredInWindow.forEach(ce => { const p = probs[ce] || 0; if (p > maxP) { maxP = p; highlightCE = ce; } });
-                }
+                const candidates = selectedCEs?.size
+                    ? triggeredInWindow.filter(ce => selectedCEs.has(ce))
+                    : triggeredInWindow;
+                let highlightCE = null, maxP = 0;
+                candidates.forEach(ce => { const p = probs[ce] || 0; if (p > maxP) { maxP = p; highlightCE = ce; } });
                 const color = highlightCE ? ceColor(ceNames.indexOf(highlightCE), ceNames.length) : undefined;
                 const tooltip = [`window ${win.window_index} · ${win.token_count} tokens`, ...ceNames.map(ce => `${ce}: ${(probs[ce] || 0).toFixed(3)}`)].join('\n');
                 return (
