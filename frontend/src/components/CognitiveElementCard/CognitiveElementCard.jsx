@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { FiChevronDown, FiChevronUp, FiPlus, FiMinus, FiUpload, FiTrash2, FiFileText } from 'react-icons/fi';
+import { FiChevronDown, FiChevronUp, FiPlus, FiMinus, FiDownload, FiTrash2, FiFileText } from 'react-icons/fi';
+import ExportToRegistryModal from '../ExportToRegistry/ExportToRegistryModal';
 import { prettyName } from '../../utils/ruleLogic';
 import './CognitiveElementCard.css';
 
@@ -14,9 +15,9 @@ const CognitiveElementCard = ({
     bookmarkLabel,
     onDelete,
 }) => {
-    // Drafts show a DISABLED Publish button: publishing from Studio is gone —
-    // library contributions now go through gavel-rules pull requests.
-    const isDraftCe = ce?.is_local_draft === true;
+    // Contributions go out as gavel-rules pull requests, so the card's outbound
+    // action is Export (registry-format files), not an in-studio publish.
+    const [exportOpen, setExportOpen] = React.useState(false);
     // The definition can be long and the header only shows a one-line preview
     // (clamped next to the action buttons), so the full text lives in the
     // expanded body — mirroring RuleCard's "What this rule detects" block, with
@@ -138,15 +139,15 @@ const CognitiveElementCard = ({
                             {bookmarkLabel || (isBookmarked ? 'Remove' : 'Save')}
                         </button>
                     )}
-                    {isDraftCe && (
+                    {ce?.ce_id && (
                         <button
-                            className="bookmark-btn publish-btn"
-                            disabled
-                            aria-label="Publish CE to library (coming soon)"
-                            title="Library contributions move to gavel-rules pull requests — submission from Studio coming soon"
+                            className="bookmark-btn"
+                            onClick={(e) => { e.stopPropagation(); setExportOpen(true); }}
+                            aria-label="Export cognitive element for a gavel-rules pull request"
+                            title="Save this CE in the public library's format, ready to contribute"
                         >
-                            <FiUpload />
-                            Publish
+                            <FiDownload />
+                            Export
                         </button>
                     )}
                     {canDelete && (
@@ -247,6 +248,16 @@ const CognitiveElementCard = ({
                         );
                     })()}
                 </div>
+            )}
+
+            {exportOpen && (
+                <ExportToRegistryModal
+                    open={exportOpen}
+                    onClose={() => setExportOpen(false)}
+                    kind="ce"
+                    entityId={ce.ce_id}
+                    defaultTitle={ce?.title || ''}
+                />
             )}
         </div>
     );

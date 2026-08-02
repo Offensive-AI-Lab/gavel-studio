@@ -372,16 +372,28 @@ export const updateClassifierConfig = (classifierId, config) =>
 export const getTrainingStatus = (classifierId) =>
     api.get(`/classifiers/${classifierId}/training-status`);
 
-// 12. Download trained classifier as zip
-export const downloadClassifier = async (classifierId, classifierName) => {
-    const response = await api.get(`/classifiers/${classifierId}/download`, { responseType: 'blob' });
-    const url = URL.createObjectURL(response.data);
+// Fetch a URL as a blob and hand it to the browser as a download. Downloads
+// are reads, so none of these are withNotify-wrapped — nothing on the server
+// changes and no library event should fire.
+const downloadBlob = async (url, fallbackName, config = {}) => {
+    const response = await api.get(url, { ...config, responseType: 'blob' });
+    let filename = fallbackName;
+    const cd = response.headers?.['content-disposition'];
+    const m = cd && /filename="?([^"]+)"?/.exec(cd);
+    if (m) filename = m[1];
+    const objectUrl = URL.createObjectURL(response.data);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = `classifier_${classifierId}_${classifierName}.zip`;
+    a.href = objectUrl;
+    a.download = filename;
     a.click();
-    URL.revokeObjectURL(url);
+    URL.revokeObjectURL(objectUrl);
+    return filename;
 };
+
+// 12. Download trained classifier as zip
+export const downloadClassifier = (classifierId, classifierName) =>
+    downloadBlob(`/classifiers/${classifierId}/download`,
+        `classifier_${classifierId}_${classifierName}.zip`);
 
 // --- Classifier bundle export / import (server-side background jobs) ---
 // Preflight: can this classifier be exported, which tiers, what's unpublished.
@@ -412,19 +424,35 @@ export const getBundleJob = (jobId) =>
     api.get(`/classifiers/bundle-jobs/${jobId}`);
 
 // Download a finished export bundle (triggers a browser download).
-export const downloadBundleJob = async (jobId, fallbackName) => {
-    const response = await api.get(`/classifiers/bundle-jobs/${jobId}/download`, { responseType: 'blob' });
-    let filename = fallbackName || `bundle_${jobId}.gavel.zip`;
-    const cd = response.headers?.['content-disposition'];
-    const m = cd && /filename="?([^"]+)"?/.exec(cd);
-    if (m) filename = m[1];
-    const url = URL.createObjectURL(response.data);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+export const downloadBundleJob = (jobId, fallbackName) =>
+    downloadBlob(`/classifiers/bundle-jobs/${jobId}/download`,
+        fallbackName || `bundle_${jobId}.gavel.zip`);
+
+// --- gavel-rules contribution export ---
+// Serializes a rule / CE / rule set into the registry's own YAML (+ dataset
+// JSON) files so the user can open a pull request against gavel-rules. Pure
+// reads: nothing is published from the studio.
+const EXPORT_BASE = { rule: 'rule', ce: 'ce', ruleset: 'ruleset' };
+
+// What would be exported, and what would make the registry reject it.
+export const getRegistryExportPreflight = (kind, entityId, params = {}) =>
+    api.get(`/export/${EXPORT_BASE[kind]}/${entityId}/preflight`, { params });
+
+// Download one artifact file. `filename` is the registry's own name for it
+// (ce.yaml, excitation.json, tests/positive.json, ...).
+export const downloadRegistryExportFile = (kind, entityId, filename, params = {}) => {
+    const base = `/export/${EXPORT_BASE[kind]}/${entityId}`;
+    const isYaml = filename.endsWith('.yaml');
+    const path = kind === 'ruleset' && isYaml ? `${base}/ruleset.yaml`
+        : kind === 'rule' && !isYaml ? `${base}/tests/${filename}`
+            : `${base}/${filename}`;
+    return downloadBlob(path, filename, { params });
 };
+
+// The GitHub handle used for provenance.created_by, remembered across exports.
+export const getExportSettings = () => api.get('/export/settings');
+export const saveExportSettings = (githubUsername) =>
+    api.put('/export/settings', { github_username: githubUsername });
 
 // --- Evaluation ---
 export const startCalibration = (classifierId, body) =>

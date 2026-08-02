@@ -250,25 +250,33 @@ describe('CognitiveElementCard — bookmark affordance', () => {
     });
 });
 
-describe('CognitiveElementCard — publish affordance (disabled: PR-based contributions)', () => {
-    it('renders a DISABLED Publish button on a local draft with the PR tooltip', () => {
+describe('CognitiveElementCard — export affordance (gavel-rules contributions)', () => {
+    it('offers Export on a local draft', () => {
         renderCard({
             ce: baseCe({ is_local_draft: true }),
             isOpen: false,
             onToggle: vi.fn(),
         });
-        const btn = screen.getByRole('button', { name: /publish ce to library/i });
-        expect(btn).toBeDisabled();
-        expect(btn).toHaveAttribute('title', expect.stringContaining('gavel-rules pull requests'));
+        expect(screen.getByRole('button', { name: /export cognitive element/i })).toBeEnabled();
     });
 
-    it('does not render Publish for a non-draft CE', () => {
+    it('offers Export on a library CE too — exporting is a read, not a publish', () => {
         renderCard({
             ce: baseCe({ is_local_draft: false }),
             isOpen: false,
             onToggle: vi.fn(),
         });
-        expect(screen.queryByRole('button', { name: /publish ce to library/i })).toBeNull();
+        expect(screen.getByRole('button', { name: /export cognitive element/i })).toBeEnabled();
+    });
+
+    it('has no Publish affordance — in-studio publishing is gone', () => {
+        renderCard({ ce: baseCe({ is_local_draft: true }), isOpen: false, onToggle: vi.fn() });
+        expect(screen.queryByRole('button', { name: /publish/i })).toBeNull();
+    });
+
+    it('does not open the export modal until Export is clicked', () => {
+        renderCard({ ce: baseCe(), isOpen: false, onToggle: vi.fn() });
+        expect(screen.queryByText(/Export cognitive element/i)).toBeNull();
     });
 });
 
@@ -349,10 +357,11 @@ describe('CognitiveElementCard — chevron indicator', () => {
             isOpen: true,
             onToggle: vi.fn(),
         });
-        // Both render a single chevron svg in the actions area (no other
-        // action buttons in this minimal config).
-        expect(open.querySelectorAll('.ce-actions svg').length).toBe(1);
-        expect(closedSvgs.length).toBe(1);
+        // The chevron is the last icon in the actions row, after any action
+        // buttons (Export, and Bookmark/Delete when wired up).
+        const openSvgs = open.querySelectorAll('.ce-actions svg');
+        expect(openSvgs.length).toBe(closedSvgs.length);
+        expect(openSvgs[openSvgs.length - 1]).toBeInTheDocument();
     });
 });
 
@@ -436,14 +445,14 @@ describe('CognitiveElementCard — examples (expanded content)', () => {
 
 
 describe('CognitiveElementCard — combined affordances', () => {
-    it('can show the (disabled) publish button and delete together for a draft', () => {
+    it('can show export and delete together for a draft', () => {
         const { container } = renderCard({
             ce: baseCe({ is_local_draft: true }),
             isOpen: true,
             onToggle: vi.fn(),
             onDelete: vi.fn(),
         });
-        expect(screen.getByRole('button', { name: /publish ce to library/i })).toBeDisabled();
+        expect(screen.getByRole('button', { name: /export cognitive element/i })).toBeEnabled();
         expect(container.querySelector('.delete-icon')).not.toBeNull();
     });
 });

@@ -30,6 +30,13 @@ vi.mock('../../../src/api', () => ({
     getCEBookmarks: vi.fn(() => Promise.resolve({ data: { bookmarks: [] } })),
     addCEBookmark: vi.fn(() => Promise.resolve({ data: {} })),
     removeCEBookmark: vi.fn(() => Promise.resolve({ data: {} })),
+    // Reached when the Export button opens the registry-export modal.
+    getExportSettings: vi.fn(() => Promise.resolve({ data: { github_username: '' } })),
+    saveExportSettings: vi.fn(() => Promise.resolve({ data: {} })),
+    getRegistryExportPreflight: vi.fn(() => Promise.resolve({
+        data: { kind: 'rule', name: 'r', directory: 'rules/r', files: [], warnings: [], preview: '' },
+    })),
+    downloadRegistryExportFile: vi.fn(() => Promise.resolve('rule.yaml')),
 }));
 
 // showAlertDialog -> Swal.fire. Mock so the role-help button doesn't pop a modal.
@@ -200,19 +207,30 @@ describe('RuleCard — bookmark button', () => {
     });
 });
 
-describe('RuleCard — publish button (disabled: PR-based contributions)', () => {
-    it('shows a DISABLED publish button on a draft with the PR tooltip', () => {
+describe('RuleCard — export button (gavel-rules contributions)', () => {
+    it('offers Export on a draft', () => {
         const rule = { ...baseRule(), is_local_draft: true };
         render(<MemoryRouter><RuleCard rule={rule} isExpanded={false} onToggle={() => {}} /></MemoryRouter>);
-        const btn = screen.getByRole('button', { name: 'Publish rule to library (coming soon)' });
-        expect(btn).toBeDisabled();
-        expect(btn).toHaveAttribute('title', expect.stringContaining('gavel-rules pull requests'));
+        expect(screen.getByRole('button', { name: /export rule/i })).toBeEnabled();
     });
 
-    it('hides the publish button when the rule is not a draft', () => {
+    it('offers Export on a library rule too — exporting is a read, not a publish', () => {
         const rule = { ...baseRule(), is_local_draft: false };
         render(<MemoryRouter><RuleCard rule={rule} isExpanded={false} onToggle={() => {}} /></MemoryRouter>);
-        expect(screen.queryByRole('button', { name: /Publish rule to library/ })).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /export rule/i })).toBeEnabled();
+    });
+
+    it('has no Publish affordance — in-studio publishing is gone', () => {
+        const rule = { ...baseRule(), is_local_draft: true };
+        render(<MemoryRouter><RuleCard rule={rule} isExpanded={false} onToggle={() => {}} /></MemoryRouter>);
+        expect(screen.queryByRole('button', { name: /publish/i })).not.toBeInTheDocument();
+    });
+
+    it('does not bubble the export click up to the card toggle', () => {
+        const onToggle = vi.fn();
+        render(<MemoryRouter><RuleCard rule={baseRule()} isExpanded={false} onToggle={onToggle} /></MemoryRouter>);
+        fireEvent.click(screen.getByRole('button', { name: /export rule/i }));
+        expect(onToggle).not.toHaveBeenCalled();
     });
 });
 

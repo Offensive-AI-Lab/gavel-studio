@@ -23,3 +23,7 @@ matplotlib>=3.7.0
 pandas>=2.0.0
 pillow>=10.0.0
 wandb>=0.16.0
+# Emitting gavel-rules contribution files (services/registry_export.py). Already
+# present transitively via transformers/wandb; declared so the export path does
+# not depend on someone else's dependency tree.
+pyyaml>=6.0

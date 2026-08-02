@@ -64,7 +64,7 @@ export default defineConfig(({ mode }) => {
   const API_PREFIXES = [
     '/health', '/user', '/dashboard', '/rules', '/cognitive', '/models',
     '/classifiers', '/ai', '/library', '/evaluation', '/realtime', '/compute',
-    '/pipeline-runs', '/guardrail-folders',
+    '/pipeline-runs', '/guardrail-folders', '/export',
   ]
   const proxy = Object.fromEntries(API_PREFIXES.map((p) => [p, {
     target: 'http://127.0.0.1:8000',

@@ -522,14 +522,13 @@ describe('RulesManager — delete rule', () => {
     });
 });
 
-describe('RulesManager — publish & test-set entry points', () => {
-    it('shows a DISABLED Publish button on a draft rule (PR-based contributions)', async () => {
+describe('RulesManager — export & test-set entry points', () => {
+    it('offers Export on a draft rule instead of the removed Publish button', async () => {
         api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture({ is_local_draft: true })] } });
         renderPage();
         await screen.findByText('Rule Alpha');
-        const btn = screen.getByRole('button', { name: 'Publish rule to library (coming soon)' });
-        expect(btn).toBeDisabled();
-        expect(btn).toHaveAttribute('title', expect.stringContaining('gavel-rules pull requests'));
+        expect(screen.getByRole('button', { name: /export rule/i })).toBeEnabled();
+        expect(screen.queryByRole('button', { name: /publish/i })).toBeNull();
     });
 
     it('opens the in-place logic editor (groups + condition) and saves via saveEditedRule', async () => {
