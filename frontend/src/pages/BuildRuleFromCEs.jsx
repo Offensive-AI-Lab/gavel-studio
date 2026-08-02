@@ -314,8 +314,8 @@ export default function BuildRuleFromCEs({ onClose, baseRule = null }) {
                         {step === 3 && (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                                 <p style={{ margin: 0, fontSize: '0.88rem', color: '#94a3b8' }}>
-                                    Organize the CEs into named groups, then write the firing condition over the
-                                    group names — the preview updates live below.
+                                    Organize the CEs into named groups, then choose how much of each group the
+                                    rule needs — the condition and the preview update as you choose.
                                 </p>
                                 {/* Real-time firing-logic preview for the current groups + condition. */}
                                 <RuleLogicPreview title="Firing logic — live preview" groups={groupsForPreview} condition={condition} />

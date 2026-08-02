@@ -130,6 +130,7 @@ describe('validateEditorState', () => {
         expect(validateEditorState([g('a', [])], 'all of a')).toMatch(/no cognitive elements/);
     });
     it('rejects a blank condition', () => {
-        expect(validateEditorState([g('a')], '   ')).toMatch(/firing condition/);
+        // Blank means every group is "supporting only" — nothing can fire.
+        expect(validateEditorState([g('a')], '   ')).toMatch(/Nothing would make this rule fire/);
     });
 });

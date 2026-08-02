@@ -549,7 +549,10 @@ describe('RulesManager — export & test-set entry points', () => {
         // Modal shows the group editor prefilled with the rule's condition.
         const conditionInput = await screen.findByLabelText('Firing condition');
         expect(conditionInput).toHaveValue('all of required');
-        fireEvent.change(conditionInput, { target: { value: '1 of required' } });
+        // The condition is generated now — choose "any 1" instead of typing.
+        expect(conditionInput).toHaveAttribute('readonly');
+        fireEvent.change(screen.getByLabelText('How much of required must match'),
+            { target: { value: '1' } });
         fireEvent.click(screen.getByRole('button', { name: /Save logic/ }));
         await waitFor(() => expect(api.saveEditedRule).toHaveBeenCalledTimes(1));
         expect(api.saveEditedRule).toHaveBeenCalledWith(1, {

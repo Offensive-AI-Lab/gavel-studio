@@ -108,7 +108,9 @@ export function validateEditorState(groupList, condition) {
         }
     }
     if (!String(condition || '').trim()) {
-        return 'Write a firing condition, e.g. "all of required".';
+        // The condition is generated from the per-group pickers, so an empty
+        // one means every group is set to "supporting only" — nothing fires.
+        return 'Nothing would make this rule fire — set at least one group to "Needs all of them" or "Needs any N".';
     }
     return null;
 }
