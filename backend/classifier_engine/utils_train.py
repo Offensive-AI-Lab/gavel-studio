@@ -263,16 +263,27 @@ def load_model_and_tokenizer(model_name_or_path, device_map=None, token=None):
             token=token,
         ).eval()
 
+    _wants_mps = device_map == "mps" or (
+        isinstance(device_map, dict) and device_map.get("") == "mps"
+    )
+
     try:
-        model = _from_pretrained(device_map)
+        if _wants_mps:
+            # accelerate's device_map placement deadlocks on MPS (observed with
+            # torch 2.13 / transformers 5.14: from_pretrained hangs forever at
+            # "Loading weights: 0%"). Load on CPU and move instead — same
+            # placement, and a too-large model raises a catchable MPS error
+            # (handled below) instead of hanging.
+            model = _from_pretrained(None).to("mps")
+        else:
+            model = _from_pretrained(device_map)
     except Exception as e:
         # Apple Silicon: MPS caps a single buffer to a fraction of unified memory,
         # so a 7B fp16 model (~14 GB) can't load onto the GPU on a small Mac
         # ("Invalid buffer size" / MPS OOM). Fall back to CPU so the feature still
         # works (slower) instead of crashing. Only retry for an MPS placement.
         _msg = str(e).lower()
-        _is_mps = device_map == "mps" or (isinstance(device_map, dict) and device_map.get("") == "mps")
-        if _is_mps and ("buffer size" in _msg or "out of memory" in _msg
+        if _wants_mps and ("buffer size" in _msg or "out of memory" in _msg
                         or "invalid buffer" in _msg or "mps" in _msg):
             logger.warning(
                 f"MPS load failed for {model_name_or_path} ({e}); the model is too "
