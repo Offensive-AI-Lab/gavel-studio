@@ -1,0 +1,618 @@
+/* Tutorial.css — first-login onboarding modal.
+ *
+ * Visual language matches the rest of the modernized app: light
+ * glassmorphic card on the same atmospheric gradient as auth.css,
+ * Plus Jakarta Sans, indigo→blue accents. Each slide carries an
+ * abstract CSS/SVG illustration of a core concept; we deliberately
+ * avoid product screenshots so the visuals don't break when the
+ * underlying UI changes.
+ */
+
+
+/* ----- Backdrop + card --------------------------------------------- */
+
+.tutorial-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    /* Dark theme: backdrop is even darker than the page so the modal
+     * card visibly lifts off. */
+    background: rgba(2, 6, 23, 0.70);
+    backdrop-filter: blur(8px);
+    animation: tutorial-fade-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    color: #e2e8f0;
+}
+
+@keyframes tutorial-fade-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+
+.tutorial-card {
+    width: 100%;
+    max-width: 640px;
+    /* Dark glass card matching auth.css. Sits on top of the dimmed
+     * backdrop so contrast is generous. */
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 24px;
+    color: #e2e8f0;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    box-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.06) inset,
+        0 24px 48px -12px rgba(2, 6, 23, 0.65),
+        0 8px 24px -8px rgba(99, 102, 241, 0.30);
+    overflow: hidden;
+    animation: tutorial-card-in 320ms cubic-bezier(0.16, 1, 0.3, 1);
+    display: flex;
+    flex-direction: column;
+}
+
+@keyframes tutorial-card-in {
+    from { opacity: 0; transform: translateY(16px) scale(0.96); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+
+/* ----- Slide body -------------------------------------------------- */
+
+.tutorial-slide {
+    padding: 36px 36px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    min-height: 460px;
+}
+
+.tutorial-kicker {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    align-self: flex-start;
+    padding: 4px 12px;
+    border-radius: 999px;
+    background: rgba(99, 102, 241, 0.20);
+    color: #c7d2fe;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.tutorial-title {
+    font-size: 1.7rem;
+    font-weight: 800;
+    color: #f8fafc;
+    letter-spacing: -0.02em;
+    margin: 0;
+    line-height: 1.2;
+}
+
+.tutorial-body {
+    font-size: 1rem;
+    color: #cbd5e1;
+    line-height: 1.6;
+    margin: 0;
+}
+
+.tutorial-body strong { color: #f1f5f9; }
+
+.tutorial-viz-wrap {
+    /* Lighter "stage" panel inside the dark card so the mini-viz
+     * still reads as a feature spotlight. The glow tints come from
+     * the page gradient bleeding through. */
+    background: linear-gradient(180deg, rgba(99, 102, 241, 0.10) 0%, rgba(139, 92, 246, 0.08) 100%);
+    border: 1px solid rgba(129, 140, 248, 0.22);
+    border-radius: 16px;
+    padding: 20px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 180px;
+}
+
+
+/* ----- Mini-viz: shared bits --------------------------------------- */
+
+.viz-box {
+    border-radius: 12px;
+    padding: 10px 14px;
+    font-weight: 700;
+    font-size: 0.78rem;
+    letter-spacing: 0.02em;
+    color: #f1f5f9;
+    background: rgba(15, 23, 42, 0.65);
+    border: 1.5px solid rgba(148, 163, 184, 0.18);
+    box-shadow: 0 4px 14px -4px rgba(0, 0, 0, 0.55);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.viz-box-tone-indigo { border-color: rgba(129, 140, 248, 0.55); color: #c7d2fe; background: rgba(99, 102, 241, 0.18); }
+.viz-box-tone-blue   { border-color: rgba(56, 189, 248, 0.55); color: #bae6fd; background: rgba(14, 165, 233, 0.18); }
+.viz-box-tone-violet { border-color: rgba(167, 139, 250, 0.55); color: #ddd6fe; background: rgba(139, 92, 246, 0.18); }
+.viz-box-tone-emerald{ border-color: rgba(52, 211, 153, 0.55); color: #a7f3d0; background: rgba(16, 185, 129, 0.18); }
+.viz-box-tone-amber  { border-color: rgba(251, 191, 36, 0.55); color: #fde68a; background: rgba(245, 158, 11, 0.18); }
+
+
+/* ----- Mini-viz: vocabulary hierarchy (slide 2) -------------------- */
+
+.viz-hierarchy {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+}
+
+.viz-h-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.viz-h-arrow {
+    color: #64748b;
+    font-size: 1.1rem;
+    line-height: 1;
+}
+
+.viz-ce-cluster {
+    display: flex;
+    gap: 6px;
+}
+
+.viz-ce-chip {
+    width: 38px;
+    height: 22px;
+    border-radius: 999px;
+    background: linear-gradient(135deg, #6366f1 0%, #2563eb 100%);
+    box-shadow: 0 2px 6px -1px rgba(99, 102, 241, 0.40);
+}
+
+
+/* ----- Mini-viz: rule sources (slide 3) ---------------------------- */
+
+.viz-sources {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    width: 100%;
+    max-width: 480px;
+}
+
+.viz-source-card {
+    background: rgba(15, 23, 42, 0.70);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 12px;
+    padding: 14px 10px;
+    text-align: center;
+    box-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+}
+
+.viz-source-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #ffffff;
+    box-shadow: 0 4px 10px -4px rgba(99, 102, 241, 0.40);
+}
+
+.viz-source-icon.tone-blue   { background: linear-gradient(135deg, #0ea5e9 0%, #2563eb 100%); }
+.viz-source-icon.tone-violet { background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%); }
+.viz-source-icon.tone-emerald{ background: linear-gradient(135deg, #10b981 0%, #059669 100%); }
+
+.viz-source-label {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: #f1f5f9;
+}
+
+.viz-source-sub {
+    font-size: 0.7rem;
+    color: #94a3b8;
+    line-height: 1.3;
+}
+
+
+/* ----- Mini-viz: pipeline (slide 4) -------------------------------- */
+
+.viz-pipeline {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: center;
+}
+
+.viz-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+}
+
+.viz-step-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #6366f1 0%, #2563eb 100%);
+    color: #ffffff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 6px 14px -4px rgba(99, 102, 241, 0.40);
+}
+
+.viz-step-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #cbd5e1;
+}
+
+.viz-pipeline-arrow {
+    color: #64748b;
+    font-size: 1rem;
+    margin-bottom: 16px;
+}
+
+
+/* ----- Mini-viz: ship (slide 5) ------------------------------------ */
+
+.viz-ship {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    max-width: 480px;
+}
+
+.viz-ship-panel {
+    background: rgba(15, 23, 42, 0.70);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 12px;
+    padding: 12px;
+    box-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 110px;
+}
+
+.viz-ship-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #94a3b8;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.viz-conv-line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.72rem;
+    color: #cbd5e1;
+}
+
+.viz-conv-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #64748b;
+}
+
+.viz-conv-dot.active {
+    background: linear-gradient(135deg, #f87171 0%, #ef4444 100%);
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.30);
+}
+
+.viz-ship-divider {
+    color: #64748b;
+    font-size: 1.5rem;
+}
+
+.viz-ship-publish {
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    color: #ffffff;
+    border-radius: 12px;
+    padding: 16px 12px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-align: center;
+    box-shadow: 0 6px 14px -4px rgba(16, 185, 129, 0.40);
+    min-height: 110px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+}
+
+
+/* ----- Welcome (slide 1) ------------------------------------------- */
+
+.viz-welcome {
+    position: relative;
+    width: 200px;
+    height: 140px;
+}
+
+.viz-welcome-core {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 64px;
+    height: 64px;
+    border-radius: 18px;
+    background: linear-gradient(135deg, #6366f1 0%, #2563eb 100%);
+    color: #ffffff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 8px 24px -6px rgba(99, 102, 241, 0.55);
+    animation: viz-welcome-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes viz-welcome-pulse {
+    0%, 100% { box-shadow: 0 8px 24px -6px rgba(99, 102, 241, 0.55); transform: translate(-50%, -50%) scale(1); }
+    50%      { box-shadow: 0 12px 32px -6px rgba(99, 102, 241, 0.75); transform: translate(-50%, -50%) scale(1.04); }
+}
+
+.viz-welcome-orbit {
+    position: absolute;
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    background: #ffffff;
+    border: 1.5px solid rgba(99, 102, 241, 0.35);
+    box-shadow: 0 4px 12px -4px rgba(99, 102, 241, 0.30);
+}
+
+.viz-welcome-orbit.o1 { left: 8px;  top: 14px; }
+.viz-welcome-orbit.o2 { right: 6px; top: 30px; }
+.viz-welcome-orbit.o3 { left: 50%; transform: translateX(-50%); bottom: 10px; }
+
+
+/* ----- Footer: progress + buttons ---------------------------------- */
+
+.tutorial-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 32px;
+    border-top: 1px solid rgba(148, 163, 184, 0.10);
+    background: rgba(2, 6, 23, 0.40);
+    backdrop-filter: blur(8px);
+    gap: 16px;
+}
+
+.tutorial-progress {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.tutorial-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: rgba(99, 102, 241, 0.30);
+    transition: background 200ms ease, transform 200ms ease;
+}
+
+.tutorial-dot.active {
+    background: linear-gradient(135deg, #818cf8 0%, #3b82f6 100%);
+    transform: scale(1.2);
+    box-shadow: 0 2px 8px -1px rgba(99, 102, 241, 0.65);
+}
+
+.tutorial-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.tutorial-btn {
+    padding: 10px 18px;
+    border-radius: 10px;
+    font-size: 0.9rem;
+    font-weight: 700;
+    font-family: inherit;
+    cursor: pointer;
+    transition: transform 120ms ease, box-shadow 200ms ease, filter 180ms ease, background 180ms ease, color 180ms ease, border-color 180ms ease;
+    border: 1.5px solid transparent;
+}
+
+.tutorial-btn-primary {
+    background: linear-gradient(135deg, #818cf8 0%, #3b82f6 100%);
+    color: #ffffff;
+    box-shadow: 0 6px 20px -4px rgba(99, 102, 241, 0.55);
+}
+
+.tutorial-btn-primary:hover {
+    box-shadow: 0 12px 28px -4px rgba(99, 102, 241, 0.70);
+    filter: brightness(1.06);
+}
+
+.tutorial-btn-primary:active { transform: scale(0.99); }
+
+.tutorial-btn-ghost {
+    background: transparent;
+    color: #cbd5e1;
+}
+
+.tutorial-btn-ghost:hover {
+    background: rgba(99, 102, 241, 0.16);
+    color: #e0e7ff;
+}
+
+.tutorial-btn-skip {
+    background: transparent;
+    color: #64748b;
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+
+.tutorial-btn-skip:hover {
+    color: #cbd5e1;
+}
+
+
+/* ----- Page-mode sections ------------------------------------------ */
+
+/* Used by the per-page contextual help variant: each section has a
+ * small uppercase heading + a bulleted list of state-derived items. */
+
+.tutorial-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.tutorial-section-heading {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #c7d2fe;
+}
+
+.tutorial-section-list {
+    margin: 0;
+    padding-left: 20px;
+    color: #cbd5e1;
+    font-size: 0.95rem;
+    line-height: 1.55;
+}
+
+.tutorial-section-list li {
+    margin-bottom: 4px;
+}
+
+.tutorial-section-list li::marker {
+    color: #818cf8;
+}
+
+
+/* ----- Final-slide CTAs -------------------------------------------- */
+
+.tutorial-ctas {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 4px;
+}
+
+.tutorial-cta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border-radius: 12px;
+    border: 1.5px solid rgba(148, 163, 184, 0.22);
+    background: rgba(15, 23, 42, 0.55);
+    color: #e2e8f0;
+    font-weight: 700;
+    font-size: 0.95rem;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background 180ms ease, border-color 180ms ease, color 180ms ease, transform 120ms ease;
+}
+
+.tutorial-cta:hover {
+    background: rgba(15, 23, 42, 0.80);
+    border-color: rgba(165, 180, 252, 0.55);
+    color: #f1f5f9;
+}
+
+.tutorial-cta-primary {
+    background: linear-gradient(135deg, #818cf8 0%, #3b82f6 100%);
+    color: #ffffff;
+    border-color: transparent;
+    box-shadow: 0 6px 20px -4px rgba(99, 102, 241, 0.55);
+}
+
+.tutorial-cta-primary:hover {
+    background: linear-gradient(135deg, #818cf8 0%, #3b82f6 100%);
+    filter: brightness(1.06);
+    color: #ffffff;
+}
+
+
+/* ----- Mobile ------------------------------------------------------- */
+
+@media (max-width: 640px) {
+    .tutorial-card { max-width: 100%; }
+    .tutorial-slide { padding: 28px 20px 20px; min-height: 0; }
+    .tutorial-title { font-size: 1.4rem; }
+    .tutorial-footer { flex-wrap: wrap; padding: 14px 20px; gap: 10px; }
+    .viz-sources { grid-template-columns: 1fr; }
+    .viz-ship { grid-template-columns: 1fr; }
+    .viz-ship-divider { display: none; }
+}
+
+
+/* ----- Floating page-help "?" button -------------------------------- */
+/* Mounted once globally (HelpButton.jsx). Opens the current page's
+   contextual help. Bottom-right so it clears the top-right task tray. */
+.tutorial-help-fab {
+    position: fixed;
+    right: 22px;
+    bottom: 22px;
+    z-index: 5000;
+    width: 46px;
+    height: 46px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(165, 180, 252, 0.45);
+    border-radius: 999px;
+    background: linear-gradient(135deg, #818cf8 0%, #3b82f6 100%);
+    color: #ffffff;
+    font-size: 1.35rem;
+    cursor: pointer;
+    box-shadow: 0 8px 22px -6px rgba(59, 130, 246, 0.65);
+    transition: transform 120ms ease, filter 160ms ease, box-shadow 160ms ease;
+}
+
+.tutorial-help-fab:hover {
+    filter: brightness(1.08);
+    transform: translateY(-2px);
+    box-shadow: 0 12px 26px -6px rgba(59, 130, 246, 0.75);
+}
+
+.tutorial-help-fab:active {
+    transform: translateY(0);
+}
+
+.tutorial-help-fab svg {
+    display: block;
+}
+
+@media (max-width: 640px) {
+    .tutorial-help-fab {
+        right: 14px;
+        bottom: 14px;
+        width: 42px;
+        height: 42px;
+        font-size: 1.2rem;
+    }
+}

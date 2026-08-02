@@ -1,0 +1,369 @@
+/* RuleCard.css — dark variant.
+ *
+ * Cards are dark glass tiles that float above the navy gradient. The
+ * resting state is barely darker than the page; the hover and expanded
+ * states glow with indigo. Action pills (Save / Publish / etc.) keep
+ * their semantic color but lift one luminance step so they read on dark.
+ */
+
+.rule-card {
+    background: linear-gradient(180deg, rgba(15, 23, 42, 0.62) 0%, rgba(15, 23, 42, 0.55) 100%);
+    border: 1px solid rgba(148, 163, 184, 0.12);
+    border-radius: 14px;
+    margin-bottom: 14px;
+    overflow: hidden;
+    color: #e2e8f0;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.04) inset,
+        0 4px 12px rgba(2, 6, 23, 0.30);
+    transition:
+        transform 220ms cubic-bezier(0.16, 1, 0.3, 1),
+        box-shadow 220ms cubic-bezier(0.16, 1, 0.3, 1),
+        border-color 180ms ease;
+}
+
+.rule-card:hover {
+    transform: translateY(-2px);
+    border-color: rgba(129, 140, 248, 0.40);
+    box-shadow:
+        0 16px 32px -8px rgba(2, 6, 23, 0.55),
+        0 4px 12px -4px rgba(99, 102, 241, 0.28);
+}
+
+.rule-card.expanded {
+    border-color: rgba(129, 140, 248, 0.55);
+    box-shadow:
+        0 22px 44px -10px rgba(99, 102, 241, 0.40),
+        0 8px 16px -6px rgba(2, 6, 23, 0.50);
+}
+
+
+/* ----- Header (always-visible row) ------------------------------------- */
+
+.rule-header {
+    padding: 18px 22px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    background: transparent;
+}
+
+.rule-info {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+    flex: 1;
+}
+
+.rule-icon {
+    width: 42px;
+    height: 42px;
+    border-radius: 11px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 1.2rem;
+    color: #ffffff;
+    background: linear-gradient(135deg, #818cf8 0%, #3b82f6 100%);
+    box-shadow:
+        0 4px 14px rgba(99, 102, 241, 0.45),
+        0 0 0 4px rgba(99, 102, 241, 0.10);
+}
+
+.rule-title {
+    min-width: 0;
+}
+
+.rule-title h3 {
+    color: #f1f5f9;
+    font-weight: 700;
+    margin: 0;
+    font-size: 1rem;
+    letter-spacing: -0.01em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rule-title p {
+    margin: 3px 0 0 0;
+    font-size: 0.84rem;
+    color: #94a3b8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rule-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: #94a3b8;
+    flex-shrink: 0;
+}
+
+
+/* ----- Header pill buttons (Save / Remove / Publish) ------------------- */
+
+.bookmark-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(99, 102, 241, 0.18);
+    color: #c7d2fe;
+    border: 1px solid rgba(129, 140, 248, 0.40);
+    border-radius: 999px;
+    padding: 7px 14px;
+    font-weight: 600;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: transform 120ms ease, box-shadow 180ms ease, background 180ms ease, color 180ms ease;
+    box-shadow: 0 1px 2px rgba(99, 102, 241, 0.18);
+}
+
+.bookmark-btn:hover {
+    background: rgba(99, 102, 241, 0.30);
+    color: #e0e7ff;
+    box-shadow: 0 4px 14px -2px rgba(99, 102, 241, 0.45);
+}
+
+.bookmark-btn:active {
+    transform: scale(0.97);
+}
+
+.bookmark-btn.publish-btn {
+    background: rgba(16, 185, 129, 0.18);
+    color: #6ee7b7;
+    border-color: rgba(52, 211, 153, 0.42);
+    box-shadow: 0 1px 2px rgba(16, 185, 129, 0.18);
+}
+
+.bookmark-btn.publish-btn:hover {
+    background: rgba(16, 185, 129, 0.30);
+    color: #a7f3d0;
+    box-shadow: 0 4px 14px -2px rgba(16, 185, 129, 0.45);
+}
+
+/* Publishing from Studio is disabled (contributions go via gavel-rules
+ * PRs) — the button stays visible but muted, tooltip explains why. */
+.bookmark-btn.publish-btn:disabled,
+.bookmark-btn.publish-btn:disabled:hover {
+    background: rgba(148, 163, 184, 0.12);
+    color: #94a3b8;
+    border-color: rgba(148, 163, 184, 0.28);
+    box-shadow: none;
+    cursor: not-allowed;
+    opacity: 0.75;
+}
+
+.delete-icon {
+    color: #f87171;
+    cursor: pointer;
+    transition: transform 180ms ease, color 120ms ease;
+}
+
+.delete-icon:hover {
+    transform: scale(1.15);
+    color: #fca5a5;
+}
+
+
+/* ----- Expanded content (when card is opened) -------------------------- */
+
+.rule-content {
+    padding: 22px 24px 26px;
+    border-top: 1px solid rgba(148, 163, 184, 0.10);
+    background:
+        linear-gradient(180deg, rgba(2, 6, 23, 0.30) 0%, rgba(2, 6, 23, 0.20) 100%);
+}
+
+.content-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 12px;
+}
+
+
+/* ----- Generic pills (status badge, etc.) ------------------------------ */
+
+.pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 12px;
+    border-radius: 9999px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+}
+
+.pill-soft {
+    background: rgba(99, 102, 241, 0.20);
+    color: #c7d2fe;
+    border: 1px solid rgba(129, 140, 248, 0.40);
+}
+
+
+/* ----- Predicate code box ---------------------------------------------- */
+
+.code-box {
+    /* Unchanged from light theme — the code box was always dark on
+     * light. On dark we make it a touch deeper than the card. */
+    background: linear-gradient(135deg, #02061a 0%, #0a1124 100%);
+    color: #6ee7b7;
+    padding: 16px 18px;
+    border-radius: 10px;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+    font-size: 0.88rem;
+    margin-bottom: 20px;
+    box-shadow: 0 4px 14px -4px rgba(0, 0, 0, 0.55);
+    border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+
+/* ----- CE role rows inside the expanded card --------------------------- */
+
+.ce-role-row {
+    display: grid;
+    grid-template-columns: minmax(240px, max-content) 180px 160px;
+    gap: 12px;
+    align-items: center;
+    border: 1px solid rgba(148, 163, 184, 0.12);
+    border-radius: 11px;
+    padding: 12px 14px;
+    background: rgba(15, 23, 42, 0.55);
+    margin-bottom: 8px;
+    transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.ce-role-row:hover {
+    border-color: rgba(129, 140, 248, 0.40);
+    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.20);
+}
+
+@media (max-width: 900px) {
+    .ce-role-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+.ce-role-name {
+    font-weight: 700;
+    color: #f1f5f9;
+    min-width: 0;
+    justify-self: start;
+    font-size: 0.92rem;
+}
+
+.ce-role-select,
+.ce-fallback-input {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 8px;
+    font-size: 0.92rem;
+    color: #f1f5f9;
+    background: rgba(2, 6, 23, 0.55);
+    transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.ce-role-select:focus,
+.ce-fallback-input:focus {
+    border-color: #818cf8;
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.22);
+    outline: none;
+}
+
+.ce-fallback-input[disabled] {
+    background: rgba(2, 6, 23, 0.30);
+    color: #64748b;
+}
+
+
+/* ----- CE tag row ------------------------------------------------------ */
+
+.ce-tags-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.ce-tag {
+    background: rgba(15, 23, 42, 0.55);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    color: #cbd5e1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.30);
+    transition: transform 120ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+
+.ce-tag:hover {
+    border-color: rgba(129, 140, 248, 0.45);
+    box-shadow: 0 2px 8px rgba(99, 102, 241, 0.25);
+}
+
+.remove-ce-btn {
+    cursor: pointer;
+    color: #64748b;
+    transition: color 120ms ease, transform 120ms ease;
+}
+
+.remove-ce-btn:hover {
+    color: #f87171;
+    transform: scale(1.2);
+}
+
+.add-ce-btn {
+    background: rgba(99, 102, 241, 0.10);
+    border: 1.5px dashed rgba(129, 140, 248, 0.55);
+    color: #c7d2fe;
+    padding: 6px 16px;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.add-ce-btn:hover {
+    background: rgba(99, 102, 241, 0.22);
+    border-color: rgba(165, 180, 252, 0.85);
+    color: #e0e7ff;
+}
+
+
+/* ----- Group + condition logic display ---------------------------------
+ * The role badges (necessary / fallback / sufficient) are gone — a rule's
+ * logic now renders as named-group chip clusters + the condition line
+ * (see RuleLogicPreview, which carries its own inline styling). The
+ * classes below style the condition line wherever a card shows one
+ * standalone. */
+
+.rule-condition-line {
+    display: block;
+    background: rgba(2, 6, 23, 0.6);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-family: monospace;
+    font-size: 0.82rem;
+    color: #e2e8f0;
+    word-break: break-word;
+    white-space: pre-wrap;
+}

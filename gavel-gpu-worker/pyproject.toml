@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gavel-gpu-worker"
+version = "0.1.0"
+description = "Run GAVEL's GPU workloads (training, inference, realtime) on any GPU over HTTPS."
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.9",
+]
+
+# NOTE: the ML stack (torch, transformers, accelerate, …) is intentionally NOT
+# listed here — install it from the staged gavel_code/engine-requirements.txt so
+# the versions match the backend exactly. The Docker image does this for you.
+
+[project.scripts]
+gavel-gpu-worker = "gavel_gpu_worker.app:main"
+
+[tool.setuptools.packages.find]
+include = ["gavel_gpu_worker*"]

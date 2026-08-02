@@ -1,0 +1,141 @@
+/* Layout.css — frame that wraps every authenticated page.
+ *
+ * Dark variant. Matches auth.css's deep-navy splash so the visual
+ * transition login → app stays continuous. Three layered radial glows
+ * (indigo top-left, blue top-right, violet bottom-center) on a navy
+ * base; cards and content surfaces are dark glass tuned to lift off
+ * the gradient without competing with it.
+ *
+ * Status colors (success/warn/error) live in the components that use
+ * them — they're brightened ~one luminance step from the light theme
+ * so they read against navy.
+ */
+
+.app-layout {
+    display: flex;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+
+    /* Same atmospheric structure as auth.css for visual continuity.
+     * Slightly weaker glow alpha than the splash (the dashboard runs
+     * for hours; the splash runs for seconds), so we don't fatigue
+     * the eye but still get the navy-with-vibes feel. */
+    background:
+        radial-gradient(ellipse 60% 50% at 12% 0%, rgba(99, 102, 241, 0.28) 0%, transparent 60%),
+        radial-gradient(ellipse 50% 50% at 100% 30%, rgba(59, 130, 246, 0.18) 0%, transparent 55%),
+        radial-gradient(ellipse 70% 50% at 50% 100%, rgba(139, 92, 246, 0.20) 0%, transparent 60%),
+        linear-gradient(180deg, #060a1a 0%, #0c1226 50%, #0a0f23 100%);
+    color: #e2e8f0;
+}
+
+.app-layout > *:first-child {
+    flex-shrink: 0;
+    z-index: 10;
+}
+
+
+/* ----- Right-hand viewport --------------------------------------------- */
+
+.main-viewport {
+    flex: 1;
+    height: 100%;
+    position: relative;
+    overflow-y: auto;
+    scroll-behavior: smooth;
+
+    /* Light-on-dark scrollbar — the previous slate values disappear on
+     * navy. Use a translucent slate that picks up the page glow. */
+    scrollbar-width: thin;
+    scrollbar-color: rgba(148, 163, 184, 0.22) transparent;
+}
+
+.main-viewport::-webkit-scrollbar {
+    width: 8px;
+}
+
+.main-viewport::-webkit-scrollbar-thumb {
+    background-color: rgba(148, 163, 184, 0.20);
+    border-radius: 4px;
+}
+
+.main-viewport::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(148, 163, 184, 0.35);
+}
+
+/* Raw mode — full-height pages (e.g. realtime chat) manage their own
+ * scroll. Skip both content padding and our scrollbar styling. */
+.main-viewport--raw {
+    overflow: hidden;
+    position: relative;
+}
+
+
+/* ----- Centered content frame ------------------------------------------ */
+
+.content-container {
+    max-width: 1440px;
+    margin: 0 auto;
+    padding: 36px 44px 60px;
+    min-height: 100%;
+    color: #e2e8f0;
+
+    animation: pageFadeIn 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes pageFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+
+/* ----- Shared page header style ---------------------------------------- */
+
+.page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    margin-bottom: 28px;
+    padding-bottom: 18px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.page-header h1 {
+    font-size: 1.95rem;
+    font-weight: 700;
+    margin: 0 0 6px 0;
+    color: #f8fafc;
+    letter-spacing: -0.02em;
+}
+
+.page-header p {
+    margin: 0;
+    font-size: 0.98rem;
+    color: #94a3b8;
+}
+
+
+/* ----- Empty-state placeholder ----------------------------------------- */
+
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 56px 40px;
+    /* Dark glass tile with dashed indigo border. Glow tints picked up
+     * from the page gradient through backdrop-filter. */
+    background: linear-gradient(135deg, rgba(15, 23, 42, 0.55) 0%, rgba(2, 6, 23, 0.45) 100%);
+    border: 1.5px dashed rgba(129, 140, 248, 0.35);
+    border-radius: 16px;
+    text-align: center;
+    color: #cbd5e1;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}

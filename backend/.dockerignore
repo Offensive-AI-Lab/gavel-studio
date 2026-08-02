@@ -1,0 +1,37 @@
+# Don't copy these into the docker build context. Two wins:
+#   1. Faster builds (the context tarball stays small).
+#   2. Smaller images (no test artifacts / venv leaking into the runtime).
+#
+# Live source code IS copied; the docker-compose volume mount shadows it
+# at runtime so `--reload` still picks up edits.
+
+# Local virtualenvs — never run inside the container.
+.venv/
+venv/
+
+# Python bytecode and caches.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Test artifacts.
+tests/htmlcov/
+tests/coverage.json
+tests/coverage.xml
+tests/test_results.json
+tests/report.html
+
+# Local secrets — the container reads from the host's .env via env_file.
+.env
+
+# Mutmut + IDE.
+mutmut.log
+.idea/
+.vscode/
+
+# OS noise.
+.DS_Store
+Thumbs.db

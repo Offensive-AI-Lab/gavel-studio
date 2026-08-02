@@ -1,0 +1,53 @@
+/* src/components/Message/Message.css */
+.message-container {
+    text-align: center;
+    padding: 20px;
+    animation: fadeIn 0.5s ease-in-out;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    width: 100%;
+    background-color: #ffffff; 
+}
+
+.message-icon {
+    margin-bottom: 20px;
+}
+
+.message-title {
+    font-size: 2rem;
+    font-weight: 700;
+    color: #111827;
+    margin-bottom: 10px;
+}
+
+.message-text {
+    font-size: 1rem;
+    color: #6B7280;
+    margin-bottom: 30px;
+    max-width: 80%; 
+    line-height: 1.5;
+}
+
+.message-btn {
+    background-color: #000;
+    color: #fff;
+    padding: 12px 24px;
+    border-radius: 8px;
+    border: none;
+    font-size: 1rem;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-block;
+}
+
+.message-btn:hover {
+    background-color: #333;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}

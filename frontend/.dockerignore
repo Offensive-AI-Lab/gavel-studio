@@ -1,0 +1,23 @@
+# Same idea as backend/.dockerignore — keep the build context small and
+# the runtime image clean. The compose volume mount supplies live source
+# at runtime, so the COPY doesn't even need to be exhaustive.
+
+node_modules/
+dist/
+dist-ssr/
+coverage/
+
+# Local secrets / per-machine.
+.env
+*.local
+
+# Logs.
+logs/
+*.log
+npm-debug.log*
+
+# IDE / OS noise.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

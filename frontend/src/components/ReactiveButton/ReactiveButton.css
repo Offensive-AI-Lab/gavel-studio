@@ -1,0 +1,42 @@
+/* ReactiveButton — dark variant.
+ * Indigo→blue gradient with bigger glow halo to read against navy. */
+.reactive-btn {
+  /* border-box so a width:100% button measures the same as a width:100%
+   * .glass-input (which is also border-box) — otherwise their differing
+   * padding makes them overflow by different amounts and misalign. */
+  box-sizing: border-box;
+  background: linear-gradient(135deg, #818cf8 0%, #3b82f6 100%);
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 6px 18px -2px rgba(99, 102, 241, 0.50);
+}
+
+.reactive-btn:hover {
+  filter: brightness(1.06);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 28px -4px rgba(99, 102, 241, 0.70);
+}
+
+.reactive-btn:active {
+  transform: translateY(0);
+  filter: brightness(0.95);
+  box-shadow: 0 4px 12px -2px rgba(99, 102, 241, 0.40);
+}
+
+/* Disabled State */
+.reactive-btn.disabled {
+    background: rgba(148, 163, 184, 0.30);
+    color: rgba(241, 245, 249, 0.55);
+    cursor: not-allowed;
+    transform: none !important;
+    box-shadow: none !important;
+}

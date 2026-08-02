@@ -1,0 +1,4 @@
+# Keep shell scripts LF-only, even when cloned on Windows (core.autocrlf=true
+# would otherwise give them CRLF). A "\r" in a shebang breaks them on
+# Linux/macOS: "/bin/bash^M: bad interpreter".
+*.sh      text eol=lf

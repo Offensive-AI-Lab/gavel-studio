@@ -1,0 +1,141 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+/* App-wide defaults. Per-page chrome lives in each page's own CSS file
+ * (auth.css, Layout.css, etc.). This file used to carry a dark-themed
+ * landing layout (.auth-container / .bento-* / .text-gradient / .pulse);
+ * those are gone now that the LandingPage reuses the auth-page shell. */
+
+body {
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    /* Deep navy base. The auth-page and Layout both use position:fixed/
+     * absolute shells that cover the body, so this is mostly a fallback
+     * — but it matters for any one-off screens that don't fully cover
+     * (404s, the warming-up splash, etc.). */
+    background: #060a1a;
+    color: #e2e8f0;
+    margin: 0;
+}
+
+/* `.primary-btn` is still referenced by the empty-state CTA in
+ * BookmarksRules / BookmarksCEs. Keep the class but restyle it to match
+ * the indigo→blue accent the rest of the app uses, so empty states don't
+ * look like a different design system. */
+
+.primary-btn {
+    padding: 12px 22px;
+    background: linear-gradient(135deg, #6366f1 0%, #2563eb 100%);
+    color: #ffffff;
+    border: none;
+    border-radius: 12px;
+    font-family: inherit;
+    font-size: 0.92rem;
+    font-weight: 700;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    box-shadow: 0 6px 16px -4px rgba(99, 102, 241, 0.40);
+    transition:
+        transform 120ms ease,
+        box-shadow 200ms ease,
+        filter 180ms ease;
+}
+
+.primary-btn:hover {
+    box-shadow: 0 10px 24px -6px rgba(99, 102, 241, 0.55);
+    filter: brightness(1.05);
+}
+
+.primary-btn:active {
+    transform: scale(0.99);
+}
+
+
+/* ----- Publish-flow Swal modals ------------------------------------- */
+
+/* SweetAlert injects markup outside React's tree, so per-component CSS
+ * can't reach it — these rules theme the publish-result and name-
+ * conflict popups to match the rest of the modernized chrome (light
+ * glass card, indigo primary buttons, Plus Jakarta Sans, soft shadows).
+ * Without these the dialogs default to Swal's stock theme and look like
+ * they wandered in from a different app. */
+
+.gavel-publish-result-popup,
+.gavel-publish-conflict-popup {
+    border-radius: 16px;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    background: rgba(15, 23, 42, 0.92) !important;
+    color: #e2e8f0 !important;
+    box-shadow:
+        0 24px 48px -12px rgba(2, 6, 23, 0.65),
+        0 8px 24px -8px rgba(99, 102, 241, 0.30);
+    font-family: 'Plus Jakarta Sans', sans-serif;
+}
+
+.gavel-publish-confirm-btn {
+    padding: 11px 22px;
+    background: linear-gradient(135deg, #818cf8 0%, #3b82f6 100%);
+    color: #ffffff;
+    border: none;
+    border-radius: 10px;
+    font-family: inherit;
+    font-size: 0.92rem;
+    font-weight: 700;
+    cursor: pointer;
+    box-shadow: 0 6px 20px -4px rgba(99, 102, 241, 0.55);
+    transition:
+        transform 120ms ease,
+        box-shadow 200ms ease,
+        filter 180ms ease;
+}
+
+.gavel-publish-confirm-btn:hover {
+    box-shadow: 0 12px 28px -4px rgba(99, 102, 241, 0.70);
+    filter: brightness(1.06);
+}
+
+.gavel-publish-confirm-btn:active {
+    transform: scale(0.99);
+}
+
+/* "Use a different name" — secondary action on the conflict modal.
+ * Outline + indigo text so it reads as an alternative without competing
+ * with the primary "Bookmark existing" CTA. */
+.gavel-publish-deny-btn {
+    padding: 11px 22px;
+    background: rgba(15, 23, 42, 0.55);
+    color: #c7d2fe;
+    border: 1.5px solid rgba(148, 163, 184, 0.22);
+    border-radius: 10px;
+    font-family: inherit;
+    font-size: 0.92rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 180ms ease, border-color 180ms ease, color 180ms ease;
+}
+
+.gavel-publish-deny-btn:hover {
+    background: rgba(15, 23, 42, 0.80);
+    border-color: rgba(165, 180, 252, 0.55);
+    color: #ddd6fe;
+}
+
+/* Cancel — quietest of the three. Plain ghost button. */
+.gavel-publish-cancel-btn {
+    padding: 11px 18px;
+    background: transparent;
+    color: #94a3b8;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    font-family: inherit;
+    font-size: 0.92rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 180ms ease, color 180ms ease;
+}
+
+.gavel-publish-cancel-btn:hover {
+    background: rgba(148, 163, 184, 0.14);
+    color: #e2e8f0;
+}

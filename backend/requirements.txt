@@ -1,0 +1,30 @@
+fastapi==0.109.0
+uvicorn==0.27.0
+# Required by FastAPI when any route uses File() / Form() data — the /upload
+# endpoint needs it at import time, not just at request time.
+python-multipart>=0.0.26
+# Storage is SQLite (Python stdlib sqlite3) — no database driver needed.
+python-dotenv==1.0.0
+pydantic>=2.10.0
+litellm>=1.44.0
+tiktoken>=0.5.0
+sentence-transformers>=3.0.1
+# >=4.56: the classifier engine calls from_pretrained(dtype=...), which older
+# versions reject (they only knew the since-deprecated torch_dtype spelling).
+transformers>=4.56.0
+scikit-learn>=1.4.0
+# Classifier engine dependencies
+torch>=2.0.0
+# NB (Linux): plain PyPI torch is the CUDA build (~5 GB). For CPU-only
+# training install torch first from the CPU wheel index, then this file:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+accelerate>=0.26.0
+pytorch-ignite>=0.4.12
+matplotlib>=3.7.0
+pandas>=2.0.0
+pillow>=10.0.0
+# httpx: remote-GPU-worker client, and FastAPI's TestClient in the test suite.
+# <0.28 — later versions break the TestClient API used by the tests.
+httpx<0.28
+# wandb is optional: the classifier engine guards its import and defaults to
+# use_wandb=False. `pip install wandb` yourself if you want metric logging.

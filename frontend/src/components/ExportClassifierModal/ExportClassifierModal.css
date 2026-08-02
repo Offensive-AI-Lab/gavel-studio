@@ -1,0 +1,8 @@
+/* Spinner used by the export/import flows. Scoped keyframe name to avoid
+   clashing with other local @keyframes spin definitions. */
+@keyframes gavelExportSpin {
+    to { transform: rotate(360deg); }
+}
+.gavel-spin {
+    animation: gavelExportSpin 0.9s linear infinite;
+}

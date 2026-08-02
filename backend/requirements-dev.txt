@@ -1,0 +1,10 @@
+# Test/dev dependencies. Install on top of requirements.txt:
+#   pip install -r requirements.txt -r requirements-dev.txt
+pytest>=8.0
+# pytest.ini's addopts write an HTML report — pytest fails to start without it.
+pytest-html>=4.0
+# tests/run_coverage.py
+pytest-cov>=5.0
+pytest-json-report>=1.5
+# tests/integration/test_resource_management.py
+psutil>=5.9

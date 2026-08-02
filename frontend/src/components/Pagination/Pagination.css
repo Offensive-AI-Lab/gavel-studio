@@ -1,0 +1,55 @@
+/* Pagination.css — dark variant.
+ *
+ * Buttons match the dark-glass tile language: deep navy fill, slate
+ * hairline border, slate text. The active page lights up with the same
+ * indigo→blue gradient used on .primary / SearchPanel's search button,
+ * with a soft indigo glow halo so the current page reads instantly. */
+
+.pagination-container {
+    display: flex;
+    justify-content: center;
+    margin-top: 20px;
+    gap: 8px;
+}
+
+.pagination-btn {
+    padding: 6px 12px;
+    border: 1px solid rgba(148, 163, 184, 0.20);
+    border-radius: 8px;
+    background: rgba(2, 6, 23, 0.55);
+    cursor: pointer;
+    color: #cbd5e1;
+    font-size: 14px;
+    font-weight: 600;
+    min-width: 32px;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    transition: background 180ms ease, border-color 180ms ease, color 180ms ease, box-shadow 180ms ease, transform 120ms ease;
+}
+
+.pagination-btn:hover:not(:disabled) {
+    background: rgba(99, 102, 241, 0.18);
+    border-color: rgba(129, 140, 248, 0.50);
+    color: #e0e7ff;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px -2px rgba(99, 102, 241, 0.30);
+}
+
+.pagination-btn.active {
+    background: linear-gradient(135deg, #818cf8 0%, #3b82f6 100%);
+    color: #ffffff;
+    border-color: transparent;
+    box-shadow: 0 4px 14px -2px rgba(99, 102, 241, 0.55);
+}
+
+.pagination-btn.active:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 18px -2px rgba(99, 102, 241, 0.65);
+}
+
+.pagination-btn:disabled {
+    background: rgba(2, 6, 23, 0.35);
+    color: #475569;
+    cursor: not-allowed;
+    border-color: rgba(148, 163, 184, 0.10);
+}

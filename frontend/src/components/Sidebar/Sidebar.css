@@ -1,0 +1,434 @@
+/* src/components/Sidebar/Sidebar.css — dark variant.
+ *
+ * Same shape as before (272px wide, brand header, scroll nav, footer)
+ * but ported to read on a navy backdrop. The sidebar panel is
+ * intentionally a *touch lighter* than the Layout background so it
+ * reads as a panel sitting on top of the page rather than dissolving
+ * into it. Active items glow brighter; the accent bar uses lifted
+ * indigo (#818cf8) so it reads against the panel.
+ */
+
+.sidebar {
+    width: 272px;
+    background: linear-gradient(180deg, #0e1530 0%, #0a1027 100%);
+    border-right: 1px solid rgba(148, 163, 184, 0.10);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.04);
+}
+
+
+/* ----- Header / brand ---------------------------------------------------- */
+
+.sidebar-header {
+    padding: 22px 20px 18px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+    transition: background-color 180ms ease;
+}
+
+.sidebar-header:hover {
+    background-color: rgba(99, 102, 241, 0.10);
+}
+
+.sidebar-header:hover .logo-icon {
+    transform: scale(1.05);
+    box-shadow: 0 4px 16px rgba(99, 102, 241, 0.55);
+}
+
+.logo-icon {
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #818cf8 0%, #3b82f6 100%);
+    box-shadow: 0 2px 12px rgba(99, 102, 241, 0.40);
+    transition: transform 220ms ease, box-shadow 220ms ease;
+}
+
+.logo-icon svg {
+    color: #ffffff !important;
+}
+
+.brand-text {
+    font-size: 1.18rem;
+    font-weight: 800;
+    letter-spacing: -0.025em;
+    margin: 0;
+    /* Light gradient for the wordmark — pure white can feel too sharp,
+     * a soft slate-100 → slate-300 gradient reads more refined. */
+    background: linear-gradient(135deg, #f8fafc 0%, #cbd5e1 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+}
+
+
+/* ----- Nav area ---------------------------------------------------------- */
+
+.sidebar-nav {
+    flex: 1;
+    padding: 16px 12px 8px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(148, 163, 184, 0.20) transparent;
+}
+
+.sidebar-nav::-webkit-scrollbar {
+    width: 6px;
+}
+
+.sidebar-nav::-webkit-scrollbar-thumb {
+    background-color: rgba(148, 163, 184, 0.18);
+    border-radius: 3px;
+}
+
+.sidebar-nav::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(148, 163, 184, 0.32);
+}
+
+.nav-section-label {
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 14px 8px 6px;
+}
+
+
+/* ----- Library sync indicator ----------------------------------------- */
+/* States stay color-coded (green/amber/indigo) but lifted toward
+ * brighter shades so they read against the navy panel. */
+
+.sidebar-sync {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 12px 10px;
+    padding: 7px 12px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    border: 1px solid transparent;
+    transition: background 180ms ease, border-color 180ms ease, color 180ms ease, transform 120ms ease;
+    user-select: none;
+}
+
+.sidebar-sync-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.sidebar-sync-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sidebar-sync-synced {
+    background: rgba(16, 185, 129, 0.14);
+    color: #6ee7b7;
+    border-color: rgba(16, 185, 129, 0.30);
+    cursor: default;
+}
+
+.sidebar-sync-available {
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.22) 0%, rgba(217, 119, 6, 0.26) 100%);
+    color: #fcd34d;
+    border-color: rgba(245, 158, 11, 0.55);
+    cursor: pointer;
+    animation: sidebar-sync-pulse 2.4s ease-in-out infinite;
+}
+
+.sidebar-sync-available:hover {
+    transform: translateY(-1px);
+    border-color: rgba(245, 158, 11, 0.75);
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.32) 0%, rgba(217, 119, 6, 0.38) 100%);
+}
+
+.sidebar-sync-pulling {
+    background: rgba(99, 102, 241, 0.18);
+    color: #c7d2fe;
+    border-color: rgba(99, 102, 241, 0.40);
+    cursor: wait;
+}
+
+@keyframes sidebar-sync-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.0); }
+    50%      { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.28); }
+}
+
+
+/* ----- Top-level nav items ---------------------------------------------- */
+
+.nav-item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px 10px 14px;
+    border-radius: 10px;
+    color: #94a3b8;
+    font-weight: 500;
+    font-size: 0.92rem;
+    cursor: pointer;
+    transition: background 180ms ease, color 180ms ease, transform 120ms ease;
+    margin-bottom: 2px;
+    user-select: none;
+}
+
+.nav-item::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 3px;
+    height: 0;
+    background: linear-gradient(180deg, #818cf8 0%, #3b82f6 100%);
+    border-radius: 0 3px 3px 0;
+    transform: translateY(-50%);
+    transition: height 180ms ease;
+}
+
+.nav-item:hover {
+    background: linear-gradient(90deg, rgba(99, 102, 241, 0.12) 0%, rgba(99, 102, 241, 0.04) 100%);
+    color: #e2e8f0;
+}
+
+.nav-item:active {
+    transform: scale(0.99);
+}
+
+.nav-item.active {
+    background: linear-gradient(90deg, rgba(99, 102, 241, 0.22) 0%, rgba(37, 99, 235, 0.08) 100%);
+    color: #c7d2fe;
+    font-weight: 600;
+}
+
+.nav-item.active::before {
+    height: 22px;
+}
+
+.nav-icon {
+    font-size: 1.1rem;
+    flex-shrink: 0;
+}
+
+
+/* ----- Tree (models -> guardrails) ------------------------------------- */
+
+.tree-group {
+    margin-bottom: 1px;
+}
+
+.tree-item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 6px 8px 14px;
+    border-radius: 10px;
+    cursor: pointer;
+    color: #94a3b8;
+    font-weight: 500;
+    font-size: 0.9rem;
+    transition: background 180ms ease, color 180ms ease, transform 120ms ease;
+    user-select: none;
+}
+
+.tree-item:hover {
+    background: linear-gradient(90deg, rgba(99, 102, 241, 0.12) 0%, rgba(99, 102, 241, 0.04) 100%);
+    color: #e2e8f0;
+}
+
+.tree-item:active {
+    transform: scale(0.99);
+}
+
+.tree-item.model-item.active {
+    background: linear-gradient(90deg, rgba(99, 102, 241, 0.24) 0%, rgba(37, 99, 235, 0.08) 100%);
+    color: #c7d2fe;
+    font-weight: 600;
+}
+
+.tree-item.model-item.active::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 3px;
+    height: 22px;
+    background: linear-gradient(180deg, #818cf8 0%, #3b82f6 100%);
+    border-radius: 0 3px 3px 0;
+    transform: translateY(-50%);
+}
+
+.toggle-area {
+    padding: 6px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 180ms ease;
+    margin-left: 4px;
+    color: #64748b;
+}
+
+.toggle-area:hover {
+    background-color: rgba(148, 163, 184, 0.12);
+    color: #e2e8f0;
+}
+
+.chevron-icon {
+    transition: transform 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.chevron-icon.rotated {
+    transform: rotate(90deg);
+}
+
+
+/* ----- Tree children (guardrails under a model) ----------------------- */
+
+.tree-children {
+    margin-left: 14px;
+    padding-left: 12px;
+    border-left: 1.5px dashed rgba(129, 140, 248, 0.30);
+    margin-top: 2px;
+    margin-bottom: 6px;
+    animation: slideDown 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+        max-height: 0;
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+        max-height: 600px;
+    }
+}
+
+.tree-item.classifier-item {
+    padding: 7px 10px;
+    font-size: 0.86rem;
+    color: #64748b;
+    gap: 10px;
+    justify-content: flex-start;
+}
+
+.tree-item.classifier-item:hover {
+    color: #c7d2fe;
+    background: linear-gradient(90deg, rgba(99, 102, 241, 0.14) 0%, rgba(99, 102, 241, 0.0) 100%);
+}
+
+.tree-item.classifier-item.active {
+    color: #c7d2fe;
+    font-weight: 600;
+    background: linear-gradient(90deg, rgba(99, 102, 241, 0.20) 0%, rgba(99, 102, 241, 0.0) 100%);
+}
+
+.empty-children {
+    padding: 8px 10px;
+    font-size: 0.8rem;
+    color: #64748b;
+    font-style: italic;
+}
+
+.truncate-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+
+/* ----- Footer (user info + logout) ------------------------------------- */
+
+.sidebar-footer {
+    padding: 14px 12px 18px;
+    border-top: 1px solid rgba(148, 163, 184, 0.08);
+    background: rgba(2, 6, 23, 0.40);
+    backdrop-filter: blur(8px);
+}
+
+.user-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    margin-bottom: 6px;
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.14) 0%, rgba(37, 99, 235, 0.06) 100%);
+    border: 1px solid rgba(148, 163, 184, 0.10);
+}
+
+.user-avatar {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #818cf8 0%, #a78bfa 100%);
+    color: #ffffff;
+    font-weight: 700;
+    font-size: 0.9rem;
+    box-shadow: 0 2px 10px rgba(99, 102, 241, 0.45);
+    flex-shrink: 0;
+}
+
+.user-meta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.user-name {
+    font-size: 0.86rem;
+    font-weight: 600;
+    color: #f1f5f9;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.user-email {
+    font-size: 0.72rem;
+    color: #94a3b8;
+    line-height: 1.2;
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Logout button overrides the standard nav-item palette to red.
+ * Lifted from #ef4444 to #f87171 so it reads against navy. */
+.nav-item.logout-item {
+    color: #f87171;
+}
+
+.nav-item.logout-item::before {
+    background: linear-gradient(180deg, #fca5a5 0%, #f87171 100%);
+}
+
+.nav-item.logout-item:hover {
+    background: linear-gradient(90deg, rgba(239, 68, 68, 0.18) 0%, rgba(239, 68, 68, 0.04) 100%);
+    color: #fecaca;
+}

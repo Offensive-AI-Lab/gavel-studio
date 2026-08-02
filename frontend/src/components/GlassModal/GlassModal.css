@@ -1,0 +1,167 @@
+/* GlassModal — dark variant.
+ * Used by Models (add-model) and Guardrails (create + training-config).
+ * Dark glass card on a heavy navy backdrop, matching auth.css's
+ * splash card recipe. */
+
+/* 1. THE BACKDROP */
+.modal-backdrop {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(2, 6, 23, 0.65);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 2000;
+
+    opacity: 0;
+    transition: opacity 0.3s ease-in-out;
+}
+
+.modal-backdrop.open {
+    opacity: 1;
+}
+
+/* 2. THE MODAL CARD */
+.modal-container {
+    background: rgba(15, 23, 42, 0.92);
+    width: 90%;
+    max-width: 500px;
+    border-radius: 24px;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+
+    box-shadow:
+        0 24px 48px -12px rgba(2, 6, 23, 0.65),
+        0 8px 24px -6px rgba(99, 102, 241, 0.30);
+
+    border: 1px solid rgba(148, 163, 184, 0.18);
+
+    transform: scale(0.95) translateY(20px);
+    opacity: 0;
+    transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+
+    color: #e2e8f0 !important;
+}
+
+.modal-container.open {
+    transform: scale(1) translateY(0);
+    opacity: 1;
+}
+
+/* Wide variant — the generation-wizard modal (scenario chat + rule review
+ * need much more room than the default 500px dialogs). Caps height so a long
+ * chat scrolls inside the card instead of overflowing the viewport. */
+.modal-container.wide {
+    max-width: 960px;
+}
+.modal-container.wide .modal-content {
+    max-height: 78vh;
+    overflow-y: auto;
+}
+
+/* 3. HEADER */
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 24px 32px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.10);
+}
+
+.modal-header h3 {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: #f8fafc !important;
+}
+
+/* 4. CLOSE BUTTON */
+.close-btn {
+    background: rgba(2, 6, 23, 0.55);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    color: #94a3b8;
+    cursor: pointer;
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+}
+
+.close-btn:hover {
+    background: rgba(239, 68, 68, 0.18);
+    color: #fca5a5;
+    border-color: rgba(248, 113, 113, 0.55);
+    transform: rotate(90deg) scale(1.1);
+}
+
+/* 5. CONTENT */
+.modal-content {
+    padding: 32px;
+    color: #cbd5e1 !important;
+}
+
+/* 6. INPUTS */
+.glass-input {
+    width: 100%;
+    /* border-box so width:100% measures edge-to-edge — matching the
+     * width:100% ReactiveButton beneath it, so the box and the button line up. */
+    box-sizing: border-box;
+    padding: 16px;
+    border: 2px solid rgba(148, 163, 184, 0.20);
+    border-radius: 14px;
+    margin-bottom: 20px;
+    font-size: 1rem;
+    outline: none;
+    transition: all 0.2s;
+    background: rgba(2, 6, 23, 0.55);
+    color: #f1f5f9 !important;
+}
+
+.glass-input::placeholder {
+    color: #64748b;
+}
+
+.glass-input:focus {
+    border-color: #818cf8;
+    background: rgba(2, 6, 23, 0.75);
+    box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.22);
+    transform: translateY(-1px);
+}
+
+/* 7. SELECTION BUTTONS */
+.option-btn {
+    width: 100%;
+    text-align: left;
+    margin-bottom: 12px;
+    background: rgba(15, 23, 42, 0.55);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    padding: 18px;
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    color: #e2e8f0;
+}
+
+.option-btn:hover {
+    border-color: rgba(129, 140, 248, 0.55);
+    transform: translateY(-2px);
+    box-shadow: 0 10px 18px -4px rgba(99, 102, 241, 0.30);
+}
+
+.option-btn span { color: #f1f5f9 !important; }

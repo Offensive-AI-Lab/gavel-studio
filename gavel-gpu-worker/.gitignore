@@ -1,0 +1,12 @@
+# Staged engine code (a copy of the backend's compute_jobs/ + classifier_engine/ +
+# utils/ + evaluation/ — produced by scripts/stage_engine.py, never committed).
+gavel_code/
+
+# Per-job scratch + Python/build artifacts.
+jobs/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/

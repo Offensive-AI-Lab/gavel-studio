@@ -1,0 +1,6 @@
+# Worker HTTP layer only. The heavy ML stack (torch, transformers, …) is
+# installed from gavel_code/engine-requirements.txt (the backend's pins) so the
+# worker produces byte-identical logits to the backend.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9

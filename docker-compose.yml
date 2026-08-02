@@ -1,0 +1,104 @@
+# Single-command bring-up for the WHOLE stack.
+#
+# ONE env file for everything: backend/.env. Point compose at it with
+# --env-file so its ${VAR} interpolation comes from that same file — there is
+# NO repo-root .env.
+#
+#   docker compose --env-file backend/.env up --build
+#
+#   docker compose --env-file backend/.env up       — foreground, all logs
+#   docker compose --env-file backend/.env up -d    — detached
+#   docker compose down                              — stop everything
+#
+# Tip: `export COMPOSE_ENV_FILES=backend/.env` once and you can drop the flag.
+#
+# Open http://localhost:5173 when it's up — there is no login.
+#
+# Services & ports (host → container):
+#   frontend  5173   Vite dev server (browser entry point)
+#   backend   8000   FastAPI — rules, training, evaluation, AI pipeline
+#
+# The database is a SQLite file at backend/db/gavel.sqlite3, created by the
+# backend on first boot. It lives inside the ./backend bind mount, so it
+# persists across container restarts and rebuilds with no named volume.
+# Clean slate = delete backend/db/gavel.sqlite3 (the library re-syncs from
+# the gavel-rules GitHub repo on the next boot).
+#
+# How the pieces talk:
+#   browser → localhost:5173 (frontend) and localhost:8000 (backend)
+#   backend → SQLite file on disk  and  → GitHub (read-only gavel-rules
+#             library sync; contributions go by pull request, not the app)
+#
+# Config: everything works out-of-the-box with built-in defaults. To enable
+# AI generation, fill OPENAI_API_KEY in backend/.env; compose substitutes
+# ${VAR} from that SAME file (via --env-file backend/.env).
+# (Native dev also uses backend/.env — one file, both modes.)
+#
+# This stack = backend + frontend. That is the WHOLE app.
+#
+# Run modes (all driven by backend/.env, no compose edits needed):
+#   * Default:                        docker compose --env-file backend/.env up --build
+#   * Train on a remote GPU worker:   set GPU_WORKER_URL / GPU_WORKER_TOKEN in
+#                                     backend/.env (see gavel-gpu-worker/README.md)
+#   * Train on a LOCAL GPU:           add the GPU override —
+#       docker compose --env-file backend/.env -f docker-compose.yml -f docker-compose.gpu.yml up --build
+#   * Train on local CPU:             the default (nothing to set)
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gavel-backend
+    # ── Config: ONE source of truth = backend/.env ──────────────────────────
+    # backend/.env is bind-mounted at /app/.env (see volumes) and loaded by the
+    # backend's load_dotenv. load_dotenv does NOT override variables that are
+    # already set, so the handful of CONTAINER-ONLY values in `environment:`
+    # below win, and EVERYTHING ELSE (OPENAI_API_KEY,
+    # GPU_WORKER_URL, ...) comes from backend/.env. So you edit ONE file —
+    # backend/.env — whether you run with Docker or natively. There is no
+    # separate repo-root app config.
+    environment:
+      # CORS / frontend (browser hits the host-mapped ports).
+      ALLOWED_ORIGINS: http://localhost:5173
+      FRONTEND_URL: http://localhost:5173
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount source so uvicorn --reload picks up edits without a rebuild.
+      # This mount also carries the SQLite DB (backend/db/) — data persists on
+      # the host. Anonymous volumes keep container-only scratch out of the
+      # working tree.
+      - ./backend:/app
+      - /app/__pycache__
+      - /app/.venv
+      # Persist the HuggingFace cache (MiniLM embedding model, ~90 MB) across
+      # container rebuilds — without this every `up --build` re-downloads it.
+      - hf-cache:/root/.cache/huggingface
+    # --timeout-graceful-shutdown: the frontend holds a never-closing SSE
+    # stream (/library/events), so without a cap every --reload restart hangs
+    # forever at "Waiting for connections to close".
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: gavel-frontend
+    depends_on:
+      - backend
+    environment:
+      VITE_API_URL: http://localhost:8000
+      # Reliable file-watching through the Docker bind mount (esp. Win/WSL2).
+      CHOKIDAR_USEPOLLING: "true"
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev -- --host 0.0.0.0
+
+volumes:
+  # Named (not anonymous) so the HF model cache survives `docker compose up
+  # --build` recreating the backend container.
+  hf-cache:
