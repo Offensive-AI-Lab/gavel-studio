@@ -22,7 +22,9 @@ __pycache__/
 venv/
 env/
 .venv/
-CLAUDE.md
+# CLAUDE.md is committed (shared project notes for AI assistants);
+# personal overrides go in CLAUDE.local.md.
+CLAUDE.local.md
 
 # Classifier training artifacts (large model files - not tracked in git)
 backend/trained_classifiers/
