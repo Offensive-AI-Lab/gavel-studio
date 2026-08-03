@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import Layout from '../components/Layout/Layout';
 import SearchPanel from '../components/SearchPanel/SearchPanel';
 import Pagination from '../components/Pagination/Pagination';
@@ -14,6 +14,10 @@ import { showAlertDialog, showConfirmDialog } from '../components/ConfirmDialog/
 
 const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
     const navigate = useNavigate();
+    const [searchParams] = useSearchParams();
+    // The ?ce= value we've already auto-expanded, so a re-render doesn't force
+    // a card the user just collapsed back open.
+    const autoExpandedRef = useRef(null);
     const [bookmarks, setBookmarks] = useState([]);
     const [filteredBookmarks, setFilteredBookmarks] = useState([]);
     const [expandedCe, setExpandedCe] = useState(null);
@@ -320,6 +324,23 @@ const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
     const myName = user?.username;
     const isMine = (c) => c.is_local_draft || (myName && c.created_by_username === myName);
     const visibleBookmarks = mineOnly ? filteredBookmarks.filter(isMine) : filteredBookmarks;
+
+    // Deep link: /bookmarks/ces?ce=<id> auto-expands that CE once the list has
+    // loaded — the counterpart of BrowseCEs' ?ce= handling, and where a DRAFT
+    // CE's Recents entry points: the public browse page filters drafts out of
+    // its list, so a /community/ces?ce=<draft id> link could never open one.
+    // Keyed on the param so navigating to a DIFFERENT recent re-expands, while
+    // a manual collapse on the same URL is respected.
+    useEffect(() => {
+        const ceParam = searchParams.get('ce');
+        if (!ceParam || loading || autoExpandedRef.current === ceParam) return;
+        const idx = visibleBookmarks.findIndex((c) => String(c.ce_id) === String(ceParam));
+        if (idx < 0) return;
+        autoExpandedRef.current = ceParam;
+        if (!hasSearched) setPage(Math.floor(idx / topK) + 1);   // jump to its page
+        toggleExpand(visibleBookmarks[idx].ce_id);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [searchParams, visibleBookmarks, loading, hasSearched, topK]);
 
     const body = (
         <div style={{ display: 'flex', gap: '20px', alignItems: 'flex-start' }}>

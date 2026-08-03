@@ -263,13 +263,25 @@ const BrowseCEs = () => {
         }
     };
 
-    const toggleExpand = async (ceId, ceName) => {
+    const toggleExpand = async (ceId, ceName, isDraft = false) => {
         setExpandedCe(expandedCe === ceId ? null : ceId);
         if (expandedCe === ceId) return;
         // Opening a CE → record it for the sidebar's Recents. CEs have no detail
-        // route, so the recent deep-links back here with ?ce=<id>, which auto-
-        // expands this exact CE (and keeps each recent's "active" highlight unique).
-        if (ceName) recordRecent('ce', { id: ceId, name: ceName, path: `/community/ces?ce=${ceId}` });
+        // route, so the recent deep-links to the page that can actually show it,
+        // with ?ce=<id> to auto-expand that exact CE (which also keeps each
+        // recent's "active" highlight unique).
+        //
+        // Drafts point at Bookmarks → CEs, NOT back here: this page is the public
+        // space and filters drafts out of its list (see fetchCes), so a
+        // /community/ces?ce=<draft id> link could never resolve. Drafts only
+        // reach this page through the search box, which does return them.
+        if (ceName) {
+            recordRecent('ce', {
+                id: ceId,
+                name: ceName,
+                path: isDraft ? `/bookmarks/ces?ce=${ceId}` : `/community/ces?ce=${ceId}`,
+            });
+        }
         ensurePreview(ceId);
     };
 
@@ -285,14 +297,20 @@ const BrowseCEs = () => {
         if (!ceParam || loading || autoExpandedRef.current === ceParam) return;
         const idx = ces.findIndex((c) => String(c.ce_id) === String(ceParam));
         if (idx < 0) {
-            // Missing from the browse list. That's expected for a local draft
-            // (filtered out above), so don't assume it's deleted — ask the
-            // backend, and prune the Recents entry only on a real 404.
+            // Missing from the browse list. Two very different reasons, and we
+            // can't tell them apart without asking the backend:
+            //   * the CE is a local draft — filtered out of this public list, but
+            //     alive and viewable in Bookmarks → CEs, so hand off there
+            //     (older Recents entries still point here);
+            //   * the CE is gone — prune the Recents entry that led here.
+            // Doing neither is what made a draft recent open a blank page.
             if (!probedMissingRef.current.has(ceParam)) {
                 probedMissingRef.current.add(ceParam);
-                getCognitiveElement(ceParam).catch((err) => {
-                    if (err?.response?.status === 404) forgetRecent('ce', ceParam);
-                });
+                getCognitiveElement(ceParam)
+                    .then(() => navigate(`/bookmarks/ces?ce=${ceParam}`, { replace: true }))
+                    .catch((err) => {
+                        if (err?.response?.status === 404) forgetRecent('ce', ceParam);
+                    });
             }
             return;
         }
@@ -321,6 +339,11 @@ const BrowseCEs = () => {
             categories: parsedCategories,
             is_local_draft: item.is_local_draft,
             examples: item.examples || [],
+            // CognitiveElementCard gates the Save button on public_id and the
+            // author link on created_by_username — both must survive the map or
+            // search results silently lose them.
+            public_id: item.public_id,
+            created_by_username: item.created_by_username,
             // v2 CE fields — role is the primary badge, title the display
             // name; tags render as muted pills.
             role: item.role,
@@ -522,7 +545,9 @@ const BrowseCEs = () => {
                                         key={`ce-${ce.ce_id}`}
                                         ce={ce}
                                         isOpen={expandedCe === ce.ce_id}
-                                        onToggle={() => toggleExpand(ce.ce_id, ce.name)}
+                                        // Search is the only place a DRAFT surfaces on this page,
+                                        // so it's the only call that can pass is_local_draft.
+                                        onToggle={() => toggleExpand(ce.ce_id, ce.name, !!ce.is_local_draft)}
                                         samples={previewCache[ce.ce_id]}
                                         onBookmark={handleBookmark}
                                         isBookmarked={bookmarkIds.has(ce.ce_id)}

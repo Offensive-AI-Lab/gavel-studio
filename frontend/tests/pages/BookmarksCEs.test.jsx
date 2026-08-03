@@ -394,3 +394,41 @@ describe('BookmarksCEs', () => {
         });
     });
 });
+
+describe('BookmarksCEs — ?ce= deep link', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        localStorage.clear();
+        setUser();
+    });
+
+    // A draft CE's Recents entry points here, not at /community/ces: the public
+    // browse page filters drafts out of its list, so it could never open one.
+    const renderWithParam = (ceId) => render(
+        <MemoryRouter initialEntries={[`/bookmarks/ces?ce=${ceId}`]}>
+            <Routes>
+                <Route path="/bookmarks/ces" element={<BookmarksCEs />} />
+            </Routes>
+        </MemoryRouter>,
+    );
+
+    it('auto-expands the CE named in ?ce=', async () => {
+        seedBookmarks();
+        api.getCognitiveDataset.mockResolvedValue({
+            data: { training_data_preview: [[{ role: 'user', content: 'deep-linked sample' }]] },
+        });
+        renderWithParam(102);
+
+        // Expanding fetches that CE's preview — the observable signal that the
+        // card actually opened rather than the page just rendering the list.
+        await waitFor(() => expect(api.getCognitiveDataset).toHaveBeenCalledWith(102));
+    });
+
+    it('does nothing when ?ce= names a CE that is not in the list', async () => {
+        seedBookmarks();
+        renderWithParam(999999);
+
+        await screen.findByText('Toxicity Detector');
+        expect(api.getCognitiveDataset).not.toHaveBeenCalled();
+    });
+});
