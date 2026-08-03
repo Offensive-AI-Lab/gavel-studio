@@ -217,7 +217,10 @@ export default function Evaluation() {
         setCalibrating(true);
         setLastCalibStarted(Date.now());
         try {
-            await startCalibration(classifierId, {});
+            // `force` re-runs an already-calibrated rule set. Training now
+            // auto-calibrates, so this button's job is the data-changed case
+            // (new/regenerated CE calibration sets), not the first run.
+            await startCalibration(classifierId, { force: alreadyCalibrated });
             setTab('calibration');
         } catch (err) {
             alert(err.response?.data?.detail || 'Calibration failed');
@@ -379,15 +382,16 @@ function CalibrationTab({ results, thresholds, calibrating, onCalibrate, calibSt
 
                 <div style={{ display: 'flex', gap: 12, marginTop: 16, alignItems: 'center', flexWrap: 'wrap' }}>
                     <ReactiveButton
-                        label={calibrating ? 'Calibrating...' : alreadyCalibrated ? 'Calibrated' : 'Run Calibration'}
+                        label={calibrating ? 'Calibrating...' : alreadyCalibrated ? 'Recalibrate' : 'Run Calibration'}
                         onClick={onCalibrate}
-                        Icon={calibrating ? FiClock : alreadyCalibrated ? FiCheckCircle : FiPlay}
-                        disabled={calibrating || !allReady || alreadyCalibrated}
+                        Icon={calibrating ? FiClock : alreadyCalibrated ? FiRefreshCw : FiPlay}
+                        disabled={calibrating || !allReady}
                     />
                     <StatusBadge type={calibrating ? 'running' : hasError ? 'error' : hasResults ? 'done' : 'idle'} />
                     {alreadyCalibrated && (
                         <span style={{ color: '#34d399', fontSize: 13 }}>
-                            <FiCheckCircle /> Calibrated for this training — retrain to recalibrate.
+                            <FiCheckCircle /> Calibrated for this training. Recalibrate only if the
+                            calibration data changed — retraining recalibrates automatically.
                         </span>
                     )}
                 </div>

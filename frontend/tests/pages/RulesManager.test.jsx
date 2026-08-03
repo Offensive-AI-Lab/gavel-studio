@@ -663,3 +663,54 @@ describe('RulesManager — library refresh event', () => {
         await waitFor(() => expect(api.getClassifierRules).toHaveBeenCalledTimes(2));
     });
 });
+
+describe('RulesManager — post-training chain banner', () => {
+    // Training's own banner is gated on status === 'training', so once the run
+    // finished the page went silent while calibration ran for minutes. The same
+    // banner now carries the chain stage; the Calibration/Evaluation tabs are
+    // untouched — this only says which stage is running right now.
+    it('shows "Calibrating" with its live detail after training completes', async () => {
+        api.getTrainingStatus.mockResolvedValue({
+            data: {
+                status: 'active', is_training: false, is_trained: true,
+                training_phase: null, training_phase_detail: null,
+                post_training_phase: 'Calibrating',
+                post_training_phase_detail: 'Loading calibration datasets…',
+            },
+        });
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture()] } });
+        renderPage();
+        expect(await screen.findByText('Calibrating')).toBeInTheDocument();
+        expect(screen.getByText(/Loading calibration datasets/)).toBeInTheDocument();
+    });
+
+    it('shows "Evaluating" for the second stage', async () => {
+        api.getTrainingStatus.mockResolvedValue({
+            data: {
+                status: 'active', is_training: false, is_trained: true,
+                training_phase: null, training_phase_detail: null,
+                post_training_phase: 'Evaluating',
+                post_training_phase_detail: 'Scoring rule 1 of 3…',
+            },
+        });
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture()] } });
+        renderPage();
+        expect(await screen.findByText('Evaluating')).toBeInTheDocument();
+        expect(screen.getByText(/Scoring rule 1 of 3/)).toBeInTheDocument();
+    });
+
+    it('shows no banner once the chain is done', async () => {
+        api.getTrainingStatus.mockResolvedValue({
+            data: {
+                status: 'active', is_training: false, is_trained: true,
+                training_phase: null, training_phase_detail: null,
+                post_training_phase: null, post_training_phase_detail: null,
+            },
+        });
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture()] } });
+        renderPage();
+        await screen.findByText(ruleFixture().custom_name || ruleFixture().name);
+        expect(screen.queryByText('Calibrating')).not.toBeInTheDocument();
+        expect(screen.queryByText('Evaluating')).not.toBeInTheDocument();
+    });
+});

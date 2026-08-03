@@ -624,3 +624,53 @@ describe('RealtimeViewer — warm-session provider labeling', () => {
             .toBeInTheDocument();
     });
 });
+
+describe('RealtimeViewer — uncalibrated rule set', () => {
+    // The backend refuses to start a session for an uncalibrated rule set (409):
+    // scoring every CE against a default 0.5 threshold would make alerts look
+    // functional while being statistically meaningless. The viewer has to show
+    // that as its own actionable state, not the generic "session failed" error.
+    it('shows the blocked-and-uncalibrated state with a Calibration CTA on a 409', async () => {
+        mocks.startRealtimeSession.mockRejectedValue({
+            response: { status: 409, data: { detail: 'This rule set is uncalibrated — run calibration first.' } },
+        });
+        renderViewer();
+
+        expect(await screen.findByText(/Monitoring is blocked/i)).toBeInTheDocument();
+        expect(screen.getByText(/run calibration first/i)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Go to Calibration/i })).toBeInTheDocument();
+        // Drift lands in the same state, so the rule-set CTA is offered too.
+        expect(screen.getByRole('button', { name: /Go to Rule Set/i })).toBeInTheDocument();
+        // Not the generic dead-session banner.
+        expect(screen.queryByText(/The realtime session ended/i)).not.toBeInTheDocument();
+    });
+
+    it('falls back to the generic error state for a non-409 start failure', async () => {
+        mocks.startRealtimeSession.mockRejectedValue({
+            response: { status: 400, data: { detail: 'Rule Set must be trained first' } },
+        });
+        renderViewer();
+
+        expect(await screen.findByText(/The realtime session ended/i)).toBeInTheDocument();
+        expect(screen.queryByText(/Monitoring is blocked/i)).not.toBeInTheDocument();
+    });
+});
+
+describe('RealtimeViewer — policy drift', () => {
+    // Same 409 state, different reason: the rule set was edited after training,
+    // so the model and thresholds no longer match the live policy. Retraining is
+    // the fix, which is why the block offers the rule-set CTA too.
+    it('surfaces the backend reason and points at the rule set', async () => {
+        mocks.startRealtimeSession.mockRejectedValue({
+            response: {
+                status: 409,
+                data: { detail: 'This rule set changed since it was trained. Retrain it before monitoring.' },
+            },
+        });
+        renderViewer();
+
+        expect(await screen.findByText(/Monitoring is blocked/i)).toBeInTheDocument();
+        expect(screen.getByText(/Retrain it before monitoring/i)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Go to Rule Set/i })).toBeInTheDocument();
+    });
+});

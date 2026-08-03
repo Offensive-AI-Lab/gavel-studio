@@ -1193,10 +1193,19 @@ def get_training_status(classifier_id: int, auth_uid: int = Depends(get_current_
 
         def _ret(status, *, model_path=None, phase=None, detail=None, training_log=None,
                  is_tr=False, is_trn=True, err=False):
+            # Off-box runs finalize through here, so the post-training chain has
+            # to be reported on this path too — otherwise a cluster-trained rule
+            # set shows no progress at all while it calibrates.
+            chain = None
+            if not is_trn and status == "active":
+                from services.auto_calibration import chain_progress
+                chain = chain_progress(classifier_id)
             return {"classifier_id": row["classifier_id"], "name": row["name"], "status": status,
                     "model_path": model_path,
                     "training_log": training_log if training_log is not None else training_log_data,
                     "training_phase": phase, "training_phase_detail": detail,
+                    "post_training_phase": chain["phase"] if chain else None,
+                    "post_training_phase_detail": chain["detail"] if chain else None,
                     "is_trained": is_tr, "is_training": is_trn, "has_error": err,
                     "mode": expected_provider}
 
@@ -1298,6 +1307,13 @@ def get_training_status(classifier_id: int, auth_uid: int = Depends(get_current_
                     commit_trained_policy_snapshot(classifier_id)
                 except Exception as snap_err:
                     print(f"[train] Classifier {classifier_id} | snapshot commit failed: {snap_err}")
+                # Same auto-calibration chain as the local path — this is where
+                # a cluster / remote-worker run crosses the finish line.
+                try:
+                    from services.auto_calibration import schedule_post_training_calibration
+                    schedule_post_training_calibration(classifier_id)
+                except Exception as cal_err:
+                    print(f"[train] Classifier {classifier_id} | auto-calibration not scheduled: {cal_err}")
                 return _ret("active", model_path=model_path, phase="complete", detail=detail,
                             is_tr=True, is_trn=False)
 
@@ -1359,6 +1375,16 @@ def get_training_status(classifier_id: int, auth_uid: int = Depends(get_current_
         finally:
             cls_lock.release()
 
+    # The post-training chain (calibration → evaluation). Reported in its OWN
+    # fields, not folded into training_phase, so `is_training` keeps meaning
+    # "the model is being trained" — the chain runs on an already-trained rule
+    # set. Without this the progress banner went silent the moment training
+    # finished and calibration ran invisibly for minutes.
+    chain = None
+    if not is_training and row["status"] != "error":
+        from services.auto_calibration import chain_progress
+        chain = chain_progress(classifier_id)
+
     return {
         "classifier_id": row["classifier_id"],
         "name": row["name"],
@@ -1370,6 +1396,8 @@ def get_training_status(classifier_id: int, auth_uid: int = Depends(get_current_
         # after a page refresh once the 'error' status is persisted.
         "training_phase": row["training_phase"] if (is_training or row["status"] == "error") else None,
         "training_phase_detail": row["training_phase_detail"] if (is_training or row["status"] == "error") else None,
+        "post_training_phase": chain["phase"] if chain else None,
+        "post_training_phase_detail": chain["detail"] if chain else None,
         "is_trained": row["status"] == "active",
         "is_training": is_training,
         "has_error": row["status"] == "error",

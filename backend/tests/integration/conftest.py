@@ -28,10 +28,24 @@ automatically removes children. The deletion order in `_TRACKED_TABLES` is
 children-first to avoid relying on cascade behavior, which keeps the cleanup
 robust if a future migration weakens any FK to RESTRICT.
 """
+import os
 import threading
 import uuid
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# Auto-calibration off for the whole integration session — MUST be set before
+# anything imports services.auto_calibration.
+#
+# Training normally chains straight into calibration (see that module), which
+# is right for the app but wrong here: the e2e tests call `run_training`
+# directly, so every training run would spawn a second GPU workload racing the
+# assertions that follow it. Tests that care about calibration drive it
+# explicitly.
+# ---------------------------------------------------------------------------
+os.environ.setdefault("AUTO_CALIBRATE_AFTER_TRAINING", "0")
+os.environ.setdefault("AUTO_EVALUATE_AFTER_CALIBRATION", "0")
 
 # ---------------------------------------------------------------------------
 # Boot-recovery barrier — MUST be installed BEFORE `from main import app`.

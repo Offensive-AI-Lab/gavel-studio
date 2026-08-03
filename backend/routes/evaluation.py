@@ -202,6 +202,11 @@ class CalibrateRequest(BaseModel):
     test_dataset_ids: Optional[List[int]] = None  # Multiple datasets combined
     dialogue_data: Optional[List[dict]] = None  # Or pass inline dialogue data
     patience_values: Optional[List[int]] = None
+    # Recalibrate an already-calibrated rule set without retraining it. Needed
+    # because calibration now runs automatically after training: the user's only
+    # way to redo it when the calibration DATA changes (new CE calibration sets,
+    # regenerated dialogues) would otherwise be a pointless full retrain.
+    force: bool = False
 
 
 class EvaluateRequest(BaseModel):
@@ -740,10 +745,17 @@ def start_calibration(
     """Start threshold calibration using per-CE calibration datasets from DB."""
     _verify_classifier_trained(classifier_id)
 
-    if _has_post_train_success(classifier_id, "calibration"):
+    from services.auto_calibration import calibration_state
+    state = calibration_state(classifier_id)
+    if state == "running":
         raise HTTPException(
             status_code=409,
-            detail="This rule set is already calibrated. Retrain it to recalibrate.",
+            detail="Calibration is already running for this rule set.",
+        )
+    if state == "calibrated" and not req.force:
+        raise HTTPException(
+            status_code=409,
+            detail="This rule set is already calibrated. Use Recalibrate to run it again.",
         )
 
     background_tasks.add_task(

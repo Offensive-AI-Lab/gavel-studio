@@ -74,6 +74,46 @@ def _require_trained_classifier(classifier_id: int):
         raise HTTPException(status_code=400, detail="Rule Set must be trained first")
 
 
+def _require_calibrated_classifier(classifier_id: int):
+    """Refuse to monitor a rule set that has no calibrated thresholds.
+
+    Without calibration every CE scores against a default 0.5 threshold, so
+    alerts look functional but mean nothing. Calibration now runs automatically
+    after training, which makes this state rare — but a policy change or an
+    invalidated calibration can still land here, and silently monitoring on
+    default thresholds is worse than an honest error. 409 (not 400) so the
+    frontend can tell "needs calibration" apart from "needs training".
+    """
+    from services.auto_calibration import calibration_state, policy_drifted
+
+    # Checked first: with drift, the thresholds ARE present and post-train, so
+    # the calibration check below would happily pass them — while the model
+    # doesn't know the edited policy and the thresholds were tuned for the old
+    # one. Retraining is the fix (it recalibrates), not recalibration.
+    if policy_drifted(classifier_id):
+        raise HTTPException(
+            status_code=409,
+            detail="This rule set changed since it was trained, so its model and "
+                   "calibrated thresholds no longer match the current policy. "
+                   "Retrain it before monitoring.",
+        )
+
+    state = calibration_state(classifier_id)
+    if state == "running":
+        raise HTTPException(
+            status_code=409,
+            detail="Calibration is still running for this rule set. "
+                   "Monitoring will be available as soon as it finishes.",
+        )
+    if state != "calibrated":
+        raise HTTPException(
+            status_code=409,
+            detail="This rule set is uncalibrated — monitoring it would score every CE "
+                   "against a default 0.5 threshold, so alerts would be meaningless. "
+                   "Run calibration first.",
+        )
+
+
 def _build_scoring_context(classifier_id: int, labels: dict):
     """Load the calibrated thresholds + rule tensors ONCE for a guardrail.
 
@@ -341,6 +381,7 @@ def _extract_ce_conversations(ce_id: int, limit: int = 60) -> list:
 def analyze_message(classifier_id: int, req: AnalyzeRequest, _: int = Depends(get_current_user)):
     """LIVE mode: generate the assistant reply and classify it."""
     _require_trained_classifier(classifier_id)
+    _require_calibrated_classifier(classifier_id)
     try:
         import classifier_engine.reference  # noqa: F401  (registers gavel.* alias)
         from evaluation.model_cache import load_or_get
@@ -367,6 +408,7 @@ def analyze_message(classifier_id: int, req: AnalyzeRequest, _: int = Depends(ge
 def analyze_stored(classifier_id: int, req: AnalyzeStoredRequest, _: int = Depends(get_current_user)):
     """STORED mode: classify an existing dialogue (no generation)."""
     _require_trained_classifier(classifier_id)
+    _require_calibrated_classifier(classifier_id)
     if not req.messages:
         raise HTTPException(status_code=400, detail="messages is required")
     try:
@@ -550,6 +592,7 @@ def session_start(classifier_id: int, _: int = Depends(get_current_user)):
     client uses that signal to load the model locally instead. Genuine problems
     (not trained / no model on disk) still raise a 4xx the client surfaces."""
     _require_trained_classifier(classifier_id)
+    _require_calibrated_classifier(classifier_id)
     meta, rnn_path = _resolve_for_session(classifier_id)
     model_ref = meta.get("model_path") or ""
 
@@ -650,6 +693,7 @@ def session_analyze_stored(classifier_id: int, req: AnalyzeStoredRequest, _: int
     on the cluster GPU; the backend applies thresholds/rules. Same shape as
     /analyze-stored, so the viewer renders it identically."""
     _require_trained_classifier(classifier_id)
+    _require_calibrated_classifier(classifier_id)
     if not req.messages:
         raise HTTPException(status_code=400, detail="messages is required")
     meta, _rnn = _resolve_for_session(classifier_id)
@@ -714,6 +758,7 @@ def session_analyze(classifier_id: int, req: AnalyzeRequest, _: int = Depends(ge
     """LIVE mode over the warm session: the job generates the reply + classifies
     it on the cluster GPU; the backend applies thresholds/rules."""
     _require_trained_classifier(classifier_id)
+    _require_calibrated_classifier(classifier_id)
     meta, _rnn = _resolve_for_session(classifier_id)
     labels = meta["labels"]
     s = _active_session(classifier_id)
