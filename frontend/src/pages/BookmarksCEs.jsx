@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout/Layout';
 import SearchPanel from '../components/SearchPanel/SearchPanel';
 import Pagination from '../components/Pagination/Pagination';
-import { getCEBookmarks, removeCEBookmark, getCognitiveDataset, getCognitiveElements, searchBookmarks, listLocalDrafts, deleteDraftCE } from '../api';
+import { getCEBookmarks, removeCEBookmark, getCognitiveDataset, getCognitiveElements, searchBookmarks, listLocalDrafts, deleteDraftCE, getCeDependentDraftRules } from '../api';
+import { forgetRecent } from '../utils/recents';
 import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
 import { useTutorialContent } from '../contexts/TutorialContext';
 import CognitiveElementCard from '../components/CognitiveElementCard/CognitiveElementCard';
@@ -172,8 +173,21 @@ const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
             confirmText: 'Delete', cancelText: 'Keep', variant: 'danger',
         });
         if (!ok) return;
+        // Deleting a draft CE cascade-deletes the draft rules that use it, so
+        // collect their ids BEFORE the delete — their Recents entries have to
+        // go too, and afterwards there's no way to look them up.
+        let cascadedRuleIds = [];
+        try {
+            const dep = await getCeDependentDraftRules(ce.ce_id);
+            cascadedRuleIds = (dep.data?.rules || []).map(r => r.rule_id);
+        } catch {
+            // Best-effort: if this fails, the navigation-time prune still
+            // cleans the entries up the first time one is clicked.
+        }
         try {
             await deleteDraftCE(ce.ce_id);
+            forgetRecent('ce', ce.ce_id);
+            cascadedRuleIds.forEach(id => forgetRecent('rule', id));
             fetchBookmarks();
         } catch (err) {
             showAlertDialog({ title: 'Could not delete', message: err.response?.data?.detail || err.message || 'Try again', variant: 'error' });

@@ -4,7 +4,7 @@ import Layout from '../components/Layout/Layout';
 import CommunityTabs from '../components/CommunityTabs/CommunityTabs';
 import SearchPanel from '../components/SearchPanel/SearchPanel';
 import Pagination from '../components/Pagination/Pagination';
-import { getCognitiveElements, getCognitiveDataset, addCEBookmark, getCEBookmarks, removeCEBookmark, getAllCategories } from '../api';
+import { getCognitiveElements, getCognitiveElement, getCognitiveDataset, addCEBookmark, getCEBookmarks, removeCEBookmark, getAllCategories } from '../api';
 import useLibrarySearch from '../hooks/useLibrarySearch';
 import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
 import { useTutorialContent } from '../contexts/TutorialContext';
@@ -13,7 +13,7 @@ import { FiArrowLeft, FiInbox } from 'react-icons/fi';
 import Swal from 'sweetalert2';
 import { showAlertDialog } from '../components/ConfirmDialog/confirmDialog';
 import { normalizeCategoryValue } from '../utils/categoryUtils';
-import { recordRecent } from '../utils/recents';
+import { forgetRecent, recordRecent } from '../utils/recents';
 
 const BrowseCEs = () => {
     const navigate = useNavigate();
@@ -277,11 +277,25 @@ const BrowseCEs = () => {
     // Keyed on the param value so navigating to a DIFFERENT recent re-expands,
     // but a manual collapse (same URL) is respected — we don't force it back open.
     const autoExpandedRef = useRef(null);
+    // CE ids we've already probed for existence after a deep-link miss, so a
+    // re-render doesn't re-issue the same GET.
+    const probedMissingRef = useRef(new Set());
     useEffect(() => {
         const ceParam = searchParams.get('ce');
         if (!ceParam || loading || autoExpandedRef.current === ceParam) return;
         const idx = ces.findIndex((c) => String(c.ce_id) === String(ceParam));
-        if (idx < 0) return;
+        if (idx < 0) {
+            // Missing from the browse list. That's expected for a local draft
+            // (filtered out above), so don't assume it's deleted — ask the
+            // backend, and prune the Recents entry only on a real 404.
+            if (!probedMissingRef.current.has(ceParam)) {
+                probedMissingRef.current.add(ceParam);
+                getCognitiveElement(ceParam).catch((err) => {
+                    if (err?.response?.status === 404) forgetRecent('ce', ceParam);
+                });
+            }
+            return;
+        }
         const found = ces[idx];
         autoExpandedRef.current = ceParam;
         setPage(Math.floor(idx / 10) + 1);   // jump to the page that holds this CE
