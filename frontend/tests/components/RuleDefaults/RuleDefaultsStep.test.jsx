@@ -87,7 +87,7 @@ describe('RuleDefaultsStep — initial render & derive', () => {
 
         // Loading text is visible; textarea is NOT rendered yet.
         expect(screen.getByText(/Analyzing the rule/i)).toBeInTheDocument();
-        expect(screen.queryByPlaceholderText(/Describe the misuse/i)).toBeNull();
+        expect(screen.queryByPlaceholderText(/Example: A user poses as/i)).toBeNull();
 
         // Static info box renders regardless of derive state.
         expect(screen.getByText(/Test Set & calibration/i)).toBeInTheDocument();
@@ -101,7 +101,7 @@ describe('RuleDefaultsStep — initial render & derive', () => {
 
         renderStep({ ruleId: 42 });
 
-        const textarea = await screen.findByPlaceholderText(/Describe the misuse/i);
+        const textarea = await screen.findByPlaceholderText(/Example: A user poses as/i);
         expect(textarea).toHaveValue('Prefilled misuse text');
         // Called with the ruleId.
         expect(deriveScenario).toHaveBeenCalledWith(42);
@@ -116,7 +116,7 @@ describe('RuleDefaultsStep — initial render & derive', () => {
 
         renderStep();
 
-        const textarea = await screen.findByPlaceholderText(/Describe the misuse/i);
+        const textarea = await screen.findByPlaceholderText(/Example: A user poses as/i);
         expect(textarea).toHaveValue('');
         // Generate button disabled because the scenario is empty.
         const btn = screen.getByRole('button', { name: /Generate test/i });
@@ -128,7 +128,7 @@ describe('RuleDefaultsStep — initial render & derive', () => {
 
         renderStep();
 
-        const textarea = await screen.findByPlaceholderText(/Describe the misuse/i);
+        const textarea = await screen.findByPlaceholderText(/Example: A user poses as/i);
         expect(textarea).toHaveValue('');
     });
 
@@ -139,7 +139,7 @@ describe('RuleDefaultsStep — initial render & derive', () => {
 
         expect(await screen.findByText(/Could not auto-write a scenario/i)).toBeInTheDocument();
         // Textarea is still present and empty so the user can type their own.
-        const textarea = screen.getByPlaceholderText(/Describe the misuse/i);
+        const textarea = screen.getByPlaceholderText(/Example: A user poses as/i);
         expect(textarea).toHaveValue('');
         // Loading row gone.
         expect(screen.queryByText(/Analyzing the rule/i)).toBeNull();
@@ -160,7 +160,7 @@ describe('RuleDefaultsStep — initial render & derive', () => {
         expect(warning).toHaveTextContent(/OPENAI_API_KEY/);
         expect(warning).toHaveTextContent(/backend\/\.env/);
         // Manual-typing path stays available.
-        expect(screen.getByPlaceholderText(/Describe the misuse/i)).toHaveValue('');
+        expect(screen.getByPlaceholderText(/Example: A user poses as/i)).toHaveValue('');
     });
 
     it('shows the key guidance when a non-503 error detail mentions OPENAI_API_KEY', async () => {
@@ -186,7 +186,7 @@ describe('RuleDefaultsStep — initial render & derive', () => {
 
         const warning = await screen.findByText(/Could not auto-write a scenario/i);
         expect(warning).toHaveTextContent(/backend is unreachable/i);
-        expect(screen.getByPlaceholderText(/Describe the misuse/i)).toHaveValue('');
+        expect(screen.getByPlaceholderText(/Example: A user poses as/i)).toHaveValue('');
     });
 
     it('includes the backend detail for other derive failures', async () => {
@@ -207,7 +207,7 @@ describe('RuleDefaultsStep — initial render & derive', () => {
 
         expect(await screen.findByText(/returned an empty scenario/i)).toBeInTheDocument();
         // Textarea still editable; button stays disabled on whitespace-only.
-        expect(screen.getByPlaceholderText(/Describe the misuse/i)).toBeInTheDocument();
+        expect(screen.getByPlaceholderText(/Example: A user poses as/i)).toBeInTheDocument();
         expect(screen.getByRole('button', { name: /Generate test/i })).toBeDisabled();
     });
 
@@ -239,7 +239,7 @@ describe('RuleDefaultsStep — typing & validation', () => {
         deriveScenario.mockResolvedValue({ data: { scenario: '' } });
         renderStep();
 
-        const textarea = await screen.findByPlaceholderText(/Describe the misuse/i);
+        const textarea = await screen.findByPlaceholderText(/Example: A user poses as/i);
         const btn = screen.getByRole('button', { name: /Generate test/i });
         expect(btn).toBeDisabled();
 
@@ -252,7 +252,7 @@ describe('RuleDefaultsStep — typing & validation', () => {
         deriveScenario.mockResolvedValue({ data: { scenario: '' } });
         renderStep();
 
-        const textarea = await screen.findByPlaceholderText(/Describe the misuse/i);
+        const textarea = await screen.findByPlaceholderText(/Example: A user poses as/i);
         fireEvent.change(textarea, { target: { value: '    ' } });
         const btn = screen.getByRole('button', { name: /Generate test/i });
         expect(btn).toBeDisabled();
@@ -269,7 +269,7 @@ describe('RuleDefaultsStep — generate flow (background tray job)', () => {
 
         const { onDone } = renderStep({ ruleId: 99 });
 
-        const textarea = await screen.findByPlaceholderText(/Describe the misuse/i);
+        const textarea = await screen.findByPlaceholderText(/Example: A user poses as/i);
         expect(textarea).toHaveValue('  leading/trailing  ');
 
         const btn = screen.getByRole('button', { name: /Generate test/i });
@@ -293,7 +293,7 @@ describe('RuleDefaultsStep — generate flow (background tray job)', () => {
         deriveScenario.mockResolvedValue({ data: { scenario: 'something' } });
         const { onDone } = renderStep();
 
-        const textarea = await screen.findByPlaceholderText(/Describe the misuse/i);
+        const textarea = await screen.findByPlaceholderText(/Example: A user poses as/i);
         fireEvent.change(textarea, { target: { value: '' } });
         const btn = screen.getByRole('button', { name: /Generate test/i });
         expect(btn).toBeDisabled();
@@ -327,7 +327,7 @@ describe('RuleDefaultsStep — generate flow (background tray job)', () => {
         await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
         expect(getRuleDefaultsStatus).toHaveBeenCalledTimes(2);
         const probe = screen.getByTestId('tray-probe');
-        expect(probe).toHaveTextContent('Rule ready — find it in Drafts.');
+        expect(probe).toHaveTextContent('Rule ready. Find it in Your Library → Rules.');
         expect(probe).toHaveTextContent('success');
     });
 
@@ -430,7 +430,7 @@ describe('RuleDefaultsStep — generate flow (background tray job)', () => {
         // The WHY, not just "failed".
         expect(probe).toHaveTextContent('negative: LLM quota exceeded');
         // And where the rule went (it was revealed, not stranded).
-        expect(probe).toHaveTextContent(/saved to Drafts/i);
+        expect(probe).toHaveTextContent(/saved to Your Library/i);
         expect(probe).toHaveTextContent('error');
         // The failed chip is clickable (has an openHandler → real tray makes it a button).
         expect(probe.querySelector('li')).toHaveAttribute('data-has-open', 'yes');

@@ -248,7 +248,7 @@ export default function BuildRuleFromCEs({ onClose, baseRule = null, dirtyRef = 
             <p style={{ margin: '0 0 16px', color: '#94a3b8', fontSize: '0.9rem' }}>
                 {isEdit
                     ? <>Editing <strong style={{ color: '#e2e8f0' }}>{baseRule.name}</strong> — adjust its cognitive elements, groups and condition, then give it a new name. This creates a new draft in your Library; the original rule is unchanged.</>
-                    : 'Compose a rule from your bookmarked Cognitive Elements. The finished rule lands in your Drafts.'}
+                    : 'Compose a rule from your bookmarked Cognitive Elements. The finished rule lands in Your Library → Rules.'}
             </p>
 
             <div style={cardStyle}>

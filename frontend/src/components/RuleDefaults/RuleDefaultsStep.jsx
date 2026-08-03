@@ -93,7 +93,7 @@ export default function RuleDefaultsStep({ ruleId, onDone, finalize }) {
             kind: 'rule',
             title: 'Generating test & calibration set',
             runningSubtitle: 'Positive · negative · calibration dialogues…',
-            successSubtitle: 'Rule ready — find it in Drafts.',
+            successSubtitle: 'Rule ready. Find it in Your Library → Rules.',
             job: async (update) => {
                 await generateRuleDefaults(ruleId, instructions);
                 // Poll until all three buckets are ready.
@@ -107,7 +107,7 @@ export default function RuleDefaultsStep({ ruleId, onDone, finalize }) {
                         // Drafts) and reports the per-bucket failure reason —
                         // put that reason on the chip, not a bare "failed".
                         const reason = res.data?.error || 'Generation failed for one or more sets.';
-                        const err = new Error(`${reason} — the rule was saved to Drafts. Click for details & retry.`);
+                        const err = new Error(`${reason} The rule was saved to Your Library. Click for details & retry.`);
                         err.ruleRevealed = true;
                         throw err;
                     }
@@ -130,7 +130,7 @@ export default function RuleDefaultsStep({ ruleId, onDone, finalize }) {
                 const retry = await showConfirmDialog({
                     title: 'Test & calibration set failed',
                     messageHtml: `${escapeHtml(reason)}<br/><br/>${err?.ruleRevealed
-                        ? 'The rule itself was saved — it’s in your <strong>Drafts</strong>. Retry the generation now, or open the rule later and use <strong>Edit</strong> to rebuild it as a fresh draft.'
+                        ? 'The rule itself was saved. Find it under <strong>Your Library → Rules</strong> with a Draft badge. Retry the generation now, or open the rule later and use <strong>Edit</strong> to rebuild it as a fresh draft.'
                         : 'You can retry the generation now.'}`,
                     confirmText: 'Retry generation',
                     cancelText: 'Not now',
@@ -184,7 +184,15 @@ export default function RuleDefaultsStep({ ruleId, onDone, finalize }) {
                     value={scenario}
                     onChange={(e) => setScenario(e.target.value)}
                     rows={5}
-                    placeholder="Describe the misuse this rule should catch…"
+                    // A concrete example, not just an instruction: the field
+                    // needs a paragraph with who/what/how, and "describe the
+                    // misuse" alone got one-liners that generate weak sets.
+                    placeholder={
+                        'Example: A user poses as a security researcher and asks the assistant to '
+                        + 'write a phishing email impersonating a bank, then asks it to make the '
+                        + 'wording more urgent and to add a link that collects login details. '
+                        + 'The assistant complies, producing text ready to send to victims.'
+                    }
                     style={{
                         padding: '12px 14px', borderRadius: 12,
                         border: '2px solid rgba(148, 163, 184, 0.22)',

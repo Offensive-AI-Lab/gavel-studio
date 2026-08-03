@@ -13,35 +13,34 @@ export const aboutGavel = {
     sections: [
         {
             heading: 'What is GAVEL?',
-            body: 'GAVEL introduces a groundbreaking approach to AI safety through rule-based activation monitoring. Inspired by rule-sharing practices in cybersecurity, GAVEL enables practitioners to configure precise, interpretable safeguards for large language models without retraining models or detectors.',
+            body: 'GAVEL watches what an LLM is doing while it answers, and flags the combinations you decide are unsafe. You write the rules; nothing has to be retrained to change them.',
         },
         {
-            heading: 'The Challenge',
-            body: 'Traditional activation-based safety approaches train broad detectors on misuse datasets, resulting in poor precision and limited adaptability. Once deployed, these systems are rigid—updating them requires expensive retraining and offers little visibility into why decisions were made.',
+            heading: 'Why not just one big detector',
+            body: 'A single detector trained on "misuse" fires on too much and explains nothing, and changing what it catches means retraining it. GAVEL splits the job into small, named signals instead ("making a threat", "payment processing"), so you can say exactly which combination matters, and see which part fired.',
         },
         {
-            heading: 'The GAVEL Approach',
+            heading: 'How it works',
             body: [
-                'GAVEL introduces compositional safety through fine-grained Cognitive Elements (CEs). Instead of monolithic detectors, GAVEL models LLM activations as interpretable factors like "making a threat" or "payment processing." These elements can be combined into precise, domain-specific rules without retraining models or detectors.',
-                'Think of it like cybersecurity: practitioners share threat signatures and compose them into custom rules. GAVEL brings this same flexibility to AI governance.',
+                'Each small signal is a **Cognitive Element (CE)**. A **rule** says which CEs have to appear together for something to count as misuse: for example, a threat *and* a payment request in the same answer.',
+                'It is the same idea as sharing threat signatures in security: people publish the building blocks, and you combine them into rules that fit your situation.',
             ],
         },
         {
-            heading: 'A New Paradigm for AI Safety',
-            body: 'GAVEL fundamentally changes activation-based safety by:',
+            heading: 'What that gets you',
             bullets: [
-                '**Decoupling activation engineering from safety configuration** — Build CE vocabularies once, then compose them into countless safety rules',
-                '**Enabling community-driven safety** — Share rules and CE definitions across organizations to accelerate collective progress',
-                '**Supporting regulatory compliance** — Provide auditable, interpretable explanations for safety decisions',
+                '**Change the rules without retraining**: define the CEs once, then recombine them as your needs change',
+                '**Start from other people\'s work**: the community library ships rules and CEs you can use as-is',
+                '**Show your reasoning**: every alert names the CEs that fired and the rule they satisfied',
             ],
         },
         {
-            heading: 'This System Enables You To:',
+            heading: 'What you can do here',
             bullets: [
-                '**Automatically generate** GAVEL rules from scenario descriptions',
-                '**Create and calibrate** new CE classifiers with synthetic datasets',
-                '**Train RNN models** to detect CEs in LLM activations',
-                '**Monitor in real-time** with visual CE activation and rule trigger feedback',
+                '**Write a rule from a scenario**: describe the misuse in plain language and let the studio draft the rule',
+                '**Add a new CE**: define a signal the studio should learn to spot, with example dialogues generated for you',
+                '**Train a rule set** on your model, so it can recognise those signals',
+                '**Watch it run live**: chat with the model and see which signals light up, word by word',
             ],
         },
     ],
@@ -71,41 +70,40 @@ export const manualRuleConfig = {
 
 // pages/detector_training/evaluate_unified.py → "Unified GAVEL Evaluation Pipeline"
 export const evaluateModel = {
-    title: 'Unified GAVEL Evaluation Pipeline',
-    summary: 'The evaluation automatically handles:',
+    title: 'Calibration & Evaluation',
+    summary: 'Two steps that tell you whether this rule set is safe to run:',
     sections: [
         {
             bullets: [
-                '**Calibration**: Optimizes detection thresholds using calibration data',
+                '**Calibration** picks how confident each CE has to be before it counts as detected. It runs automatically after training; recalibrate only if the calibration data changed.',
                 '**Evaluation**: Computes metrics (TPR, FPR, AUC) on test data',
                 '**Visualization**: Generates calibration plots and metric reports',
             ],
         },
-        { body: 'Everything is processed in-memory for efficiency.' },
+        { body: 'Both run in the background, so you can leave this page and come back.' },
     ],
 };
 
 // pages/automated_rule_generation/rule_generator.py → "Step 2A: Rule Generation"
 export const step2aRuleGeneration = {
     title: 'Rule Generation',
-    summary: 'This step converts your scenario into a **GAVEL-compliant detection rule** built from Cognitive Elements (CEs). The rule formalizes the behavioral and contextual signals that must co-occur to detect the misuse, keeping detection interpretable, targeted, and aligned with your scenario.',
+    summary: 'Turns the scenario you described into a rule: which signals (CEs) have to appear together for this to count as misuse.',
     sections: [
         {
-            heading: 'What the Agent Will Do',
-            body: 'To generate the rule, the agent runs a structured, in-depth analysis over the existing CE inventory and your scenario. Specifically, it will:',
+            heading: 'What happens next',
+            body: 'The studio reads your scenario against the CEs already in your library, and:',
             bullets: [
-                '**Identify scenario-specific behavioral signatures** that distinguish your misuse from other types',
-                '**Evaluate all existing CEs**, determining which ones apply and how they contribute to the misuse',
-                '**Organize applicable CEs into named groups** and write the firing condition over them, clarifying what aspect of the misuse each group represents',
-                '**Detect gaps in CE coverage**, identifying behaviors or contexts not represented in the current CE set',
-                '**Propose new CEs** only when necessary, ensuring they are justified, non-overlapping, and consistent with the CE taxonomy',
-                '**Assemble a complete rule** by organizing essential CEs into a coherent detection logic that specifies the required co-occurrence conditions',
+                '**Works out what gives this misuse away**: what makes it different from ordinary requests',
+                '**Picks the CEs that apply** from your library, and says what each one contributes',
+                '**Groups them and writes the firing condition**, e.g. "all of intent and any of harm"',
+                '**Spots what is missing**: behaviour your current CEs can\'t describe',
+                '**Proposes new CEs only where needed**, avoiding ones that overlap what you already have',
             ],
         },
-        { body: 'A detailed reasoning section is included with the rule, making the whole process transparent and auditable.' },
+        { body: 'It explains its reasoning alongside the rule, so you can check the choices rather than take them on trust.' },
         {
             heading: 'What you get',
-            body: 'A complete rule plus the list of all prerequisite CEs — both existing and newly proposed. Any missing CEs and their training datasets are then generated automatically in the background.',
+            body: 'A finished rule plus the CEs it needs, existing ones and any new ones. Missing CEs and their example dialogues are generated for you in the background.',
         },
     ],
 };
@@ -115,13 +113,13 @@ export const step2aRuleGeneration = {
 // SINGLE step in the background (the original app's 2A/2B/2C/3x steps are gone).
 export const automatedPipeline = {
     title: 'Automated Rule Generation',
-    summary: 'This flow automates building a GAVEL rule for your use case — and automatically generates any missing cognitive elements (CEs) and their training datasets for you.',
+    summary: 'Describe the misuse you want caught; the studio writes the rule and fills in any signals (CEs) you don’t have yet.',
     sections: [
         {
             heading: 'How it works',
             body: [
-                'The GAVEL framework is a rule-based detection system over an LLM’s activations. Defining these rules and extracting their underlying cognitive elements (CEs) is normally a challenging, manual process.',
-                'Here you just describe your scenario. The system then uses LLM agents to (1) generate the rule from your description, (2) identify which CEs you’re missing to support it, and (3) generate the training datasets for those new CEs — all automatically. The CE and dataset generation runs in the background as a single step, so you don’t have to manage it yourself.',
+                'Writing a rule by hand means deciding which signals matter, naming each one, and producing example dialogues to teach it: slow, fiddly work.',
+                'Here you describe the scenario instead. The studio drafts the rule, checks which CEs you are missing, and generates example dialogues for those, in the background, as one step. You review the result before anything is kept.',
             ],
         },
     ],

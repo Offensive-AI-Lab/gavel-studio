@@ -39,7 +39,9 @@ export function buildRuleInBackground(tray, { run, userId }) {
         kind: 'rule',
         title: `Building “${ruleName}”`,
         runningSubtitle: 'Starting…',
-        successSubtitle: 'Rule ready — find it in your Drafts.',
+        // "Drafts" is not a place in this app — drafts live in Your Library →
+        // Rules, tagged with a Draft badge. Name the real destination.
+        successSubtitle: 'Rule ready. Find it in Your Library → Rules.',
         job: async (update) => {
             for (let i = 0; i < newCes.length; i += 1) {
                 const ce = newCes[i];
@@ -81,7 +83,7 @@ export function buildRuleInBackground(tray, { run, userId }) {
             try { await completePipelineRun(run.run_id); } catch { /* best-effort */ }
             if (setFailure) {
                 throw new Error(
-                    `Test & calibration set failed: ${setFailure} — the rule was still saved to your Drafts; open it and use Edit to rebuild it with fresh sets.`,
+                    `Test & calibration set failed: ${setFailure} The rule was still saved to Your Library → Rules; open it and use Edit to rebuild it with fresh sets.`,
                 );
             }
         },

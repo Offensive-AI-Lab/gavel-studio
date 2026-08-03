@@ -331,7 +331,7 @@ const RulesManager = () => {
                     rules.length === 0
                         ? [
                             'No rules yet. Use "Add an Existing Rule" to drop a bookmarked public rule or one of your drafts into this rule set.',
-                            'To author a new rule, use "Create a New Rule" — it opens the Create menu (Rule with AI, Build Rule from CEs, or a new CE); the finished rule lands in your Drafts and you add it here.',
+                            'To author a new rule, use "Create a New Rule" — it opens the Create menu (Rule with AI, Build Rule from CEs, or a new CE); the finished rule lands in Your Library → Rules and you add it here.',
                         ]
                         : trainingStatus === 'training'
                             ? ['Training is running — the banner above shows the live phase. Don\'t close the tab; the run keeps going on the server even if you navigate away.']
