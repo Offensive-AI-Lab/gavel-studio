@@ -16,7 +16,7 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
 import { TutorialProvider } from '../../src/contexts/TutorialContext';
 
 // ---- navigate spy; useParams comes from the real route ----
@@ -43,6 +43,9 @@ vi.mock('../../src/api', () => ({
     getTrainingStatus: vi.fn(() => ok({ status: 'untrained', is_training: false, training_phase: null, training_phase_detail: null })),
     downloadClassifier: vi.fn(() => Promise.resolve()),
     listLocalDrafts: vi.fn(() => ok({ rules: [] })),
+    // Was missing from this mock, so the page's call threw and was swallowed.
+    // Defined now so the models loading/empty split is actually testable.
+    getUserModels: vi.fn(() => ok({ models: [] })),
     getComputeStatus: vi.fn(() => Promise.resolve({ data: { workloads: {} } })),
     // Machine picker — default to a single target so training proceeds directly.
     getComputeTargets: vi.fn(() => Promise.resolve({ data: { targets: [{ name: 'local', label: 'This machine' }] } })),
@@ -712,5 +715,46 @@ describe('RulesManager — post-training chain banner', () => {
         await screen.findByText(ruleFixture().custom_name || ruleFixture().name);
         expect(screen.queryByText('Calibrating')).not.toBeInTheDocument();
         expect(screen.queryByText('Evaluating')).not.toBeInTheDocument();
+    });
+});
+
+describe('RulesManager — empty states wait for the fetch (#11)', () => {
+    // An empty array meant both "not fetched yet" and "fetched, nothing there",
+    // so a slow backend rendered "No Rules Defined" and "No models yet" as if
+    // they were answers — next to a "Loading..." breadcrumb saying otherwise.
+    it('shows a loading state, not "No Rules Defined", while the fetch is in flight', async () => {
+        let release;
+        api.getClassifierRules.mockReturnValue(new Promise((resolve) => {
+            release = () => resolve({ data: { rules: [] } });
+        }));
+        renderPage();
+
+        expect(await screen.findByText(/Loading rules/i)).toBeInTheDocument();
+        expect(screen.queryByText('No Rules Defined')).not.toBeInTheDocument();
+
+        // Only once the response resolves EMPTY does the empty state appear.
+        await act(async () => { release(); });
+        expect(await screen.findByText('No Rules Defined')).toBeInTheDocument();
+        expect(screen.queryByText(/Loading rules/i)).not.toBeInTheDocument();
+    });
+
+    it('still reaches the empty state when the request fails', async () => {
+        // A rejected fetch must not leave the page stuck on "Loading rules…".
+        api.getClassifierRules.mockRejectedValue(new Error('boom'));
+        renderPage();
+        expect(await screen.findByText('No Rules Defined')).toBeInTheDocument();
+    });
+
+    it('does not claim "No models yet" before the models call resolves', async () => {
+        let release;
+        api.getUserModels.mockReturnValue(new Promise((resolve) => {
+            release = () => resolve({ data: { models: [] } });
+        }));
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture()] } });
+        renderPage();
+
+        await screen.findByText(ruleFixture().custom_name || ruleFixture().name);
+        expect(screen.queryByText(/No models yet — add one/i)).not.toBeInTheDocument();
+        await act(async () => { release(); });
     });
 });

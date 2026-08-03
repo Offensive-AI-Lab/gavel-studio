@@ -66,6 +66,12 @@ const RulesManager = () => {
     // --- State Management ---
     const [rules, setRules] = useState([]);
     const [rulesLoadError, setRulesLoadError] = useState(false);   // getClassifierRules failed
+    // An empty array means two different things — "not fetched yet" and
+    // "fetched, genuinely nothing" — and the empty states used to render on the
+    // bare length check, so a slow or hanging backend showed "No rules in this
+    // rule set" and "No models yet" as if they were answers (#11). These flags
+    // start TRUE so the very first paint is a loading state, never an empty one.
+    const [rulesLoading, setRulesLoading] = useState(true);
     const [expandedRule, setExpandedRule] = useState(null);
     
     // Modal Config
@@ -127,6 +133,7 @@ const RulesManager = () => {
     // (at train time). `models` backs both the attach picker and the
     // "Apply to another model" clone picker.
     const [models, setModels] = useState([]);
+    const [modelsLoading, setModelsLoading] = useState(true);   // see rulesLoading
     const [attachOpen, setAttachOpen] = useState(false);
     const [attachTargetModelId, setAttachTargetModelId] = useState('');
     // Per-model LLM layer editor inside the Choose-Model modal.
@@ -328,7 +335,9 @@ const RulesManager = () => {
             {
                 heading: 'Right now',
                 bullets:
-                    rules.length === 0
+                    rulesLoading
+                        ? ['Loading this rule set…']
+                        : rules.length === 0
                         ? [
                             'No rules yet. Use "Add an Existing Rule" to drop a bookmarked public rule or one of your drafts into this rule set.',
                             'To author a new rule, use "Create a New Rule" — it opens the Create menu (Rule with AI, Build Rule from CEs, or a new CE); the finished rule lands in Your Library → Rules and you add it here.',
@@ -369,6 +378,8 @@ const RulesManager = () => {
             setModels(res.data.models || []);
         } catch {
             setModels([]);
+        } finally {
+            setModelsLoading(false);
         }
     };
 
@@ -648,6 +659,8 @@ const RulesManager = () => {
         } catch {
             setRulesLoadError(true);
             showAlertDialog({ title: 'Error', message: 'Failed to load rules', variant: 'error' });
+        } finally {
+            setRulesLoading(false);
         }
     };
 
@@ -1157,6 +1170,8 @@ const RulesManager = () => {
                         })()}
                         <span style={{ color: '#64748b', marginLeft: 8 }}>(locked once trained — use “Apply to another model” to try a different one)</span>
                     </div>
+                ) : modelsLoading ? (
+                    <p style={{ color: '#94a3b8', fontSize: '0.85rem', margin: '8px 0 0' }} role="status">Loading models…</p>
                 ) : models.length === 0 ? (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 8 }}>
                         <p style={{ color: '#94a3b8', fontSize: '0.85rem', margin: 0 }}>No models yet — add one to configure this rule set.</p>
@@ -1221,7 +1236,14 @@ const RulesManager = () => {
             <CreateChooserModal isOpen={createOpen} onClose={() => setCreateOpen(false)} />
 
             {/* 3. Rules List */}
-            {rules.length === 0 ? (
+            {rulesLoading ? (
+                // Still fetching: say so. Rendering "No Rules Defined" here told
+                // the user this rule set was empty when we simply didn't know yet.
+                <div className="empty-state" role="status">
+                    <FiRefreshCw size={40} style={{ color: '#64748b', marginBottom: '16px', animation: 'spin 1.4s linear infinite' }} />
+                    <p style={{ color: '#94a3b8' }}>Loading rules…</p>
+                </div>
+            ) : rules.length === 0 ? (
                 <div className="empty-state">
                     <FiInbox size={64} style={{ color: '#64748b', marginBottom: '20px' }} />
                     <h2 style={{ fontSize: '1.5rem', marginBottom: '10px', color: '#cbd5e1' }}>No Rules Defined</h2>

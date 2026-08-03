@@ -23,6 +23,9 @@ const PAGE_SIZE = 10;
 const BrowseRuleSets = () => {
     const navigate = useNavigate();
     const [ruleSets, setRuleSets] = useState([]);
+    // Starts TRUE so the first paint is a loading state, not "No public
+    // rule sets" — an unresolved fetch is not an empty result (#11).
+    const [loading, setLoading] = useState(true);
     const [expandedId, setExpandedId] = useState(null);
     const [bookmarkIds, setBookmarkIds] = useState(new Set());
     const [bookmarks, setBookmarks] = useState([]);
@@ -59,6 +62,8 @@ const BrowseRuleSets = () => {
                 .filter((rs) => !rs.is_local_draft));
         } catch {
             setRuleSets([]);
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -166,7 +171,11 @@ const BrowseRuleSets = () => {
                         availableCategories={availableCategories}
                     />
 
-                    {filtered.length === 0 ? (
+                    {loading ? (
+                        <div className="empty-state" style={{ textAlign: 'center', padding: '40px 20px', color: '#94a3b8' }} role="status">
+                            Loading rule sets…
+                        </div>
+                    ) : filtered.length === 0 ? (
                         <div className="empty-state" style={{ textAlign: 'center', padding: '40px 20px', color: '#94a3b8' }}>
                             <h2 style={{ fontSize: '1.4rem', marginBottom: '10px', color: '#cbd5e1' }}>No public rule sets</h2>
                             <p style={{ marginBottom: '20px' }}>
