@@ -5,11 +5,118 @@ import ExportToRegistryModal from '../ExportToRegistry/ExportToRegistryModal';
 import { prettyName } from '../../utils/ruleLogic';
 import './CognitiveElementCard.css';
 
+// One conversation from the excitation set, collapsed to a single line until
+// clicked. Ten full transcripts inline would bury the rest of the card, and the
+// first user turn is what identifies a sample anyway.
+const SampleRow = ({ conversation, index }) => {
+    const [open, setOpen] = React.useState(false);
+    const messages = Array.isArray(conversation) ? conversation : [];
+    // Prefer the user turn for the summary — the system prompt is identical
+    // across every sample in a set, so it identifies nothing.
+    const summarySource = messages.find((m) => m?.role === 'user') || messages[0] || {};
+    const summary = String(summarySource.content || '').replace(/\s+/g, ' ').trim();
+
+    return (
+        <div style={{
+            background: 'rgba(2, 6, 23, 0.55)',
+            border: '1px solid rgba(148, 163, 184, 0.18)',
+            borderRadius: '10px',
+            overflow: 'hidden',
+        }}>
+            <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+                style={{
+                    width: '100%', display: 'flex', alignItems: 'center', gap: '10px',
+                    padding: '9px 12px', background: 'none', border: 'none',
+                    color: '#e2e8f0', cursor: 'pointer', textAlign: 'left', font: 'inherit',
+                }}
+            >
+                <span style={{ color: '#818cf8', fontWeight: 700, fontSize: '0.72rem', flexShrink: 0 }}>
+                    #{index + 1}
+                </span>
+                <span style={{
+                    flex: 1, minWidth: 0, overflow: 'hidden',
+                    textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.85rem',
+                }}>
+                    {summary || '(empty sample)'}
+                </span>
+                {open ? <FiChevronUp size={14} /> : <FiChevronDown size={14} />}
+            </button>
+            {open && (
+                <div style={{ padding: '0 12px 10px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {messages.map((msg, i) => (
+                        <div key={i}>
+                            <div style={{
+                                fontSize: '0.66rem', fontWeight: 800, letterSpacing: '0.06em',
+                                textTransform: 'uppercase', color: '#94a3b8', marginBottom: '2px',
+                            }}>
+                                {msg?.role || 'message'}
+                            </div>
+                            <div style={{ color: '#cbd5e1', whiteSpace: 'pre-wrap', fontSize: '0.85rem', lineHeight: 1.5 }}>
+                                {String(msg?.content ?? '')}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+};
+
+// The dataset preview block. Kept out of the main component so the expanded
+// body stays readable, and so each row owns its own open/closed state.
+const TrainingDataSection = ({ samples, total }) => {
+    // undefined = the page hasn't fetched yet (it fires on expand); an empty
+    // array = fetched and there is genuinely nothing. Those must not look alike.
+    if (samples === undefined || samples === null) {
+        return (
+            <>
+                <span className="content-label" style={{ marginTop: '18px', display: 'block' }}>Training data</span>
+                <div style={{ color: '#94a3b8', marginTop: '8px' }}>Loading samples…</div>
+            </>
+        );
+    }
+    const list = Array.isArray(samples) ? samples : [];
+    const shown = list.length;
+    const countLabel = total && total > shown
+        ? `Showing ${shown} of ${total} samples`
+        : `${shown} sample${shown === 1 ? '' : 's'}`;
+
+    return (
+        <>
+            <span className="content-label" style={{ marginTop: '18px', display: 'block' }}>Training data</span>
+            {shown === 0 ? (
+                <div style={{ color: '#94a3b8', marginTop: '8px' }}>
+                    No training data generated for this CE yet.
+                </div>
+            ) : (
+                <>
+                    <div style={{ color: '#94a3b8', fontSize: '0.78rem', margin: '8px 0 10px' }}>
+                        {countLabel} — click one to read it.
+                    </div>
+                    {/* Capped + scrollable: even 10 expanded transcripts must not
+                        push the rest of the page out of reach. */}
+                    <div style={{
+                        display: 'flex', flexDirection: 'column', gap: '8px',
+                        maxHeight: '340px', overflowY: 'auto',
+                    }}>
+                        {list.map((conversation, idx) => (
+                            <SampleRow key={idx} conversation={conversation} index={idx} />
+                        ))}
+                    </div>
+                </>
+            )}
+        </>
+    );
+};
+
 const CognitiveElementCard = ({
     ce,
     isOpen,
     onToggle,
     samples,
+    samplesTotal,
     onBookmark,
     isBookmarked,
     bookmarkLabel,
@@ -247,6 +354,17 @@ const CognitiveElementCard = ({
                             </div>
                         );
                     })()}
+
+                    {/* Training data (excitation set). The pages fetch a preview
+                        on expand and pass it down; until this block existed the
+                        prop was accepted and dropped, so a generated dataset was
+                        unviewable anywhere in the UI (#10).
+
+                        The backend caps `training_data_preview` at 10 conversations
+                        and reports the true total separately, so this can never
+                        render a whole set — it's a sample, labelled as one, with
+                        each conversation collapsed to one line until clicked. */}
+                    <TrainingDataSection samples={samples} total={samplesTotal} />
                 </div>
             )}
 

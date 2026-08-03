@@ -456,3 +456,67 @@ describe('CognitiveElementCard — combined affordances', () => {
         expect(container.querySelector('.delete-icon')).not.toBeNull();
     });
 });
+
+describe('CognitiveElementCard — training data preview (#10)', () => {
+    // Before this, `samples` was destructured and dropped: the pages fetched a
+    // preview on expand and the card silently discarded it, so a generated
+    // excitation set could not be inspected anywhere in the UI.
+    const convo = (text) => [
+        { role: 'system', content: 'You are a helpful assistant.' },
+        { role: 'user', content: text },
+        { role: 'assistant', content: `reply to ${text}` },
+    ];
+
+    it('renders one collapsed row per sample, summarised by the USER turn', () => {
+        renderCard({
+            ce: baseCe(), isOpen: true, onToggle: vi.fn(),
+            samples: [convo('first prompt'), convo('second prompt')],
+        });
+        expect(screen.getByText('Training data')).toBeInTheDocument();
+        expect(screen.getByText('first prompt')).toBeInTheDocument();
+        expect(screen.getByText('second prompt')).toBeInTheDocument();
+        // Collapsed: the assistant/system turns aren't rendered yet. The system
+        // prompt is identical across samples, so it would identify nothing.
+        expect(screen.queryByText('reply to first prompt')).not.toBeInTheDocument();
+        expect(screen.queryByText('You are a helpful assistant.')).not.toBeInTheDocument();
+    });
+
+    it('expands one sample to its full message list without touching the others', () => {
+        renderCard({
+            ce: baseCe(), isOpen: true, onToggle: vi.fn(),
+            samples: [convo('first prompt'), convo('second prompt')],
+        });
+        fireEvent.click(screen.getByText('first prompt'));
+        expect(screen.getByText('reply to first prompt')).toBeInTheDocument();
+        expect(screen.getByText('You are a helpful assistant.')).toBeInTheDocument();
+        expect(screen.queryByText('reply to second prompt')).not.toBeInTheDocument();
+    });
+
+    it('says how many of the whole set it is showing', () => {
+        // The endpoint caps the preview at 10 but reports the true total, so the
+        // card must not imply 10 is everything.
+        renderCard({
+            ce: baseCe(), isOpen: true, onToggle: vi.fn(),
+            samples: [convo('a'), convo('b')], samplesTotal: 240,
+        });
+        expect(screen.getByText(/Showing 2 of 240 samples/i)).toBeInTheDocument();
+    });
+
+    it('distinguishes "still loading" from "genuinely empty"', () => {
+        const { unmount } = renderCard({ ce: baseCe(), isOpen: true, onToggle: vi.fn() });
+        expect(screen.getByText(/Loading samples/i)).toBeInTheDocument();
+        unmount();
+
+        renderCard({ ce: baseCe(), isOpen: true, onToggle: vi.fn(), samples: [] });
+        expect(screen.getByText(/No training data generated/i)).toBeInTheDocument();
+    });
+
+    it('shows nothing of the preview while the card is collapsed', () => {
+        renderCard({
+            ce: baseCe(), isOpen: false, onToggle: vi.fn(),
+            samples: [convo('hidden prompt')],
+        });
+        expect(screen.queryByText('Training data')).not.toBeInTheDocument();
+        expect(screen.queryByText('hidden prompt')).not.toBeInTheDocument();
+    });
+});

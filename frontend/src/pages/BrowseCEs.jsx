@@ -31,6 +31,9 @@ const BrowseCEs = () => {
     const [expandedCe, setExpandedCe] = useState(null);
     const [loading, setLoading] = useState(true);
     const [previewCache, setPreviewCache] = useState({});
+    // True sample count per CE. The endpoint caps the preview at 10, so the
+    // card needs this to say "showing 10 of 240" instead of implying 10 is all.
+    const [previewTotals, setPreviewTotals] = useState({});
     const [bookmarkIds, setBookmarkIds] = useState(new Set());
     const [bookmarks, setBookmarks] = useState([]);
     const [searchQuery, setSearchQuery] = useState('');
@@ -258,6 +261,7 @@ const BrowseCEs = () => {
             const res = await getCognitiveDataset(ceId);
             const raw = res.data?.training_data_preview || res.data?.training_data || [];
             setPreviewCache((prev) => ({ ...prev, [ceId]: normalizeSamples(raw) }));
+            setPreviewTotals((prev) => ({ ...prev, [ceId]: res.data?.samples_count ?? null }));
         } catch {
             setPreviewCache((prev) => ({ ...prev, [ceId]: [] }));
         }
@@ -549,6 +553,7 @@ const BrowseCEs = () => {
                                         // so it's the only call that can pass is_local_draft.
                                         onToggle={() => toggleExpand(ce.ce_id, ce.name, !!ce.is_local_draft)}
                                         samples={previewCache[ce.ce_id]}
+                                        samplesTotal={previewTotals[ce.ce_id]}
                                         onBookmark={handleBookmark}
                                         isBookmarked={bookmarkIds.has(ce.ce_id)}
                                     />
@@ -598,6 +603,7 @@ const BrowseCEs = () => {
                                             isOpen={expandedCe === ce.ce_id}
                                             onToggle={() => toggleExpand(ce.ce_id, ce.name)}
                                             samples={previewCache[ce.ce_id]}
+                                        samplesTotal={previewTotals[ce.ce_id]}
                                             onBookmark={handleBookmark}
                                             isBookmarked={bookmarkIds.has(ce.ce_id)}
                                         />

@@ -23,6 +23,8 @@ const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
     const [expandedCe, setExpandedCe] = useState(null);
     const [loading, setLoading] = useState(true);
     const [previewCache, setPreviewCache] = useState({});
+    // True sample count per CE — the preview itself is capped at 10.
+    const [previewTotals, setPreviewTotals] = useState({});
     
     // Search state
     const [searchQuery, setSearchQuery] = useState('');
@@ -290,6 +292,7 @@ const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
             const raw = res.data?.training_data_preview || res.data?.training_data || [];
             const normalized = normalizeSamples(raw);
             setPreviewCache((prev) => ({ ...prev, [ceId]: normalized }));
+            setPreviewTotals((prev) => ({ ...prev, [ceId]: res.data?.samples_count ?? null }));
         } catch {
             setPreviewCache((prev) => ({ ...prev, [ceId]: [] }));
         }
@@ -412,6 +415,7 @@ const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
                                             isOpen={expandedCe === ce.ce_id}
                                             onToggle={toggleExpand}
                                             samples={previewCache[ce.ce_id]}
+                                        samplesTotal={previewTotals[ce.ce_id]}
                                             onDelete={(c) => handleDeleteDraftCe(c)}
                                         />
                                     ) : (
@@ -421,6 +425,7 @@ const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
                                             isOpen={expandedCe === ce.ce_id}
                                             onToggle={toggleExpand}
                                             samples={previewCache[ce.ce_id]}
+                                        samplesTotal={previewTotals[ce.ce_id]}
                                             onBookmark={handleRemoveBookmark}
                                             isBookmarked={true}
                                         />

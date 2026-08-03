@@ -8,6 +8,7 @@
 // or Prev/Next footer here — just the active step.
 import { useState, useEffect, useCallback, useRef } from 'react';
 import GlassModal from '../components/GlassModal/GlassModal';
+import { showConfirmDialog } from '../components/ConfirmDialog/confirmDialog';
 import { updatePipelineStep } from '../api';
 
 export default function WizardModal({
@@ -29,6 +30,9 @@ export default function WizardModal({
     // user approved (→ background build owns the run) vs abandoned it.
     const runRef = useRef(null);
     const finishedRef = useRef(false);
+    // True while the discard-confirm dialog is showing, so a second backdrop
+    // click (or the X) can't stack a second prompt.
+    const confirmingRef = useRef(false);
     useEffect(() => { runRef.current = run; }, [run]);
 
     // Each open starts a BRAND-NEW run (the wrapper's bootstrap creates one —
@@ -118,10 +122,42 @@ export default function WizardModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [steps, goToStep, onFinish, onClose]);
 
+    // User-initiated close (backdrop click or the X — both route through
+    // GlassModal's onClose). Closing an unapproved run DISCARDS it: the [open]
+    // effect fires onAbandon, which deletes the run and its drafts server-side.
+    // So once the run is "dirty" — the user sent at least one chat message or
+    // progressed past the first step — confirm before throwing that work away.
+    // A freshly-bootstrapped run has nothing to lose and closes silently, and
+    // the programmatic close after Approve & Build never prompts: advance()
+    // calls the raw onClose, and finishedRef gates this handler regardless.
+    const requestClose = useCallback(async () => {
+        const r = runRef.current;
+        const firstKey = steps[0]?.key;
+        const pastFirstStep = !!r?.current_step && r.current_step !== firstKey;
+        const msgs = r?.steps?.[firstKey]?.data?.messages;
+        const hasChatted = Array.isArray(msgs) && msgs.some((m) => m?.role === 'user');
+        const dirty = !!r && !finishedRef.current && (pastFirstStep || hasChatted);
+        if (!dirty) { onClose?.(); return; }
+        if (confirmingRef.current) return; // a confirm is already showing
+        confirmingRef.current = true;
+        try {
+            const ok = await showConfirmDialog({
+                title: 'Discard this run?',
+                message: 'Closing now discards the conversation and anything the wizard drafted so far. Runs cannot be resumed later.',
+                confirmText: 'Discard',
+                cancelText: 'Keep working',
+                variant: 'warning',
+            });
+            if (ok) onClose?.();
+        } finally {
+            confirmingRef.current = false;
+        }
+    }, [steps, onClose]);
+
     const ActiveStep = run ? stepComponents[run.current_step] : null;
 
     return (
-        <GlassModal isOpen={open} onClose={onClose} title={title} size="wide">
+        <GlassModal isOpen={open} onClose={requestClose} title={title} size="wide">
             {loading && <div style={{ padding: 20, color: '#cbd5e1' }}>Loading…</div>}
             {error && <div style={{ padding: 20, color: '#fca5a5' }}>{error}</div>}
             {!loading && !error && ActiveStep && (
