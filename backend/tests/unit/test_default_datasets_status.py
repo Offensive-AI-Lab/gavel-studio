@@ -205,6 +205,172 @@ class TestRuleDefaultsStatus:
 
 
 # ---------------------------------------------------------------------------
+# rule_defaults_status — failure reasons (generation_log surfaced as `error`)
+# ---------------------------------------------------------------------------
+
+
+class TestRuleDefaultsStatusErrorReason:
+    def test_errored_bucket_carries_its_generation_log_reason(self, monkeypatch):
+        rows = [
+            {"dataset_id": 1, "dataset_type": "positive", "status": "ready",
+             "generation_log": "Completed: 100 positive conversations"},
+            {"dataset_id": 2, "dataset_type": "negative", "status": "error",
+             "generation_log": "negative config generation failed: LLM quota exceeded"},
+            {"dataset_id": 3, "dataset_type": "positive_calibration", "status": "ready",
+             "generation_log": None},
+        ]
+        _patch_query_dict(monkeypatch, rows)
+        result = dd.rule_defaults_status(7)
+        assert result["state"] == "error"
+        # Rolled-up top-level reason names the bucket + its log message.
+        assert result["error"] == (
+            "negative: negative config generation failed: LLM quota exceeded"
+        )
+        # The errored entry carries the raw reason; ready entries don't.
+        neg = next(d for d in result["datasets"] if d["dataset_type"] == "negative")
+        assert neg["error"] == "negative config generation failed: LLM quota exceeded"
+        for d in result["datasets"]:
+            if d["dataset_type"] != "negative":
+                assert "error" not in d
+
+    def test_no_error_fields_when_nothing_errored(self, monkeypatch):
+        rows = [
+            {"dataset_id": 1, "dataset_type": "positive", "status": "ready",
+             "generation_log": "Completed: 100 positive conversations"},
+            {"dataset_id": 2, "dataset_type": "negative", "status": "generating",
+             "generation_log": "Generated 3/100 conversations"},
+        ]
+        _patch_query_dict(monkeypatch, rows)
+        result = dd.rule_defaults_status(7)
+        assert "error" not in result
+        assert all("error" not in d for d in result["datasets"])
+
+    def test_multiple_errored_buckets_join_reasons(self, monkeypatch):
+        rows = [
+            {"dataset_id": 1, "dataset_type": "positive", "status": "error",
+             "generation_log": "boom A"},
+            {"dataset_id": 2, "dataset_type": "negative", "status": "error",
+             "generation_log": "boom B"},
+        ]
+        _patch_query_dict(monkeypatch, rows)
+        result = dd.rule_defaults_status(7)
+        assert result["error"] == "positive: boom A; negative: boom B"
+
+    def test_error_reason_falls_back_when_log_missing(self, monkeypatch):
+        # An errored row with no generation_log still yields a usable message.
+        rows = [
+            {"dataset_id": 1, "dataset_type": "positive", "status": "error",
+             "generation_log": None},
+        ]
+        _patch_query_dict(monkeypatch, rows)
+        result = dd.rule_defaults_status(7)
+        assert result["error"] == "positive: generation failed"
+        assert result["datasets"][0]["error"] == "generation failed"
+
+
+# ---------------------------------------------------------------------------
+# _run_rule_defaults — failure reveal (rule never stranded is_ready=FALSE)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingSeams:
+    """Bundles the DB/helper seams _run_rule_defaults writes through."""
+
+    def __init__(self):
+        self.errors = []      # (dataset_id, message) from _mark_row_error
+        self.queries = []     # (sql, params) from execute_query
+
+    def install(self, monkeypatch):
+        monkeypatch.setattr(
+            dd, "_upsert_default_row",
+            lambda rule_id, dtype, cfg: {"positive": 1, "positive_calibration": 2, "negative": 3}[dtype],
+        )
+        monkeypatch.setattr(dd, "_mark_row_error", lambda did, msg: self.errors.append((did, msg)))
+        monkeypatch.setattr(dd, "execute_query", lambda sql, params=None: self.queries.append((sql, params)))
+        return self
+
+    def rule_flipped(self):
+        return any("UPDATE rules SET is_ready = TRUE" in sql for sql, _ in self.queries)
+
+    def ces_flipped(self):
+        return any("cognitive_elements SET is_ready = TRUE" in sql for sql, _ in self.queries)
+
+
+@pytest.fixture
+def fake_ai_pipeline(monkeypatch):
+    """Inject a lightweight stand-in for routes.ai_pipeline so
+    _run_rule_defaults' lazy `from routes.ai_pipeline import ...` never pulls
+    the real (heavy, LLM-calling) module. Tests override the attributes."""
+    import sys
+    import types
+
+    mod = types.ModuleType("routes.ai_pipeline")
+    mod.build_positive_config = lambda scenario: {"scenario_instructions": scenario}
+    mod.build_negative_config = lambda pos: ({"scenario_instructions": "neg"}, "reasoning")
+    mod._run_test_generation = lambda dataset_id, config, count, dtype: None
+    monkeypatch.setitem(sys.modules, "routes.ai_pipeline", mod)
+    return mod
+
+
+class TestRunRuleDefaultsFailureReveal:
+    def test_positive_config_failure_marks_all_buckets_and_reveals(
+        self, monkeypatch, fake_ai_pipeline
+    ):
+        def boom(scenario):
+            raise RuntimeError("LLM down")
+
+        fake_ai_pipeline.build_positive_config = boom
+        seams = _RecordingSeams().install(monkeypatch)
+
+        dd._run_rule_defaults(7, "scenario", 5, 3, finalize_ce_ids=[41, 42])
+
+        # All three buckets carry the failure reason...
+        assert {did for did, _ in seams.errors} == {1, 2, 3}
+        assert all("LLM down" in msg for _, msg in seams.errors)
+        # ...and the rule + its deferred CEs are revealed, not stranded hidden.
+        assert seams.rule_flipped()
+        assert seams.ces_flipped()
+
+    def test_bucket_failure_reveals_rule_even_without_finalize_ids(
+        self, monkeypatch, fake_ai_pipeline
+    ):
+        # Manual build-from-CEs path: finalize_ce_ids is None (the frontend
+        # owns the success-finalize, but it never runs on failure). A bucket
+        # error must still flip the rule visible.
+        seams = _RecordingSeams().install(monkeypatch)
+        monkeypatch.setattr(dd, "rule_defaults_status", lambda rid: {"state": "error"})
+
+        dd._run_rule_defaults(7, "scenario", 5, 3, finalize_ce_ids=None)
+
+        assert seams.rule_flipped()
+        assert not seams.ces_flipped()  # no deferred CEs in this path
+
+    def test_success_without_finalize_ids_does_not_flip(
+        self, monkeypatch, fake_ai_pipeline
+    ):
+        # Contract preserved: on SUCCESS the manual path's reveal is owned by
+        # the frontend finalize (embed + flip), not this thread.
+        seams = _RecordingSeams().install(monkeypatch)
+        monkeypatch.setattr(dd, "rule_defaults_status", lambda rid: {"state": "ready"})
+
+        dd._run_rule_defaults(7, "scenario", 5, 3, finalize_ce_ids=None)
+
+        assert not seams.rule_flipped()
+        assert not seams.ces_flipped()
+
+    def test_success_with_finalize_ids_flips_rule_and_ces(
+        self, monkeypatch, fake_ai_pipeline
+    ):
+        seams = _RecordingSeams().install(monkeypatch)
+        monkeypatch.setattr(dd, "rule_defaults_status", lambda rid: {"state": "ready"})
+
+        dd._run_rule_defaults(7, "scenario", 5, 3, finalize_ce_ids=[9])
+
+        assert seams.rule_flipped()
+        assert seams.ces_flipped()
+
+
+# ---------------------------------------------------------------------------
 # generate_rule_defaults — input guard, immediate return, thread spawn
 # ---------------------------------------------------------------------------
 

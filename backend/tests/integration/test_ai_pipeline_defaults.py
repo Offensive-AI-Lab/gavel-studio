@@ -44,7 +44,8 @@ def _insert_draft_rule(name: str) -> int:
     return rows[0]["rule_id"]
 
 
-def _insert_default_dataset(rule_id: int, dataset_type: str, status: str) -> int:
+def _insert_default_dataset(rule_id: int, dataset_type: str, status: str,
+                            generation_log: str = None) -> int:
     """Insert a default (is_default=TRUE, user_id NULL) test_datasets row in a
     given status, so we can drive the rolled-up status state machine without
     running generation. Tracked table -> auto-cleaned."""
@@ -52,11 +53,13 @@ def _insert_default_dataset(rule_id: int, dataset_type: str, status: str) -> int
     rows = execute_query_dict(
         """
         INSERT INTO test_datasets
-            (rule_id, user_id, is_default, dataset_type, scenario_name, config, status)
-        VALUES (%s, NULL, TRUE, %s, %s, %s::jsonb, %s)
+            (rule_id, user_id, is_default, dataset_type, scenario_name, config, status,
+             generation_log)
+        VALUES (%s, NULL, TRUE, %s, %s, %s::jsonb, %s, %s)
         RETURNING dataset_id
         """,
-        (rule_id, dataset_type, "Test Set", json.dumps({"scenario_instructions": "x"}), status),
+        (rule_id, dataset_type, "Test Set", json.dumps({"scenario_instructions": "x"}),
+         status, generation_log),
     )
     return rows[0]["dataset_id"]
 
@@ -192,6 +195,65 @@ class TestDefaultsStatus:
     def test_status_no_auth_is_allowed(self, client):
         res = client.get("/ai/rules/1/defaults/status")
         assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
+
+
+# ---------------------------------------------------------------------------
+# Failure handling: the status payload carries WHY a bucket failed, and a
+# failed generation reveals the rule (is_ready=TRUE) instead of stranding it
+# hidden (where boot-time crash recovery would silently delete it).
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultsFailureRevealAndReason:
+    def test_status_carries_per_bucket_error_reason(self, client, auth_headers):
+        rule_id = _insert_draft_rule(f"failreason_{int(time.time())}_{id(self)}")
+        _insert_default_dataset(rule_id, "positive", "ready",
+                                generation_log="Completed: 100 positive conversations")
+        _insert_default_dataset(rule_id, "negative", "error",
+                                generation_log="negative config generation failed: LLM quota exceeded")
+        res = client.get(f"/ai/rules/{rule_id}/defaults/status", headers=auth_headers)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["state"] == "error"
+        # Rolled-up reason names the bucket + its failure message.
+        assert data["error"] == "negative: negative config generation failed: LLM quota exceeded"
+        by_type = {d["dataset_type"]: d for d in data["datasets"]}
+        assert by_type["negative"]["error"] == "negative config generation failed: LLM quota exceeded"
+        # Non-errored buckets don't grow an error field.
+        assert "error" not in by_type["positive"]
+
+    def test_failed_generation_reveals_rule_with_reason(self, client, auth_headers, monkeypatch):
+        # Simulate the real failure mode: the generation thread's first LLM
+        # call (build_positive_config) blows up. Run the thread body
+        # synchronously so we can assert its terminal effects.
+        import routes.ai_pipeline as ai_pipeline
+        from services.default_datasets import _run_rule_defaults
+        from utils.sqlite_db import execute_query_dict
+
+        def boom(scenario):
+            raise RuntimeError("LLM exploded mid-config")
+
+        monkeypatch.setattr(ai_pipeline, "build_positive_config", boom)
+
+        rule_id = _insert_draft_rule(f"failreveal_{int(time.time())}_{id(self)}")
+        rows = execute_query_dict("SELECT is_ready FROM rules WHERE rule_id = %s", (rule_id,))
+        assert not rows[0]["is_ready"]  # starts hidden
+
+        _run_rule_defaults(rule_id, "some scenario", 5, 3, finalize_ce_ids=None)
+
+        # The rule is REVEALED despite the failure — it lands in Drafts
+        # instead of being wiped by crash recovery on next boot.
+        rows = execute_query_dict("SELECT is_ready FROM rules WHERE rule_id = %s", (rule_id,))
+        assert bool(rows[0]["is_ready"]) is True
+
+        # And the status endpoint reports the reason for every bucket.
+        res = client.get(f"/ai/rules/{rule_id}/defaults/status", headers=auth_headers)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["state"] == "error"
+        assert "LLM exploded mid-config" in data["error"]
+        assert len(data["datasets"]) == 3
+        assert all("LLM exploded mid-config" in d["error"] for d in data["datasets"])
 
 
 # ---------------------------------------------------------------------------

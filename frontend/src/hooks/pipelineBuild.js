@@ -63,15 +63,27 @@ export function buildRuleInBackground(tray, { run, userId }) {
             // for it here so the tray "ready" matches when the rule appears.
             update({ subtitle: 'Generating the rule’s test & calibration set…' });
             await embedResources({ ruleId, ceIds, userId, classifierId: null, scenario });
+            let setFailure = null;
             for (let i = 0; i < 900; i += 1) { // ~30 min ceiling
-                let state;
-                try { state = (await getRuleDefaultsStatus(ruleId)).data?.state; }
-                catch { state = 'ready'; } // status unavailable → don't hang the tray
-                if (state === 'ready' || state === 'error') break;
+                let data;
+                try { data = (await getRuleDefaultsStatus(ruleId)).data; }
+                catch { break; } // status unavailable → don't hang the tray
+                if (data?.state === 'ready') break;
+                if (data?.state === 'error') {
+                    // Per-bucket failure reason reported by the status endpoint.
+                    // The backend reveals the failed rule, so it IS in Drafts.
+                    setFailure = data?.error || 'Generation failed for one or more sets.';
+                    break;
+                }
                 await sleep(2000);
             }
             update({ subtitle: 'Finalizing…' });
             try { await completePipelineRun(run.run_id); } catch { /* best-effort */ }
+            if (setFailure) {
+                throw new Error(
+                    `Test & calibration set failed: ${setFailure} — the rule was still saved to your Drafts; open it and use Edit to rebuild it with fresh sets.`,
+                );
+            }
         },
     });
     return true;

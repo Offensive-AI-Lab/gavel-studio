@@ -68,14 +68,32 @@ describe('Step1Scenario — bootstrap', () => {
         expect(startScenarioChat).not.toHaveBeenCalled();
     });
 
-    it('logs an error and does not crash when startScenarioChat rejects', async () => {
-        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    it('shows an error banner and does not crash when startScenarioChat rejects', async () => {
         startScenarioChat.mockRejectedValueOnce(new Error('boom'));
         setup();
-        await waitFor(() => expect(errSpy).toHaveBeenCalledWith('Start chat failed:', expect.any(Error)));
-        // Header still present.
+        // The failure is surfaced to the user, not just the console.
+        expect(await screen.findByText('boom')).toBeInTheDocument();
+        // Header still present; Restart remains available as the retry path.
         expect(screen.getByText('Scenario Chat')).toBeInTheDocument();
-        errSpy.mockRestore();
+        expect(screen.getByText('Restart')).toBeInTheDocument();
+    });
+
+    it('shows the backend detail when startScenarioChat rejects with an axios-style error', async () => {
+        startScenarioChat.mockRejectedValueOnce({
+            response: { data: { detail: 'LLM error: AuthenticationError - no api key' } },
+        });
+        setup();
+        expect(await screen.findByText('LLM error: AuthenticationError - no api key')).toBeInTheDocument();
+    });
+
+    it('Restart clears a bootstrap error and starts a fresh session', async () => {
+        startScenarioChat.mockRejectedValueOnce(new Error('boom'));
+        setup();
+        await screen.findByText('boom');
+        // Second attempt (via Restart) succeeds — banner goes away.
+        fireEvent.click(screen.getByText('Restart'));
+        expect(await screen.findByText('Hi, describe your scenario')).toBeInTheDocument();
+        expect(screen.queryByText('boom')).not.toBeInTheDocument();
     });
 });
 
@@ -158,20 +176,62 @@ describe('Step1Scenario — sending messages', () => {
         expect(sendScenarioChatMessage).not.toHaveBeenCalled();
     });
 
-    it('logs an error and re-enables sending when sendScenarioChatMessage rejects', async () => {
-        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    it('shows an error banner and re-enables sending when sendScenarioChatMessage rejects', async () => {
         sendScenarioChatMessage.mockRejectedValueOnce(new Error('net'));
         setup();
         await screen.findByText('Hi, describe your scenario');
         const input = screen.getByPlaceholderText(/Describe the misuse/i);
         fireEvent.change(input, { target: { value: 'will fail' } });
         fireEvent.keyDown(input, { key: 'Enter' });
-        await waitFor(() => expect(errSpy).toHaveBeenCalledWith('Chat send failed:', expect.any(Error)));
+        // The failure is visible to the user.
+        expect(await screen.findByText('net')).toBeInTheDocument();
         // user bubble still shown
         expect(screen.getByText('will fail')).toBeInTheDocument();
-        // input re-enabled (sending reset to false)
+        // input re-enabled (sending reset to false) — the failure is non-blocking
         await waitFor(() => expect(input).not.toBeDisabled());
-        errSpy.mockRestore();
+    });
+
+    it('shows the backend detail in the banner when the send fails with an axios-style error', async () => {
+        sendScenarioChatMessage.mockRejectedValueOnce({
+            response: { data: { detail: 'LLM error: AuthenticationError - The api_key client option must be set' } },
+        });
+        setup();
+        await screen.findByText('Hi, describe your scenario');
+        const input = screen.getByPlaceholderText(/Describe the misuse/i);
+        fireEvent.change(input, { target: { value: 'will fail' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+        expect(await screen.findByText('LLM error: AuthenticationError - The api_key client option must be set')).toBeInTheDocument();
+    });
+
+    it('clears the error banner when the next send attempt starts', async () => {
+        sendScenarioChatMessage.mockRejectedValueOnce({
+            response: { data: { detail: 'LLM error: transient' } },
+        });
+        setup();
+        await screen.findByText('Hi, describe your scenario');
+        const input = screen.getByPlaceholderText(/Describe the misuse/i);
+        fireEvent.change(input, { target: { value: 'first try' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+        await screen.findByText('LLM error: transient');
+        // Retry with the default (successful) mock — the banner goes away.
+        fireEvent.change(input, { target: { value: 'second try' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+        expect(await screen.findByText('Tell me more')).toBeInTheDocument();
+        expect(screen.queryByText('LLM error: transient')).not.toBeInTheDocument();
+    });
+
+    it('shows a Thinking… indicator while a send is in flight and hides it after', async () => {
+        let resolveReply;
+        sendScenarioChatMessage.mockReturnValueOnce(new Promise((res) => { resolveReply = res; }));
+        setup();
+        await screen.findByText('Hi, describe your scenario');
+        const input = screen.getByPlaceholderText(/Describe the misuse/i);
+        fireEvent.change(input, { target: { value: 'slow one' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+        expect(await screen.findByText('Thinking…')).toBeInTheDocument();
+        resolveReply({ data: { message: 'finally', is_final: false } });
+        expect(await screen.findByText('finally')).toBeInTheDocument();
+        await waitFor(() => expect(screen.queryByText('Thinking…')).not.toBeInTheDocument());
     });
 });
 

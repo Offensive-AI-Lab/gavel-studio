@@ -14,7 +14,12 @@
 //
 // `job` receives an `update(patch)` fn to push live subtitle/progress to the
 // chip. Throwing inside `job` flips the chip to error with the message.
-export function runInTray(tray, { kind = 'generic', title, runningSubtitle, successTitle, successSubtitle, job, onSuccess, onError } = {}) {
+//
+// `errorOnOpen(e)` (optional) makes the red error chip CLICKABLE: it becomes
+// the chip's onOpen handler, called with the thrown error. Use it to show the
+// full failure reason (the chip subtitle is one ellipsized line) and/or offer
+// a retry. Without it the error chip is display-only, as before.
+export function runInTray(tray, { kind = 'generic', title, runningSubtitle, successTitle, successSubtitle, job, onSuccess, onError, errorOnOpen } = {}) {
     const task = tray.start({ kind, title, subtitle: runningSubtitle || 'Running in the background…' });
     (async () => {
         try {
@@ -23,7 +28,9 @@ export function runInTray(tray, { kind = 'generic', title, runningSubtitle, succ
             onSuccess?.(result);
         } catch (e) {
             const msg = e?.response?.data?.detail || e?.message || 'Failed';
-            task.error({ title, subtitle: msg });
+            const patch = { title, subtitle: msg };
+            if (errorOnOpen) patch.onOpen = () => errorOnOpen(e);
+            task.error(patch);
             onError?.(e);
         }
     })();

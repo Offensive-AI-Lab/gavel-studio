@@ -4,6 +4,7 @@ import ReactiveButton from '../ReactiveButton/ReactiveButton';
 import { deriveScenario, generateRuleDefaults, getRuleDefaultsStatus } from '../../api';
 import { useTaskTray } from '../../contexts/TaskTrayContext';
 import { runInTray, sleep } from '../../hooks/runInTray';
+import { showConfirmDialog, escapeHtml } from '../ConfirmDialog/confirmDialog';
 
 // Final step for a freshly-created rule: derive a misuse scenario from the
 // rule's CEs/roles, let the user review/edit it, then kick off generation of
@@ -15,6 +16,40 @@ import { runInTray, sleep } from '../../hooks/runInTray';
 // navigate away without making the user wait), but the rule itself stays HIDDEN
 // — `finalize` (which flips is_ready=TRUE) is invoked by the job ONLY after the
 // sets finish, so the rule never appears in Drafts/Browse half-built.
+//
+// FAILURE: if generation errors, the backend reveals the rule anyway (so it
+// lands in Drafts instead of being silently wiped) and the status endpoint
+// reports the per-bucket reason. The error chip shows that reason, and
+// clicking it opens a dialog with the full message + a Retry that re-runs
+// the generation for the same rule (the backend upsert is idempotent).
+
+// Turn a deriveScenario failure into a message that names the real cause.
+// The failure stays soft either way — the user can type a scenario manually.
+function describeDeriveError(err) {
+    const detail = err?.response?.data?.detail || '';
+    if (err?.response?.status === 503 || /OPENAI_API_KEY/i.test(detail)) {
+        return 'Could not auto-write a scenario — the backend has no OpenAI key. '
+            + 'Add OPENAI_API_KEY to backend/.env and restart the backend, '
+            + 'or describe the misuse this rule should catch below.';
+    }
+    if (!err?.response) {
+        return 'Could not auto-write a scenario — the backend is unreachable. '
+            + 'Describe the misuse this rule should catch below.';
+    }
+    // Anything else: an invalid key, a rate limit, a provider outage, a
+    // timeout. The backend passes the provider's own message through as the
+    // detail, so show it verbatim rather than inventing a vaguer summary —
+    // "could not auto-write a scenario" with no reason is the original bug.
+    if (detail) {
+        return `Could not auto-write a scenario — ${detail} `
+            + 'Describe the misuse this rule should catch below.';
+    }
+    // No detail at all (a bare 500, a proxy error page): say so honestly and
+    // point at the backend log rather than implying we know the cause.
+    return `Could not auto-write a scenario — the backend returned ${err.response.status} `
+        + 'with no reason (check the backend log). '
+        + 'Describe the misuse this rule should catch below.';
+}
 
 export default function RuleDefaultsStep({ ruleId, onDone, finalize }) {
     const tray = useTaskTray();
@@ -30,9 +65,17 @@ export default function RuleDefaultsStep({ ruleId, onDone, finalize }) {
         (async () => {
             try {
                 const res = await deriveScenario(ruleId);
-                if (!cancelled) setScenario(res.data?.scenario || '');
-            } catch {
-                if (!cancelled) setDeriveError('Could not auto-write a scenario — describe the misuse this rule should catch below.');
+                if (!cancelled) {
+                    const derived = res.data?.scenario || '';
+                    setScenario(derived);
+                    // Success with nothing in it would render as a silent empty
+                    // box — surface it as the same soft warning instead.
+                    if (!derived.trim()) {
+                        setDeriveError('The auto-writer returned an empty scenario — describe the misuse this rule should catch below.');
+                    }
+                }
+            } catch (err) {
+                if (!cancelled) setDeriveError(describeDeriveError(err));
             } finally {
                 if (!cancelled) setDeriving(false);
             }
@@ -40,14 +83,13 @@ export default function RuleDefaultsStep({ ruleId, onDone, finalize }) {
         return () => { cancelled = true; };
     }, [ruleId]);
 
-    const handleGenerate = () => {
-        if (!scenario.trim()) { setError('Write a scenario first.'); return; }
-        setError('');
-        const instructions = scenario.trim();
-
-        // Kick the generation into the background tray task. The user can leave;
-        // the chip (top-right) tracks the three buckets and reports when ready.
-        runInTray(tray, {
+    // Kick the generation into the background tray task. The user can leave;
+    // the chip (top-right) tracks the three buckets and reports when ready.
+    // Extracted from handleGenerate so the failed chip's dialog can offer a
+    // Retry that re-runs the exact same job (the backend's generate-defaults
+    // is an idempotent per-bucket upsert, so re-running just resets the sets).
+    const startGenerationJob = (instructions) => {
+        const task = runInTray(tray, {
             kind: 'rule',
             title: 'Generating test & calibration set',
             runningSubtitle: 'Positive · negative · calibration dialogues…',
@@ -60,7 +102,15 @@ export default function RuleDefaultsStep({ ruleId, onDone, finalize }) {
                     const res = await getRuleDefaultsStatus(ruleId);
                     const st = res.data?.state;
                     if (st === 'ready') break;
-                    if (st === 'error') throw new Error('Generation failed for one or more sets.');
+                    if (st === 'error') {
+                        // The backend reveals the failed rule (it lands in
+                        // Drafts) and reports the per-bucket failure reason —
+                        // put that reason on the chip, not a bare "failed".
+                        const reason = res.data?.error || 'Generation failed for one or more sets.';
+                        const err = new Error(`${reason} — the rule was saved to Drafts. Click for details & retry.`);
+                        err.ruleRevealed = true;
+                        throw err;
+                    }
                     const ready = (res.data?.datasets || []).filter(d => d.status === 'ready').length;
                     update({ subtitle: `${ready}/3 sets ready…` });
                 }
@@ -72,7 +122,33 @@ export default function RuleDefaultsStep({ ruleId, onDone, finalize }) {
                     await finalize();
                 }
             },
+            // Clicking the failed chip shows the FULL reason (the chip subtitle
+            // is one ellipsized line) and offers a direct retry; declining just
+            // leaves the chip in the tray.
+            errorOnOpen: async (err) => {
+                const reason = err?.response?.data?.detail || err?.message || 'Generation failed.';
+                const retry = await showConfirmDialog({
+                    title: 'Test & calibration set failed',
+                    messageHtml: `${escapeHtml(reason)}<br/><br/>${err?.ruleRevealed
+                        ? 'The rule itself was saved — it’s in your <strong>Drafts</strong>. Retry the generation now, or open the rule later and use <strong>Edit</strong> to rebuild it as a fresh draft.'
+                        : 'You can retry the generation now.'}`,
+                    confirmText: 'Retry generation',
+                    cancelText: 'Not now',
+                    variant: 'warning',
+                });
+                if (retry) {
+                    task.close();
+                    startGenerationJob(instructions);
+                }
+            },
         });
+        return task;
+    };
+
+    const handleGenerate = () => {
+        if (!scenario.trim()) { setError('Write a scenario first.'); return; }
+        setError('');
+        startGenerationJob(scenario.trim());
 
         // Don't block — let the wizard/page move on immediately.
         onDone();

@@ -9,13 +9,13 @@
 // On `is_final` the wizard saves description + name to step.data and
 // the user can advance. Step 2A reads description from this step's data.
 import { useState, useEffect, useRef } from 'react';
-import { FiSend, FiCheckCircle, FiRefreshCw } from 'react-icons/fi';
+import { FiSend, FiCheckCircle, FiRefreshCw, FiAlertTriangle } from 'react-icons/fi';
 import { startScenarioChat, sendScenarioChatMessage } from '../../api';
 import InlineHelp from '../../components/InlineHelp/InlineHelp';
 import { automatedPipeline } from '../../components/InlineHelp/instructorHelp';
 import {
     getStepState, startStep, completeStep,
-    card, primaryBtn, secondaryBtn, fieldStyle, successBanner, muted,
+    card, primaryBtn, secondaryBtn, fieldStyle, successBanner, errorBanner, muted,
 } from './wizardShared';
 
 
@@ -27,6 +27,7 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
     const [messages, setMessages] = useState(data.messages || []);
     const [input, setInput] = useState('');
     const [sending, setSending] = useState(false);
+    const [error, setError] = useState(null);
     const [finalized, setFinalized] = useState(state.status === 'completed');
     const [scenario, setScenario] = useState(data.description || '');
     const [name, setName] = useState(data.name || '');
@@ -48,7 +49,9 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
                 setMessages(initialMessages);
                 startStep(onPatchStep, '1', { session_id: sid, messages: initialMessages });
             } catch (err) {
-                console.error('Start chat failed:', err);
+                // Surface the failure (e.g. missing OPENAI_API_KEY) — Restart
+                // is the retry path for a failed bootstrap.
+                if (!cancelled) setError(err?.response?.data?.detail || err.message);
             }
         })();
         return () => { cancelled = true; };
@@ -72,6 +75,7 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
         const text = input.trim();
         if (!text || !sessionId || sending) return;
         setSending(true);
+        setError(null);
         const newMessages = [...messages, { role: 'user', content: text }];
         setMessages(newMessages);
         setInput('');
@@ -120,7 +124,9 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
                 await onAdvance?.();
             }
         } catch (err) {
-            console.error('Chat send failed:', err);
+            // Non-blocking: the banner shows the backend detail (e.g.
+            // "LLM error: ...") and the input stays usable for a retry.
+            setError(err?.response?.data?.detail || err.message);
         } finally {
             setSending(false);
         }
@@ -141,16 +147,22 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
     const reset = async () => {
         setSessionId(null); setMessages([]); setInput('');
         setFinalized(false); setScenario(''); setName('');
-        const res = await startScenarioChat();
-        const sid = res.data.session_id;
-        const initial = res.data.message;
-        const initialMessages = [{ role: 'assistant', content: initial }];
-        setSessionId(sid);
-        setMessages(initialMessages);
-        await onPatchStep('1', {
-            status: 'in_progress',
-            data: { session_id: sid, messages: initialMessages, description: '', name: '' },
-        });
+        setError(null);
+        try {
+            const res = await startScenarioChat();
+            const sid = res.data.session_id;
+            const initial = res.data.message;
+            const initialMessages = [{ role: 'assistant', content: initial }];
+            setSessionId(sid);
+            setMessages(initialMessages);
+            await onPatchStep('1', {
+                status: 'in_progress',
+                data: { session_id: sid, messages: initialMessages, description: '', name: '' },
+            });
+        } catch (err) {
+            // Restart doubles as the bootstrap retry — show why it failed.
+            setError(err?.response?.data?.detail || err.message);
+        }
     };
 
     return (
@@ -196,6 +208,9 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
                             </div>
                         );
                     })}
+                    {sending && (
+                        <div style={{ alignSelf: 'flex-start', ...muted, fontSize: 13, padding: '4px 8px' }}>Thinking…</div>
+                    )}
                 </div>
                 {!finalized && (
                     <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
@@ -214,6 +229,8 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
                     </div>
                 )}
             </div>
+
+            {error && <div style={card}><div style={errorBanner}><FiAlertTriangle /> {error}</div></div>}
 
             {finalized && (
                 <div style={card}>

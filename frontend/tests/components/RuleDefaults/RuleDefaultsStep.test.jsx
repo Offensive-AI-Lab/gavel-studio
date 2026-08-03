@@ -27,20 +27,26 @@ vi.mock('sweetalert2', () => ({
     default: { fire: vi.fn(() => Promise.resolve({ isConfirmed: false })) },
 }));
 
+import Swal from 'sweetalert2';
 import RuleDefaultsStep from '../../../src/components/RuleDefaults/RuleDefaultsStep';
 import { useTaskTray } from '../../../src/contexts/TaskTrayContext';
 import { deriveScenario, generateRuleDefaults, getRuleDefaultsStatus } from '../../../src/api';
 
 // TaskTrayProvider only provides context — it does NOT render the chip UI.
 // This probe surfaces the in-memory task list so tests can assert on the
-// background job's lifecycle (title / subtitle / status).
+// background job's lifecycle (title / subtitle / status). It also mirrors the
+// real TaskTray's click affordance: a chip with an openHandler gets an "open"
+// button that calls tray.open(id) — how the error chip's dialog is reached.
 function TrayProbe() {
-    const { tasks } = useTaskTray();
+    const { tasks, open } = useTaskTray();
     return (
         <ul data-testid="tray-probe">
             {tasks.map((t) => (
-                <li key={t.id} data-status={t.status}>
+                <li key={t.id} data-status={t.status} data-has-open={t.openHandler ? 'yes' : 'no'}>
                     {t.title} :: {t.subtitle} :: {t.status}
+                    {t.openHandler && (
+                        <button data-testid="chip-open" onClick={() => open(t.id)}>open</button>
+                    )}
                 </li>
             ))}
         </ul>
@@ -137,6 +143,72 @@ describe('RuleDefaultsStep — initial render & derive', () => {
         expect(textarea).toHaveValue('');
         // Loading row gone.
         expect(screen.queryByText(/Analyzing the rule/i)).toBeNull();
+    });
+
+    it('names the missing OpenAI key when derive fails with the backend 503 key error', async () => {
+        deriveScenario.mockRejectedValue({
+            response: {
+                status: 503,
+                data: { detail: 'OPENAI_API_KEY is not configured. Add it to backend/.env and restart the backend.' },
+            },
+        });
+
+        renderStep();
+
+        const warning = await screen.findByText(/Could not auto-write a scenario/i);
+        expect(warning).toHaveTextContent(/OpenAI key/i);
+        expect(warning).toHaveTextContent(/OPENAI_API_KEY/);
+        expect(warning).toHaveTextContent(/backend\/\.env/);
+        // Manual-typing path stays available.
+        expect(screen.getByPlaceholderText(/Describe the misuse/i)).toHaveValue('');
+    });
+
+    it('shows the key guidance when a non-503 error detail mentions OPENAI_API_KEY', async () => {
+        // litellm auth failures surface as 500 with the key name in the detail.
+        deriveScenario.mockRejectedValue({
+            response: {
+                status: 500,
+                data: { detail: 'Scenario derivation failed: AuthenticationError - set OPENAI_API_KEY' },
+            },
+        });
+
+        renderStep();
+
+        const warning = await screen.findByText(/Could not auto-write a scenario/i);
+        expect(warning).toHaveTextContent(/OpenAI key/i);
+    });
+
+    it('says the backend is unreachable when derive fails without a response', async () => {
+        // axios network error: no err.response at all.
+        deriveScenario.mockRejectedValue(new Error('Network Error'));
+
+        renderStep();
+
+        const warning = await screen.findByText(/Could not auto-write a scenario/i);
+        expect(warning).toHaveTextContent(/backend is unreachable/i);
+        expect(screen.getByPlaceholderText(/Describe the misuse/i)).toHaveValue('');
+    });
+
+    it('includes the backend detail for other derive failures', async () => {
+        deriveScenario.mockRejectedValue({
+            response: { status: 500, data: { detail: 'scenario_deriver.md not found' } },
+        });
+
+        renderStep();
+
+        const warning = await screen.findByText(/Could not auto-write a scenario/i);
+        expect(warning).toHaveTextContent(/scenario_deriver\.md not found/);
+    });
+
+    it('shows a soft warning instead of a silent empty box when derive returns an empty scenario', async () => {
+        deriveScenario.mockResolvedValue({ data: { scenario: '   ' } });
+
+        renderStep();
+
+        expect(await screen.findByText(/returned an empty scenario/i)).toBeInTheDocument();
+        // Textarea still editable; button stays disabled on whitespace-only.
+        expect(screen.getByPlaceholderText(/Describe the misuse/i)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Generate test/i })).toBeDisabled();
     });
 
     it('re-derives when ruleId changes', async () => {
@@ -338,6 +410,91 @@ describe('RuleDefaultsStep — generate flow (background tray job)', () => {
         expect(probe).toHaveTextContent('error');
     });
 
+    it('surfaces the backend-reported failure reason on the error chip and mentions Drafts', async () => {
+        vi.useFakeTimers();
+        deriveScenario.mockResolvedValue({ data: { scenario: 'scenario' } });
+        // Backend status now carries the per-bucket reason in `error`.
+        getRuleDefaultsStatus.mockResolvedValue({
+            data: { state: 'error', error: 'negative: LLM quota exceeded', datasets: [] },
+        });
+
+        renderStep({ ruleId: 5 });
+        await act(async () => { await Promise.resolve(); });
+
+        await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Generate test/i })); });
+        await act(async () => { await Promise.resolve(); });
+
+        await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+
+        const probe = screen.getByTestId('tray-probe');
+        // The WHY, not just "failed".
+        expect(probe).toHaveTextContent('negative: LLM quota exceeded');
+        // And where the rule went (it was revealed, not stranded).
+        expect(probe).toHaveTextContent(/saved to Drafts/i);
+        expect(probe).toHaveTextContent('error');
+        // The failed chip is clickable (has an openHandler → real tray makes it a button).
+        expect(probe.querySelector('li')).toHaveAttribute('data-has-open', 'yes');
+    });
+
+    it('clicking the failed chip and confirming the dialog retries the generation', async () => {
+        vi.useFakeTimers();
+        deriveScenario.mockResolvedValue({ data: { scenario: 'scenario' } });
+        getRuleDefaultsStatus
+            .mockResolvedValueOnce({ data: { state: 'error', error: 'positive: boom', datasets: [] } })
+            .mockResolvedValue({ data: { state: 'ready', datasets: [] } });
+        // The confirm dialog (Swal under the hood) resolves as CONFIRMED once.
+        Swal.fire.mockResolvedValueOnce({ isConfirmed: true });
+        const finalize = vi.fn(() => Promise.resolve());
+
+        renderStep({ ruleId: 5, finalize });
+        await act(async () => { await Promise.resolve(); });
+
+        await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Generate test/i })); });
+        await act(async () => { await Promise.resolve(); });
+
+        // First poll → error chip with the reason + an open affordance.
+        await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+        expect(screen.getByTestId('tray-probe')).toHaveTextContent('error');
+        expect(generateRuleDefaults).toHaveBeenCalledTimes(1);
+
+        // Click the chip → dialog confirmed → old chip closed, job re-started.
+        await act(async () => {
+            fireEvent.click(screen.getByTestId('chip-open'));
+            await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+        });
+        expect(generateRuleDefaults).toHaveBeenCalledTimes(2);
+        expect(generateRuleDefaults).toHaveBeenLastCalledWith(5, 'scenario');
+        // The retried job is running again (the errored chip was closed).
+        expect(screen.getByTestId('tray-probe')).toHaveTextContent('running');
+        expect(screen.getByTestId('tray-probe')).not.toHaveTextContent('error');
+
+        // Retry's poll reports ready → finalize runs → success chip.
+        await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+        expect(finalize).toHaveBeenCalledTimes(1);
+        expect(screen.getByTestId('tray-probe')).toHaveTextContent('success');
+    });
+
+    it('leaves the error chip in place when the retry dialog is declined', async () => {
+        vi.useFakeTimers();
+        deriveScenario.mockResolvedValue({ data: { scenario: 'scenario' } });
+        getRuleDefaultsStatus.mockResolvedValue({ data: { state: 'error', error: 'positive: boom', datasets: [] } });
+        // Default Swal mock resolves { isConfirmed: false } → decline.
+
+        renderStep({ ruleId: 5 });
+        await act(async () => { await Promise.resolve(); });
+        await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Generate test/i })); });
+        await act(async () => { await Promise.resolve(); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+
+        await act(async () => {
+            fireEvent.click(screen.getByTestId('chip-open'));
+            await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+        });
+        // No retry kicked off; the failed chip is still there for later.
+        expect(generateRuleDefaults).toHaveBeenCalledTimes(1);
+        expect(screen.getByTestId('tray-probe')).toHaveTextContent('error');
+    });
+
     it('flips the task to error (with backend detail) when generateRuleDefaults rejects', async () => {
         vi.useFakeTimers();
         deriveScenario.mockResolvedValue({ data: { scenario: 'scenario' } });
@@ -368,5 +525,28 @@ describe('RuleDefaultsStep — generate flow (background tray job)', () => {
         await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Generate test/i })); });
         expect(screen.queryByText('Write a scenario first.')).toBeNull();
         expect(onDone).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('RuleDefaultsStep — scenario auto-write shows the REAL reason', () => {
+    // #2B: a missing key is only one way this fails. An invalid key, a rate
+    // limit, a provider outage and a timeout all surface as the backend's
+    // detail — the message must carry it, not flatten everything into
+    // "could not auto-write a scenario".
+    it.each([
+        ['invalid key', 502, 'Scenario auto-write failed: AuthenticationError: Incorrect API key provided.'],
+        ['rate limit', 502, 'Scenario auto-write failed: RateLimitError: quota exceeded.'],
+        ['timeout', 502, 'Scenario auto-write failed: Request timed out.'],
+    ])('surfaces a %s failure verbatim', async (_label, status, detail) => {
+        deriveScenario.mockRejectedValue({ response: { status, data: { detail } } });
+        renderStep();
+        expect(await screen.findByText(new RegExp(detail.slice(0, 40).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')))
+            .toBeInTheDocument();
+    });
+
+    it('is honest when the backend gives no reason at all', async () => {
+        deriveScenario.mockRejectedValue({ response: { status: 500, data: {} } });
+        renderStep();
+        expect(await screen.findByText(/returned 500 with no reason/i)).toBeInTheDocument();
     });
 });
