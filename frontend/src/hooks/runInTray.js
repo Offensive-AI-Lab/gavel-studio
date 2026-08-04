@@ -19,6 +19,13 @@
 // the chip's onOpen handler, called with the thrown error. Use it to show the
 // full failure reason (the chip subtitle is one ellipsized line) and/or offer
 // a retry. Without it the error chip is display-only, as before.
+//
+// When the failure is the backend's missing-key error, the chip instead opens
+// the key modal — the job died in the background, so the user is usually no
+// longer on the page that started it. Saving the key then hands back to
+// `errorOnOpen` (the caller's own retry), if it has one.
+import { isOpenAiKeyMissing, promptForOpenAiKey } from '../components/OpenAiKeyModal/openAiKeyPrompt';
+
 export function runInTray(tray, { kind = 'generic', title, runningSubtitle, successTitle, successSubtitle, job, onSuccess, onError, errorOnOpen } = {}) {
     const task = tray.start({ kind, title, subtitle: runningSubtitle || 'Running in the background…' });
     (async () => {
@@ -27,9 +34,20 @@ export function runInTray(tray, { kind = 'generic', title, runningSubtitle, succ
             task.success({ title: successTitle || title, subtitle: successSubtitle || 'Done' });
             onSuccess?.(result);
         } catch (e) {
-            const msg = e?.response?.data?.detail || e?.message || 'Failed';
-            const patch = { title, subtitle: msg };
-            if (errorOnOpen) patch.onOpen = () => errorOnOpen(e);
+            const patch = { title };
+            if (isOpenAiKeyMissing(e)) {
+                patch.subtitle = 'No OpenAI key is set — click to add one.';
+                patch.onOpen = () => promptForOpenAiKey({
+                    onSaved: errorOnOpen ? () => errorOnOpen(e) : undefined,
+                });
+            } else {
+                const detail = e?.response?.data?.detail;
+                patch.subtitle = (typeof detail === 'string' && detail)
+                    || detail?.message
+                    || e?.message
+                    || 'Failed';
+                if (errorOnOpen) patch.onOpen = () => errorOnOpen(e);
+            }
             task.error(patch);
             onError?.(e);
         }

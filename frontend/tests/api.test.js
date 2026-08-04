@@ -13,6 +13,9 @@ const mocks = vi.hoisted(() => {
         post: vi.fn(),
         put: vi.fn(),
         delete: vi.fn(),
+        // api.js registers a response interceptor at import time (the
+        // missing-OpenAI-key modal hook) — see tests/api.openAiKey.test.js.
+        interceptors: { response: { use: vi.fn() } },
     };
     return { instance };
 });

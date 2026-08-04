@@ -47,6 +47,7 @@ from utils.embedding_utils import trigger_embedding
 from utils.auth import get_current_user
 from utils.ownership import require_classifier_owner
 from utils.text_safety import clean_text
+from utils import openai_key
 
 router = APIRouter()
 
@@ -377,6 +378,7 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
     4. Creates new CEs in database if o3 identifies gaps
     5. Identifies which new CEs need excitation datasets
     """
+    openai_key.require_key()
     # Initialized BEFORE the try so the rollback handlers below can always
     # reference it — a failure raised before any CE is created must surface
     # its real detail, not an UnboundLocalError from the except block.
@@ -384,8 +386,12 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
     try:
         # Call rule generation (delegates to the reference rule_generator)
         result = _generate_rule_from_scenario(request.scenario)
-        
+
         if not result['success']:
+            # The generator reports failure instead of raising, so the
+            # credential case has to be classified from its error text.
+            if openai_key.is_auth_error(result.get('error')):
+                raise openai_key.key_missing_error()
             raise HTTPException(
                 status_code=500,
                 detail=f"Rule generation failed: {result.get('error', 'unknown error')}"
@@ -657,6 +663,8 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
                 except Exception:
                     pass
             print(f"[!] [Pipeline] Rolled back {len(new_ces_info)} CEs from failed pipeline")
+        if openai_key.is_auth_error(e):
+            raise openai_key.key_missing_error()
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 class DiscardPipelineRequest(BaseModel):
@@ -757,6 +765,19 @@ async def embed_resources(req: EmbedResourcesRequest):
     Intended to be called after the user accepts/publishes a pipeline proposal.
     """
     try:
+        # The tail of this route derives a scenario and starts the rule's
+        # default set — both LLM work — but only for a rule that has no default
+        # set yet. A CE-only embed and a regeneration whose set already exists
+        # do no LLM work at all, so they must not be turned away for a missing
+        # key. Decided before anything is written, so a route that stops here
+        # leaves nothing behind.
+        defaults_state = None
+        if req.rule_id:
+            from services.default_datasets import rule_defaults_status
+            defaults_state = (rule_defaults_status(req.rule_id) or {}).get("state")
+            if defaults_state == "missing":
+                openai_key.require_key()
+
         embedded_ces = 0
         if req.ce_ids:
             placeholders = "%s," * len(req.ce_ids)
@@ -816,8 +837,8 @@ async def embed_resources(req: EmbedResourcesRequest):
                 )
 
         if req.rule_id:
-            from services.default_datasets import generate_rule_defaults, rule_defaults_status
-            if rule_defaults_status(req.rule_id).get("state") == "missing":
+            from services.default_datasets import generate_rule_defaults
+            if defaults_state == "missing":
                 scenario_text = (req.scenario or "").strip()
                 if not scenario_text:
                     scenario_text = _derive_scenario_from_rule(_load_rule_context(req.rule_id))
@@ -841,7 +862,13 @@ async def embed_resources(req: EmbedResourcesRequest):
             "embedded_ces": embedded_ces,
             "embedded_rule": embedded_rule,
         }
+    except HTTPException:
+        # Scenario derivation runs in here and can report a refused credential;
+        # flattening that into a 500 would lose the contract error.
+        raise
     except Exception as e:
+        if openai_key.is_auth_error(e):
+            raise openai_key.key_missing_error()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -880,6 +907,9 @@ async def start_scenario_chat():
     Starts a new scenario ideation conversation session.
     Returns the AI's initial greeting.
     """
+    # No key check here on purpose: the greeting is static, so opening the chat
+    # must not interrupt the operator. The first real LLM call is their opening
+    # message, and that is where a missing key surfaces.
     try:
         session_id = str(uuid.uuid4())
 
@@ -907,13 +937,17 @@ async def send_scenario_message(request: ScenarioChatRequest):
     try:
         if not request.session_id:
             raise HTTPException(status_code=400, detail="session_id is required")
-        
+
+        openai_key.require_key()
+
         result = _send_ideation_message(
             session_id=request.session_id,
             user_message=request.message,
         )
 
         if not result["success"]:
+            if openai_key.is_auth_error(result.get("error")):
+                raise openai_key.key_missing_error()
             raise HTTPException(status_code=400, detail=result["error"])
 
         return ScenarioChatResponse(
@@ -977,6 +1011,7 @@ class CeGenerateResponse(BaseModel):
 @router.post("/ce-generate", response_model=CeGenerateResponse)
 def generate_ce_single_shot(request: CeGenerateRequest, _: int = Depends(get_current_user)):
     """CE generation with optional clarification flow. See module comment."""
+    openai_key.require_key()
     try:
         from gavel_pipeline.ce_generator import generate_ce
         ce_data, err = generate_ce(
@@ -985,6 +1020,8 @@ def generate_ce_single_shot(request: CeGenerateRequest, _: int = Depends(get_cur
             history=request.history,
         )
         if err:
+            if openai_key.is_auth_error(err):
+                raise openai_key.key_missing_error()
             return CeGenerateResponse(success=False, error=err)
         if ce_data is None:
             return CeGenerateResponse(success=False, error="No CE returned")
@@ -1003,9 +1040,13 @@ def generate_ce_single_shot(request: CeGenerateRequest, _: int = Depends(get_cur
                 ce_data=None,
             )
         return CeGenerateResponse(success=True, ce_data=ce_data)
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
+        if openai_key.is_auth_error(e):
+            raise openai_key.key_missing_error()
         return CeGenerateResponse(success=False, error=str(e))
 
 
@@ -1069,6 +1110,9 @@ def generate_ce_training_dataset(request: CETrainingRequest, current_user_id: in
     5. Produces training samples in conversation format
     6. Saves to excitation_datasets table
     """
+    # Before the CE row is created: without a key every generator call below
+    # returns nothing, which used to save a CE with an empty training set.
+    openai_key.require_key()
     try:
         # Get or create CE in database (taxonomy categories are separate from ACTION/CONTEXT)
         # Filter out empty/garbage entries that can slip through from LLM output
@@ -1161,6 +1205,8 @@ def generate_ce_training_dataset(request: CETrainingRequest, current_user_id: in
                 reference_examples,
             )
         except Exception as e:
+            if openai_key.is_auth_error(e):
+                raise openai_key.key_missing_error()
             raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
 
         clean_samples = []
@@ -1268,6 +1314,8 @@ def generate_ce_training_dataset(request: CETrainingRequest, current_user_id: in
         import traceback
         print(f"\n[ERROR] CE Training Endpoint Error:")
         traceback.print_exc()
+        if openai_key.is_auth_error(e):
+            raise openai_key.key_missing_error()
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @router.get("/ce-training/{ce_id}")
@@ -1409,6 +1457,8 @@ def generate_ce_calibration_data(
 
     ce_name = ce_row[0]["name"]
 
+    openai_key.require_key()
+
     try:
         conversations = _generate_calibration_conversations(
             request.ce_id, request.target_count
@@ -1429,6 +1479,8 @@ def generate_ce_calibration_data(
         }
     except Exception as e:
         traceback.print_exc()
+        if openai_key.is_auth_error(e):
+            raise openai_key.key_missing_error()
         raise HTTPException(status_code=500, detail=f"Calibration data generation failed: {str(e)}")
 
 
@@ -1704,9 +1756,12 @@ def build_negative_config(positive_config: dict) -> tuple[dict, str]:
 @router.post("/test-config/generate")
 def generate_test_config(req: TestConfigRequest, user_id: int = Depends(get_current_user)):
     """Generate a test set configuration from a free-text description using LLM."""
+    openai_key.require_key()
     try:
         config_dict = build_positive_config(req.description)
     except RuntimeError as e:
+        if openai_key.is_auth_error(e):
+            raise openai_key.key_missing_error()
         raise HTTPException(status_code=500, detail=str(e))
 
     return {
@@ -1723,9 +1778,12 @@ def generate_negative_config(req: NegativeConfigRequest, _: int = Depends(get_cu
     Asks the LLM to reason through the polar context ("does this misuse
     have a legitimate counterpart?") before emitting the negative
     scenario JSON. Surfaces the reasoning section alongside the config."""
+    openai_key.require_key()
     try:
         neg_config, reasoning = build_negative_config(req.positive_config)
     except RuntimeError as e:
+        if openai_key.is_auth_error(e):
+            raise openai_key.key_missing_error()
         raise HTTPException(status_code=500, detail=str(e))
     return {"success": True, "config": neg_config, "reasoning": reasoning}
 
@@ -1818,6 +1876,8 @@ def _derive_scenario_from_rule(rule_context: dict) -> str:
         )
         return (response.choices[0].message.content or "").strip()
     except Exception as e:
+        if openai_key.is_auth_error(e):
+            raise openai_key.key_missing_error()
         raise HTTPException(status_code=500, detail=f"Scenario derivation failed: {str(e)}")
 
 
@@ -1834,11 +1894,7 @@ def derive_scenario(req: DeriveScenarioRequest, _: int = Depends(get_current_use
     # Fail fast with the REAL cause when the LLM key is absent — litellm would
     # otherwise bury it inside an opaque 500 "Scenario derivation failed: ...".
     # Checked after the rule lookup so a missing rule still 404s first.
-    if not os.getenv("OPENAI_API_KEY"):
-        raise HTTPException(
-            status_code=503,
-            detail="OPENAI_API_KEY is not configured. Add it to backend/.env and restart the backend.",
-        )
+    openai_key.require_key()
     # A missing key is only ONE way this fails — an invalid key, a rate limit,
     # a provider outage, a timeout, a model that no longer exists all raise
     # here too. Uncaught, FastAPI turns every one of them into a bare 500
@@ -1852,6 +1908,8 @@ def derive_scenario(req: DeriveScenarioRequest, _: int = Depends(get_current_use
         raise
     except Exception as e:
         print(f"[!] [derive-scenario] rule {req.rule_id} failed: {e}")
+        if openai_key.is_auth_error(e):
+            raise openai_key.key_missing_error()
         raise HTTPException(status_code=502, detail=f"Scenario auto-write failed: {e}")
     return {"success": True, "rule_id": req.rule_id, "scenario": scenario}
 
@@ -1873,6 +1931,10 @@ def generate_rule_default_sets(
     """Kick off (or regenerate) the rule's default test + calibration set.
     Fire-and-forget; poll GET /ai/rules/{rule_id}/defaults/status."""
     from services.default_datasets import generate_rule_defaults
+
+    # Before the thread starts: its failure would otherwise only show up
+    # minutes later as a default set that never arrives.
+    openai_key.require_key()
 
     try:
         result = generate_rule_defaults(
@@ -2633,6 +2695,10 @@ def generate_test_set(req: TestGenerateRequest, user_id: int = Depends(get_curre
                 status_code=409,
                 detail=f'You already have a test set named "{set_name}" for this rule. Pick a different name.',
             )
+
+    # Last check before the row exists: a 'generating' dataset whose thread
+    # dies on the first LLM call is worse than no dataset at all.
+    openai_key.require_key()
 
     result = execute_query_dict(
         """INSERT INTO test_datasets

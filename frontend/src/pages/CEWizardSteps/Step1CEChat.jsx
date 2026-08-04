@@ -8,12 +8,20 @@
 // generateCe(description, preferType, history) is stateless — `description` is
 // the first user message; each clarification Q&A goes into `history`.
 import { useState, useEffect, useRef } from 'react';
-import { FiSend, FiRefreshCw, FiCheckCircle, FiAlertTriangle } from 'react-icons/fi';
+import { FiSend, FiRefreshCw, FiCheckCircle, FiAlertTriangle, FiKey } from 'react-icons/fi';
 import { generateCe } from '../../api';
 import {
     getStepState, startStep, completeStep,
     card, primaryBtn, secondaryBtn, muted, fieldStyle, errorBanner,
 } from '../RuleWizardSteps/wizardShared';
+import {
+    isOpenAiKeyMissing,
+    openAiKeyMissingMessage,
+    promptForOpenAiKey,
+} from '../../components/OpenAiKeyModal/openAiKeyPrompt';
+import useOpenAiKeyStatus from '../../hooks/useOpenAiKeyStatus';
+
+const KEY_MISSING_TEXT = 'This step needs an OpenAI key. Add yours to continue.';
 
 const GREETING = "Describe the Cognitive Element you want to capture — one CONTEXT (a domain/setting) or one ACTION (a behaviour). Be specific about what's in and out of scope.";
 
@@ -75,8 +83,14 @@ export default function Step1CEChat({ run, onPatchStep, onAdvance }) {
     const [sending, setSending] = useState(false);
     const [approving, setApproving] = useState(false);
     const [error, setError] = useState(null);
+    const [needsKey, setNeedsKey] = useState(false);
     const scrollRef = useRef(null);
     const inputRef = useRef(null);
+    // The last generate call, so adding a key can re-run exactly that turn.
+    const retryRef = useRef(null);
+    // Asked once on mount: is a key set at all? This opens nothing — the note
+    // below goes up straight away, the modal still waits to be asked for.
+    const { configured: keyConfigured, checked: keyChecked } = useOpenAiKeyStatus();
 
     useEffect(() => {
         if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -89,10 +103,20 @@ export default function Step1CEChat({ run, onPatchStep, onAdvance }) {
         if (!sending && !ceData) inputRef.current?.focus();
     }, [sending, ceData]);
 
+    // Open the key modal; once the key is saved, replay the turn that failed.
+    const askForKey = () => promptForOpenAiKey({ onSaved: () => retryRef.current?.() });
+
+    const showKeyPrompt = (message, openNow) => {
+        setError(message);
+        setNeedsKey(true);
+        if (openNow) askForKey();
+    };
+
     // Call the (stateless) CE generator with the running concept + clarify
     // history. Renders the model's reply as a chat bubble.
     const generate = async (theConcept, hist, msgs) => {
-        setSending(true); setError(null);
+        setSending(true); setError(null); setNeedsKey(false);
+        retryRef.current = () => generate(theConcept, hist, msgs);
         try {
             const res = await generateCe(theConcept, null, hist);
             const d = res.data || {};
@@ -114,11 +138,22 @@ export default function Step1CEChat({ run, onPatchStep, onAdvance }) {
                 await completeStep(onPatchStep, '1', {
                     ce_data: d.ce_data, concept: theConcept, history: hist, messages: next,
                 });
+            } else if (isOpenAiKeyMissing(d)) {
+                // A 200 body carrying the marker never reaches the axios
+                // interceptor, so open the modal from here.
+                showKeyPrompt(openAiKeyMissingMessage(d) || KEY_MISSING_TEXT, true);
             } else {
                 throw new Error(d.error || 'No cognitive element was produced.');
             }
         } catch (e) {
-            setError(e?.response?.data?.detail || e.message);
+            if (isOpenAiKeyMissing(e)) {
+                // The interceptor already opened the modal for this one; the
+                // banner keeps the way back once it is dismissed.
+                showKeyPrompt(openAiKeyMissingMessage(e) || KEY_MISSING_TEXT, false);
+            } else {
+                const detail = e?.response?.data?.detail;
+                setError((typeof detail === 'string' && detail) || detail?.message || e.message);
+            }
         } finally {
             setSending(false);
         }
@@ -145,15 +180,22 @@ export default function Step1CEChat({ run, onPatchStep, onAdvance }) {
     const restart = async () => {
         const greet = [{ role: 'assistant', content: GREETING }];
         setMessages(greet); setInput(''); setConcept(''); setHistory([]);
-        setPendingQuestion(null); setCeData(null); setError(null);
+        setPendingQuestion(null); setCeData(null); setError(null); setNeedsKey(false);
         await onPatchStep('1', { status: 'in_progress', data: { messages: greet } });
     };
 
     const handleApprove = async () => {
         setApproving(true);
         try { await onAdvance?.(); }
-        catch (e) { setApproving(false); setError(e?.message || 'Could not start the build.'); }
+        catch (e) { setApproving(false); setNeedsKey(false); setError(e?.message || 'Could not start the build.'); }
     };
+
+    // Two ways we know the key is missing: a generate came back with the
+    // marker, or the upfront status check said so before the user typed
+    // anything. Both get the same note + button; once a CE is proposed there
+    // is nothing left to call, so it stays quiet. Typing is never blocked.
+    const keyMissing = needsKey || (keyChecked && !keyConfigured && !ceData);
+    const banner = error || (keyMissing ? KEY_MISSING_TEXT : null);
 
     return (
         <div>
@@ -205,7 +247,16 @@ export default function Step1CEChat({ run, onPatchStep, onAdvance }) {
                 )}
             </div>
 
-            {error && <div style={card}><div style={errorBanner}><FiAlertTriangle /> {error}</div></div>}
+            {banner && (
+                <div style={card}>
+                    <div style={errorBanner}><FiAlertTriangle /> {banner}</div>
+                    {keyMissing && (
+                        <button onClick={askForKey} style={{ ...primaryBtn, marginTop: 10 }}>
+                            <FiKey /> Set API key
+                        </button>
+                    )}
+                </div>
+            )}
 
             {ceData && (
                 <>

@@ -27,7 +27,23 @@ vi.mock('sweetalert2', () => ({
     default: { fire: vi.fn(() => Promise.resolve({ isConfirmed: false })) },
 }));
 
+// The shared key-modal opener. Stubbed so the tests can assert it was asked to
+// open and drive its onSaved callback without mounting the modal.
+vi.mock('../../../src/components/OpenAiKeyModal/openAiKeyPrompt', async (importOriginal) => {
+    const actual = await importOriginal();
+    return { ...actual, promptForOpenAiKey: vi.fn() };
+});
+
 import Swal from 'sweetalert2';
+import { promptForOpenAiKey } from '../../../src/components/OpenAiKeyModal/openAiKeyPrompt';
+
+// The backend's contract error for a missing/refused key.
+const keyMissingError = () => ({
+    response: {
+        status: 503,
+        data: { detail: { code: 'OPENAI_KEY_MISSING', message: 'This feature needs an OpenAI key. Add yours to continue.' } },
+    },
+});
 import RuleDefaultsStep from '../../../src/components/RuleDefaults/RuleDefaultsStep';
 import { useTaskTray } from '../../../src/contexts/TaskTrayContext';
 import { deriveScenario, generateRuleDefaults, getRuleDefaultsStatus } from '../../../src/api';
@@ -146,36 +162,59 @@ describe('RuleDefaultsStep — initial render & derive', () => {
     });
 
     it('names the missing OpenAI key when derive fails with the backend 503 key error', async () => {
-        deriveScenario.mockRejectedValue({
-            response: {
-                status: 503,
-                data: { detail: 'OPENAI_API_KEY is not configured. Add it to backend/.env and restart the backend.' },
-            },
-        });
+        deriveScenario.mockRejectedValue(keyMissingError());
 
         renderStep();
 
         const warning = await screen.findByText(/Could not auto-write a scenario/i);
-        expect(warning).toHaveTextContent(/OpenAI key/i);
-        expect(warning).toHaveTextContent(/OPENAI_API_KEY/);
-        expect(warning).toHaveTextContent(/backend\/\.env/);
+        expect(warning).toHaveTextContent(/no OpenAI key is set/i);
+        // The whole point of the feature: never send the user to a file.
+        expect(warning).not.toHaveTextContent(/\.env/);
+        expect(warning).not.toHaveTextContent(/restart/i);
         // Manual-typing path stays available.
         expect(screen.getByPlaceholderText(/Example: A user poses as/i)).toHaveValue('');
     });
 
-    it('shows the key guidance when a non-503 error detail mentions OPENAI_API_KEY', async () => {
-        // litellm auth failures surface as 500 with the key name in the detail.
-        deriveScenario.mockRejectedValue({
-            response: {
-                status: 500,
-                data: { detail: 'Scenario derivation failed: AuthenticationError - set OPENAI_API_KEY' },
-            },
-        });
+    it('offers "Set API key" only for the key error, and re-derives once the key is saved', async () => {
+        deriveScenario.mockRejectedValueOnce(keyMissingError());
+
+        renderStep({ ruleId: 11 });
+
+        const btn = await screen.findByRole('button', { name: /Set API key/i });
+        expect(promptForOpenAiKey).not.toHaveBeenCalled();
+
+        // Clicking opens the shared modal; saving replays the derive.
+        deriveScenario.mockResolvedValue({ data: { scenario: 'second try' } });
+        await act(async () => { fireEvent.click(btn); });
+        expect(promptForOpenAiKey).toHaveBeenCalledTimes(1);
+
+        await act(async () => { promptForOpenAiKey.mock.calls[0][0].onSaved(); });
+        expect(await screen.findByDisplayValue('second try')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /Set API key/i })).toBeNull();
+        expect(screen.queryByText(/Could not auto-write a scenario/i)).toBeNull();
+    });
+
+    it('keeps a scenario the user already typed when the derive is replayed', async () => {
+        deriveScenario.mockRejectedValueOnce(keyMissingError());
+        renderStep();
+
+        const textarea = await screen.findByPlaceholderText(/Example: A user poses as/i);
+        fireEvent.change(textarea, { target: { value: 'my own scenario' } });
+
+        deriveScenario.mockResolvedValue({ data: { scenario: 'auto-written' } });
+        await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Set API key/i })); });
+        await act(async () => { promptForOpenAiKey.mock.calls[0][0].onSaved(); });
+
+        expect(await screen.findByDisplayValue('my own scenario')).toBeInTheDocument();
+    });
+
+    it('shows no key action for an ordinary failure', async () => {
+        deriveScenario.mockRejectedValue({ response: { status: 500, data: { detail: 'nope' } } });
 
         renderStep();
 
-        const warning = await screen.findByText(/Could not auto-write a scenario/i);
-        expect(warning).toHaveTextContent(/OpenAI key/i);
+        await screen.findByText(/Could not auto-write a scenario/i);
+        expect(screen.queryByRole('button', { name: /Set API key/i })).toBeNull();
     });
 
     it('says the backend is unreachable when derive fails without a response', async () => {

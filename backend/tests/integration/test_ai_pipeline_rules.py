@@ -310,10 +310,11 @@ class TestDeriveScenario:
     def test_derive_scenario_missing_openai_key_503(
         self, client, auth_headers, test_user, monkeypatch
     ):
-        """With no OPENAI_API_KEY the endpoint names the real cause — 503 with
-        actionable detail — instead of letting litellm bury it in an opaque
-        500 'Scenario derivation failed: ...'. Uses a real draft rule so the
-        request gets past the 404 rule lookup."""
+        """With no OPENAI_API_KEY the endpoint names the real cause — the
+        503 OPENAI_KEY_MISSING contract error the frontend turns into a
+        "set your key" prompt — instead of letting litellm bury it in an
+        opaque 500 'Scenario derivation failed: ...'. Uses a real draft rule
+        so the request gets past the 404 rule lookup."""
         ce1 = _make_ce(client, auth_headers, test_user)
         ce2 = _make_ce(client, auth_headers, test_user)
         res = client.post(
@@ -332,8 +333,8 @@ class TestDeriveScenario:
         )
         assert res.status_code == 503
         detail = res.json()["detail"]
-        assert "OPENAI_API_KEY" in detail
-        assert "backend/.env" in detail
+        assert detail["code"] == "OPENAI_KEY_MISSING"
+        assert detail["message"].strip()
 
     def test_derive_scenario_404_wins_over_missing_key(
         self, client, auth_headers, monkeypatch
@@ -436,8 +437,8 @@ class TestGeneratePipelineErrorDetail:
     def test_early_failure_preserves_real_detail(
         self, client, auth_headers, test_user, monkeypatch
     ):
-        """An early generation failure (e.g. missing OPENAI_API_KEY) must
-        surface its real HTTPException detail to the client.
+        """An early generation failure must surface its real HTTPException
+        detail to the client.
 
         Regression: the rollback handlers referenced `new_ces_info`, which was
         only assigned *after* the early `raise` — so the intended
@@ -448,6 +449,38 @@ class TestGeneratePipelineErrorDetail:
         """
         import routes.ai_pipeline as ai_pipeline
 
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setattr(
+            ai_pipeline,
+            "_generate_rule_from_scenario",
+            lambda scenario: {
+                "success": False,
+                "error": "LLM error: RateLimitError - slow down",
+            },
+        )
+        res = client.post(
+            "/ai/generate-pipeline",
+            json={
+                "scenario": "detect unqualified medical advice",
+                "user_id": test_user["user_id"],
+            },
+            headers=auth_headers,
+        )
+        assert res.status_code == 500
+        assert (
+            res.json()["detail"]
+            == "Rule generation failed: LLM error: RateLimitError - slow down"
+        )
+
+    def test_refused_credential_becomes_the_contract_error(
+        self, client, auth_headers, test_user, monkeypatch
+    ):
+        """A key the provider refuses is the same problem as no key at all, so
+        it produces the same 503 the frontend prompts on — not a 500 the user
+        can do nothing about."""
+        import routes.ai_pipeline as ai_pipeline
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-wrong")
         monkeypatch.setattr(
             ai_pipeline,
             "_generate_rule_from_scenario",
@@ -464,8 +497,28 @@ class TestGeneratePipelineErrorDetail:
             },
             headers=auth_headers,
         )
-        assert res.status_code == 500
-        assert (
-            res.json()["detail"]
-            == "Rule generation failed: LLM error: AuthenticationError - no api key"
+        assert res.status_code == 503
+        assert res.json()["detail"]["code"] == "OPENAI_KEY_MISSING"
+
+    def test_missing_key_short_circuits_before_generation(
+        self, client, auth_headers, test_user, monkeypatch
+    ):
+        """The pre-flight runs before the generator, so nothing is created."""
+        import routes.ai_pipeline as ai_pipeline
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setattr(
+            ai_pipeline,
+            "_generate_rule_from_scenario",
+            lambda scenario: pytest.fail("generation must not start without a key"),
         )
+        res = client.post(
+            "/ai/generate-pipeline",
+            json={
+                "scenario": "detect unqualified medical advice",
+                "user_id": test_user["user_id"],
+            },
+            headers=auth_headers,
+        )
+        assert res.status_code == 503
+        assert res.json()["detail"]["code"] == "OPENAI_KEY_MISSING"

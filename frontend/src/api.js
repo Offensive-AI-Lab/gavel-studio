@@ -1,5 +1,6 @@
 // frontend/src/api.js
 import axios from 'axios';
+import { OPENAI_KEY_MISSING, promptForOpenAiKey } from './components/OpenAiKeyModal/openAiKeyPrompt';
 
 // Unset (the default) means same-origin: in dev the Vite proxy forwards every
 // backend prefix to :8000, so the browser only ever needs to reach :5173 —
@@ -15,6 +16,27 @@ const api = axios.create({
 
 // No auth header: there is no login. The backend attributes every request to
 // the single local user (backend/utils/auth.py: LOCAL_USER_ID).
+
+// Every AI feature fails the same way when the OpenAI key isn't set: HTTP 503
+// with detail.code === 'OPENAI_KEY_MISSING'. We catch that here and open the
+// shared modal, so the fix is offered wherever the failure happens without
+// each page wiring it up. The rejection is passed straight through, so the
+// existing per-page error handling still runs.
+//
+// A call that fires on its own (a step prefilling itself, a poll) passes
+// `skipKeyPrompt` so it never interrupts the operator: those surfaces show a
+// note and a Set API key button, and the modal opens only when asked for.
+api.interceptors.response.use(
+    (response) => response,
+    (error) => {
+        if (error?.response?.status === 503
+            && error.response.data?.detail?.code === OPENAI_KEY_MISSING
+            && !error.config?.skipKeyPrompt) {
+            promptForOpenAiKey();
+        }
+        return Promise.reject(error);
+    },
+);
 
 
 // ---------------------------------------------------------------------------
@@ -51,6 +73,13 @@ const withNotify = async (promise) => {
 // gets killed by axios and the splash flips to "Backend not responding yet"
 // even though the backend is just busy loading weights.
 export const getBackendHealth = async () => api.get('/health', { timeout: 30000 });
+
+// --- OpenAI key ---
+// The key itself is never sent back: the status call answers only whether one
+// is set (secrets are write-only, like has_hf_token on models). Saving applies
+// the key to the running backend and keeps it for next time.
+export const getOpenAiKeyStatus = async () => api.get('/settings/openai-key');
+export const saveOpenAiKey = async (key) => api.put('/settings/openai-key', { api_key: key });
 
 // --- Onboarding ---
 // Flip the `tutorial_seen` flag to TRUE so the first-run onboarding modal
@@ -300,7 +329,12 @@ export const addCEBookmark = async (userId, ceId) =>
 export const getCEBookmarks = async (userId) => api.get(`/cognitive/bookmarks/${userId}`);
 export const removeCEBookmark = async (userId, ceId) =>
     withNotify(api.delete(`/cognitive/bookmark/${userId}/${ceId}`));
-export const startScenarioChat = async () => api.post(`/ai/scenario-chat/start`);
+// The wizard opens this chat by itself the moment step 1 mounts, so that first
+// call passes `skipKeyPrompt` — a missing key must not throw the modal at
+// someone who has not asked for anything yet (the step shows a note instead).
+// Restart is a click, so it leaves the flag off and keeps the modal.
+export const startScenarioChat = async ({ skipKeyPrompt = false } = {}) =>
+    api.post(`/ai/scenario-chat/start`, undefined, skipKeyPrompt ? { skipKeyPrompt: true } : undefined);
 export const sendScenarioChatMessage = async (sessionId, message) => api.post(`/ai/scenario-chat/message`, { session_id: sessionId, message });
 
 // Rule generation pipeline. Returns the full RuleGenerationResponse —
@@ -490,8 +524,10 @@ export const listClassifierTestDatasets = (classifierId) =>
 // --- Rule default test/calibration sets (schema v9) ---
 // Every rule carries a default set, generated at rule-creation time
 // (library rules ship theirs in the gavel-rules repo).
+// Runs by itself when the step opens, so a missing key must not take over the
+// screen: the step shows its own note and a Set API key button instead.
 export const deriveScenario = (ruleId) =>
-    api.post(`/ai/derive-scenario`, { rule_id: ruleId });
+    api.post(`/ai/derive-scenario`, { rule_id: ruleId }, { skipKeyPrompt: true });
 export const generateRuleDefaults = (ruleId, scenarioInstructions, opts = {}) =>
     api.post(`/ai/rules/${ruleId}/generate-defaults`, {
         scenario_instructions: scenarioInstructions,

@@ -489,3 +489,5 @@ from routes.guardrail_folders import router as guardrail_folders_router
 app.include_router(guardrail_folders_router, prefix="/guardrail-folders", tags=["Guardrail Folders"])
 from routes.export import router as export_router
 app.include_router(export_router, prefix="/export", tags=["Registry Export"])
+from routes.settings import router as settings_router
+app.include_router(settings_router, prefix="/settings", tags=["Settings"])

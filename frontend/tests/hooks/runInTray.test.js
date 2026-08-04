@@ -10,7 +10,23 @@
 // job's own resolution) before asserting post-job state.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// The shared key-modal opener — stubbed so we can assert the chip asks for it.
+vi.mock('../../src/components/OpenAiKeyModal/openAiKeyPrompt', async (importOriginal) => {
+    const actual = await importOriginal();
+    return { ...actual, promptForOpenAiKey: vi.fn() };
+});
+
 import { runInTray, sleep } from '../../src/hooks/runInTray';
+import { promptForOpenAiKey } from '../../src/components/OpenAiKeyModal/openAiKeyPrompt';
+
+// The backend's contract error for a missing/refused key.
+const keyMissingError = () => ({
+    response: {
+        status: 503,
+        data: { detail: { code: 'OPENAI_KEY_MISSING', message: 'This feature needs an OpenAI key. Add yours to continue.' } },
+    },
+});
 
 // Build a fake tray. `start` records the opts it was called with and returns
 // a handle of spies. The returned task object is the same one runInTray
@@ -210,6 +226,49 @@ describe('runInTray', () => {
         await flush();
         const patch = task.error.mock.calls[0][0];
         expect('onOpen' in patch).toBe(false);
+    });
+
+    it('turns the missing-key failure into a chip that opens the key modal', async () => {
+        const { tray, task } = makeTray();
+        const err = keyMissingError();
+        const job = vi.fn(() => Promise.reject(err));
+        const onError = vi.fn();
+        runInTray(tray, { title: 'T', job, onError });
+
+        await flush();
+        const patch = task.error.mock.calls[0][0];
+        // Never the raw {code, message} object — that would render as [object Object].
+        expect(patch.subtitle).toBe('No OpenAI key is set — click to add one.');
+        expect(onError).toHaveBeenCalledWith(err);
+
+        patch.onOpen();
+        expect(promptForOpenAiKey).toHaveBeenCalledTimes(1);
+        // Nothing to retry when the caller gave no errorOnOpen.
+        expect(promptForOpenAiKey.mock.calls[0][0].onSaved).toBeUndefined();
+    });
+
+    it('hands back to errorOnOpen once the key is saved', async () => {
+        const { tray, task } = makeTray();
+        const err = keyMissingError();
+        const errorOnOpen = vi.fn();
+        runInTray(tray, { title: 'T', job: () => Promise.reject(err), errorOnOpen });
+
+        await flush();
+        // Clicking the chip opens the modal FIRST — not the caller's dialog.
+        task.error.mock.calls[0][0].onOpen();
+        expect(errorOnOpen).not.toHaveBeenCalled();
+
+        promptForOpenAiKey.mock.calls[0][0].onSaved();
+        expect(errorOnOpen).toHaveBeenCalledWith(err);
+    });
+
+    it('falls back to detail.message for a non-key object detail', async () => {
+        const { tray, task } = makeTray();
+        const job = vi.fn(() => Promise.reject({ response: { data: { detail: { message: 'structured reason' } } } }));
+        runInTray(tray, { title: 'T', job });
+
+        await flush();
+        expect(task.error).toHaveBeenCalledWith({ title: 'T', subtitle: 'structured reason' });
     });
 
     it('calls onError with the thrown error on failure', async () => {

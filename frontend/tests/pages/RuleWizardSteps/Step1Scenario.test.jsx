@@ -4,27 +4,46 @@
 // from ../../api. We mock that module so nothing hits the network.
 
 import React from 'react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-// --- Mock ../../api. Only the two scenario chat exports are used by this
-// file, but we keep the mock minimal + benign.
+// --- Mock ../../api. Only the scenario chat + key-status exports are used by
+// this file, but we keep the mock minimal + benign.
 const startScenarioChat = vi.fn();
 const sendScenarioChatMessage = vi.fn();
+const getOpenAiKeyStatus = vi.fn();
 vi.mock('../../../src/api', () => ({
     startScenarioChat: (...a) => startScenarioChat(...a),
     sendScenarioChatMessage: (...a) => sendScenarioChatMessage(...a),
+    getOpenAiKeyStatus: (...a) => getOpenAiKeyStatus(...a),
 }));
 
 import Step1Scenario from '../../../src/pages/RuleWizardSteps/Step1Scenario';
+import {
+    notifyOpenAiKeySaved,
+    subscribeOpenAiKeyPrompt,
+} from '../../../src/components/OpenAiKeyModal/openAiKeyPrompt';
+
+// The step's own wording for a missing key (KEY_MISSING_TEXT in the component).
+const KEY_MISSING_TEXT = 'This step needs an OpenAI key. Add yours to continue.';
+
+// The real prompt channel — every test can assert whether the modal was asked
+// for, without mocking the module the component imports.
+let prompted;
+let unsubscribePrompt;
 
 // Default benign responses; individual tests override as needed.
 beforeEach(() => {
     vi.clearAllMocks();
     startScenarioChat.mockResolvedValue({ data: { session_id: 'sess-1', message: 'Hi, describe your scenario' } });
     sendScenarioChatMessage.mockResolvedValue({ data: { message: 'Tell me more', is_final: false } });
+    getOpenAiKeyStatus.mockResolvedValue({ data: { configured: true } });
+    prompted = vi.fn();
+    unsubscribePrompt = subscribeOpenAiKeyPrompt(prompted);
 });
+
+afterEach(() => { unsubscribePrompt(); });
 
 // Helper: render with a run object + a captured onPatchStep spy.
 function setup(run = { steps: {} }, onPatchStep = vi.fn(() => Promise.resolve()), onAdvance = vi.fn(() => Promise.resolve())) {
@@ -84,6 +103,19 @@ describe('Step1Scenario — bootstrap', () => {
         });
         setup();
         expect(await screen.findByText('LLM error: AuthenticationError - no api key')).toBeInTheDocument();
+    });
+
+    it('renders the missing-key detail object as text when the bootstrap fails', async () => {
+        startScenarioChat.mockRejectedValueOnce({
+            response: {
+                status: 503,
+                data: { detail: { code: 'OPENAI_KEY_MISSING', message: 'No API key is set.' } },
+            },
+        });
+        setup();
+        expect(await screen.findByText('No API key is set.')).toBeInTheDocument();
+        expect(screen.queryByText(/\[object Object\]/)).not.toBeInTheDocument();
+        expect(screen.getByText(/Set API key/i)).toBeInTheDocument();
     });
 
     it('Restart clears a bootstrap error and starts a fresh session', async () => {
@@ -383,6 +415,121 @@ describe('Step1Scenario — restart', () => {
             status: 'in_progress',
             data: expect.objectContaining({ session_id: 'fresh', description: '', name: '' }),
         })));
+    });
+});
+
+describe('Step1Scenario — missing OpenAI key', () => {
+    it('shows the note + Set API key as soon as the step opens, and opens nothing', async () => {
+        getOpenAiKeyStatus.mockResolvedValue({ data: { configured: false } });
+        setup();
+
+        expect(await screen.findByText(KEY_MISSING_TEXT)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Set API key/i })).toBeInTheDocument();
+        // The modal is action-triggered: opening the wizard is not an action.
+        expect(prompted).not.toHaveBeenCalled();
+    });
+
+    it('leaves the chat usable — the note never blocks typing', async () => {
+        getOpenAiKeyStatus.mockResolvedValue({ data: { configured: false } });
+        setup();
+        await screen.findByText(KEY_MISSING_TEXT);
+
+        const input = screen.getByPlaceholderText(/Describe the misuse/i);
+        expect(input).not.toBeDisabled();
+        fireEvent.change(input, { target: { value: 'still typable' } });
+        expect(input).toHaveValue('still typable');
+        expect(screen.getByRole('button', { name: /Send/i })).not.toBeDisabled();
+    });
+
+    it('shows nothing when a key is configured', async () => {
+        setup();
+        await screen.findByText('Hi, describe your scenario');
+        await waitFor(() => expect(getOpenAiKeyStatus).toHaveBeenCalled());
+        expect(screen.queryByText(KEY_MISSING_TEXT)).toBeNull();
+        expect(screen.queryByRole('button', { name: /Set API key/i })).toBeNull();
+    });
+
+    it('stays quiet when the status call itself fails', async () => {
+        getOpenAiKeyStatus.mockRejectedValue(new Error('backend down'));
+        setup();
+        await screen.findByText('Hi, describe your scenario');
+        await waitFor(() => expect(getOpenAiKeyStatus).toHaveBeenCalled());
+        expect(screen.queryByText(KEY_MISSING_TEXT)).toBeNull();
+    });
+
+    it('does not nag on a finalized step', async () => {
+        getOpenAiKeyStatus.mockResolvedValue({ data: { configured: false } });
+        const run = { steps: { 1: { status: 'completed', data: { description: 'd', name: 'n' } } } };
+        setup(run);
+        await screen.findByText(/Scenario finalized/i);
+        await waitFor(() => expect(getOpenAiKeyStatus).toHaveBeenCalled());
+        expect(screen.queryByText(KEY_MISSING_TEXT)).toBeNull();
+    });
+
+    it('the mount bootstrap fires on its own, so it never throws the modal at the user', async () => {
+        setup();
+        await waitFor(() => expect(startScenarioChat).toHaveBeenCalledWith({ skipKeyPrompt: true }));
+        // Restart IS a user action — it keeps the modal.
+        fireEvent.click(screen.getByText('Restart'));
+        await waitFor(() => expect(startScenarioChat).toHaveBeenLastCalledWith());
+    });
+
+    it('asks for the key when the user presses Set API key', async () => {
+        getOpenAiKeyStatus.mockResolvedValue({ data: { configured: false } });
+        setup();
+        await screen.findByText(KEY_MISSING_TEXT);
+
+        fireEvent.click(screen.getByRole('button', { name: /Set API key/i }));
+        expect(prompted).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears the note by itself once a key is saved', async () => {
+        getOpenAiKeyStatus.mockResolvedValue({ data: { configured: false } });
+        setup();
+        await screen.findByText(KEY_MISSING_TEXT);
+
+        getOpenAiKeyStatus.mockResolvedValue({ data: { configured: true } });
+        await act(async () => { notifyOpenAiKeySaved(); });
+
+        await waitFor(() => expect(screen.queryByText(KEY_MISSING_TEXT)).toBeNull());
+        expect(screen.queryByRole('button', { name: /Set API key/i })).toBeNull();
+    });
+
+    it('a failed send still shows the backend message and offers the key', async () => {
+        sendScenarioChatMessage.mockRejectedValueOnce({
+            response: {
+                status: 503,
+                data: { detail: { code: 'OPENAI_KEY_MISSING', message: 'No API key is set.' } },
+            },
+        });
+        setup();
+        await screen.findByText('Hi, describe your scenario');
+        const input = screen.getByPlaceholderText(/Describe the misuse/i);
+        fireEvent.change(input, { target: { value: 'will fail' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+
+        // The backend's own sentence wins over the generic note.
+        expect(await screen.findByText('No API key is set.')).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: /Set API key/i }));
+        expect(prompted).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-opens the chat once a key is added after a failed bootstrap', async () => {
+        startScenarioChat.mockRejectedValueOnce({
+            response: {
+                status: 503,
+                data: { detail: { code: 'OPENAI_KEY_MISSING', message: 'No API key is set.' } },
+            },
+        });
+        setup();
+        await screen.findByText('No API key is set.');
+
+        fireEvent.click(screen.getByRole('button', { name: /Set API key/i }));
+        expect(prompted).toHaveBeenCalledTimes(1);
+        // Saving the key replays exactly what failed — the bootstrap.
+        await act(async () => { prompted.mock.calls[0][0].onSaved(); });
+        expect(await screen.findByText('Hi, describe your scenario')).toBeInTheDocument();
+        expect(screen.queryByText('No API key is set.')).toBeNull();
     });
 });
 

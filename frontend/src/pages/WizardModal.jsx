@@ -10,6 +10,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import GlassModal from '../components/GlassModal/GlassModal';
 import { showConfirmDialog } from '../components/ConfirmDialog/confirmDialog';
 import { updatePipelineStep } from '../api';
+import { errorText } from '../utils/errorText';
 
 export default function WizardModal({
     open,
@@ -56,7 +57,7 @@ export default function WizardModal({
                 const r = await bootstrap();
                 if (!cancelled && r) setRun(r);
             } catch (e) {
-                if (!cancelled) setError(e?.response?.data?.detail || e.message);
+                if (!cancelled) setError(errorText(e, 'Could not open the wizard.'));
             } finally {
                 if (!cancelled) setLoading(false);
             }
@@ -82,7 +83,7 @@ export default function WizardModal({
             });
             return apply(res.data);
         } catch (e) {
-            setError(e?.response?.data?.detail || e.message);
+            setError(errorText(e, 'Could not save this step.'));
             return null;
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps

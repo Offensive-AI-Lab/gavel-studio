@@ -121,11 +121,25 @@ class TestGenerateDefaultsValidation:
         )
         assert res.status_code == 422
 
-    def test_accept_kicks_off_and_reports_generating(self, client, auth_headers):
+    def test_missing_openai_key_503(self, client, auth_headers, monkeypatch):
+        # Generation is LLM work: without a key the route refuses up front
+        # rather than starting a thread whose output never arrives.
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        rule_id = _insert_draft_rule(f"defrule_nokey_{int(time.time())}_{id(self)}")
+        res = client.post(
+            f"/ai/rules/{rule_id}/generate-defaults",
+            json={"scenario_instructions": "users coaxing the model into X"},
+            headers=auth_headers,
+        )
+        assert res.status_code == 503
+        assert res.json()["detail"]["code"] == "OPENAI_KEY_MISSING"
+
+    def test_accept_kicks_off_and_reports_generating(self, client, auth_headers, monkeypatch):
         # The handler hands off to a daemon thread and returns immediately with
         # a {"success": True, "state": "generating"} envelope. The background
-        # generation will fail without LLM creds, but that does not affect the
-        # synchronous response we assert here.
+        # generation will fail without usable LLM creds, but that does not
+        # affect the synchronous response we assert here.
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         rule_id = _insert_draft_rule(f"defrule_accept_{int(time.time())}_{id(self)}")
         res = client.post(
             f"/ai/rules/{rule_id}/generate-defaults",
@@ -138,9 +152,10 @@ class TestGenerateDefaultsValidation:
         assert data.get("rule_id") == rule_id
         assert data.get("state") == "generating"
 
-    def test_custom_counts_accepted(self, client, auth_headers):
+    def test_custom_counts_accepted(self, client, auth_headers, monkeypatch):
         # target_count / calibration_count are optional ints with defaults
         # (100 / 50). Supplying explicit values must be accepted by the schema.
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         rule_id = _insert_draft_rule(f"defrule_counts_{int(time.time())}_{id(self)}")
         res = client.post(
             f"/ai/rules/{rule_id}/generate-defaults",
@@ -343,10 +358,27 @@ class TestTestSetStatus:
 
 
 class TestEmbedResourcesGuard:
-    def test_empty_payload_is_noop_success(self, client):
+    def test_missing_openai_key_503_when_it_would_generate(self, client, monkeypatch):
+        # A rule with no default rows yet ('missing') means this call would
+        # start LLM generation, so it needs a key like the rest of the pipeline.
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        rule_id = _insert_draft_rule(f"embed_nokey_{int(time.time())}_{id(self)}")
+        res = client.post("/ai/embed-resources", json={"ce_ids": [], "rule_id": rule_id})
+        assert res.status_code == 503
+        assert res.json()["detail"]["code"] == "OPENAI_KEY_MISSING"
+
+    def test_no_key_needed_when_nothing_would_generate(self, client, monkeypatch):
+        # CE-only embedding is local work (MiniLM), so a missing key must not
+        # turn the request away.
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        res = client.post("/ai/embed-resources", json={"ce_ids": [], "rule_id": None})
+        assert res.status_code == 200
+
+    def test_empty_payload_is_noop_success(self, client, monkeypatch):
         # No ce_ids and no rule_id -> nothing embedded, nothing generated.
         # This exercises the success envelope without touching embeddings,
         # is_ready flips, or default-set generation.
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         res = client.post("/ai/embed-resources", json={"ce_ids": [], "rule_id": None})
         assert res.status_code == 200
         data = res.json()
@@ -354,8 +386,9 @@ class TestEmbedResourcesGuard:
         assert data["embedded_ces"] == 0
         assert data["embedded_rule"] == 0
 
-    def test_default_payload_is_noop_success(self, client):
+    def test_default_payload_is_noop_success(self, client, monkeypatch):
         # All fields optional with sensible defaults — empty body is accepted.
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         res = client.post("/ai/embed-resources", json={})
         assert res.status_code == 200
         assert res.json()["status"] == "success"

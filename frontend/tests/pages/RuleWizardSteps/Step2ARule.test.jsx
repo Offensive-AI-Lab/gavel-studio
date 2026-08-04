@@ -311,6 +311,31 @@ describe('Step2ARule — generate error handling', () => {
         expect(await screen.findByText('network down')).toBeInTheDocument();
     });
 
+    it('renders the missing-key detail object as text and offers to set the key', async () => {
+        generateGavelPipeline.mockRejectedValue({
+            response: {
+                status: 503,
+                data: { detail: { code: 'OPENAI_KEY_MISSING', message: 'No API key is set.' } },
+            },
+        });
+        const onPatchStep = vi.fn(() => Promise.resolve());
+        renderStep({ onPatchStep });
+
+        fireEvent.click(screen.getByText(/Generate Rule/i));
+
+        expect(await screen.findByText('No API key is set.')).toBeInTheDocument();
+        expect(screen.queryByText(/\[object Object\]/)).not.toBeInTheDocument();
+        expect(screen.getByText(/Set API key/i)).toBeInTheDocument();
+        await waitFor(() =>
+            expect(onPatchStep).toHaveBeenCalledWith(
+                '2A',
+                expect.objectContaining({
+                    data: expect.objectContaining({ error: 'No API key is set.' }),
+                }),
+            ),
+        );
+    });
+
     it('re-enables the Generate button after an error (generating reset in finally)', async () => {
         generateGavelPipeline.mockRejectedValue(new Error('oops'));
         renderStep();

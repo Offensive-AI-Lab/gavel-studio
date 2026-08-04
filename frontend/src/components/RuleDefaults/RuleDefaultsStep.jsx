@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
-import { FiArrowRight, FiLoader, FiAlertTriangle } from 'react-icons/fi';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { FiArrowRight, FiLoader, FiAlertTriangle, FiKey } from 'react-icons/fi';
 import ReactiveButton from '../ReactiveButton/ReactiveButton';
 import { deriveScenario, generateRuleDefaults, getRuleDefaultsStatus } from '../../api';
 import { useTaskTray } from '../../contexts/TaskTrayContext';
 import { runInTray, sleep } from '../../hooks/runInTray';
 import { showConfirmDialog, escapeHtml } from '../ConfirmDialog/confirmDialog';
+import { isOpenAiKeyMissing, promptForOpenAiKey } from '../OpenAiKeyModal/openAiKeyPrompt';
 
 // Final step for a freshly-created rule: derive a misuse scenario from the
 // rule's CEs/roles, let the user review/edit it, then kick off generation of
@@ -26,12 +27,14 @@ import { showConfirmDialog, escapeHtml } from '../ConfirmDialog/confirmDialog';
 // Turn a deriveScenario failure into a message that names the real cause.
 // The failure stays soft either way — the user can type a scenario manually.
 function describeDeriveError(err) {
-    const detail = err?.response?.data?.detail || '';
-    if (err?.response?.status === 503 || /OPENAI_API_KEY/i.test(detail)) {
-        return 'Could not auto-write a scenario — the backend has no OpenAI key. '
-            + 'Add OPENAI_API_KEY to backend/.env and restart the backend, '
-            + 'or describe the misuse this rule should catch below.';
+    // The missing/refused key has its own marker in the body — key on that,
+    // never on the wording, and offer the "Set API key" button next to it.
+    if (isOpenAiKeyMissing(err)) {
+        return 'Could not auto-write a scenario — no OpenAI key is set yet. '
+            + 'Add your key, or describe the misuse this rule should catch below.';
     }
+    const raw = err?.response?.data?.detail;
+    const detail = (typeof raw === 'string' && raw) || raw?.message || '';
     if (!err?.response) {
         return 'Could not auto-write a scenario — the backend is unreachable. '
             + 'Describe the misuse this rule should catch below.';
@@ -56,32 +59,46 @@ export default function RuleDefaultsStep({ ruleId, onDone, finalize }) {
     const [scenario, setScenario] = useState('');
     const [deriving, setDeriving] = useState(true);
     const [deriveError, setDeriveError] = useState('');
+    const [deriveNeedsKey, setDeriveNeedsKey] = useState(false);
     const [error, setError] = useState('');
+    const cancelledRef = useRef(false);
+    // Once the user has written their own scenario, a re-run of the auto-writer
+    // (after they add a key) must not overwrite what they typed.
+    const editedRef = useRef(false);
 
     // Prefill the scenario by deriving one from the rule. Failure is soft —
     // the user can still type their own scenario into the empty box.
-    useEffect(() => {
-        let cancelled = false;
-        (async () => {
-            try {
-                const res = await deriveScenario(ruleId);
-                if (!cancelled) {
-                    const derived = res.data?.scenario || '';
-                    setScenario(derived);
-                    // Success with nothing in it would render as a silent empty
-                    // box — surface it as the same soft warning instead.
-                    if (!derived.trim()) {
-                        setDeriveError('The auto-writer returned an empty scenario — describe the misuse this rule should catch below.');
-                    }
+    const derive = useCallback(async () => {
+        setDeriving(true);
+        setDeriveError('');
+        setDeriveNeedsKey(false);
+        try {
+            const res = await deriveScenario(ruleId);
+            if (cancelledRef.current) return;
+            const derived = res.data?.scenario || '';
+            if (!editedRef.current) {
+                setScenario(derived);
+                // Success with nothing in it would render as a silent empty
+                // box — surface it as the same soft warning instead.
+                if (!derived.trim()) {
+                    setDeriveError('The auto-writer returned an empty scenario — describe the misuse this rule should catch below.');
                 }
-            } catch (err) {
-                if (!cancelled) setDeriveError(describeDeriveError(err));
-            } finally {
-                if (!cancelled) setDeriving(false);
             }
-        })();
-        return () => { cancelled = true; };
+        } catch (err) {
+            if (cancelledRef.current) return;
+            setDeriveError(describeDeriveError(err));
+            setDeriveNeedsKey(isOpenAiKeyMissing(err));
+        } finally {
+            if (!cancelledRef.current) setDeriving(false);
+        }
     }, [ruleId]);
+
+    useEffect(() => {
+        cancelledRef.current = false;
+        editedRef.current = false;
+        derive();
+        return () => { cancelledRef.current = true; };
+    }, [derive]);
 
     // Kick the generation into the background tray task. The user can leave;
     // the chip (top-right) tracks the three buckets and reports when ready.
@@ -126,7 +143,9 @@ export default function RuleDefaultsStep({ ruleId, onDone, finalize }) {
             // is one ellipsized line) and offers a direct retry; declining just
             // leaves the chip in the tray.
             errorOnOpen: async (err) => {
-                const reason = err?.response?.data?.detail || err?.message || 'Generation failed.';
+                const detail = err?.response?.data?.detail;
+                const reason = (typeof detail === 'string' && detail)
+                    || detail?.message || err?.message || 'Generation failed.';
                 const retry = await showConfirmDialog({
                     title: 'Test & calibration set failed',
                     messageHtml: `${escapeHtml(reason)}<br/><br/>${err?.ruleRevealed
@@ -182,7 +201,7 @@ export default function RuleDefaultsStep({ ruleId, onDone, finalize }) {
             ) : (
                 <textarea
                     value={scenario}
-                    onChange={(e) => setScenario(e.target.value)}
+                    onChange={(e) => { editedRef.current = true; setScenario(e.target.value); }}
                     rows={5}
                     // A concrete example, not just an instruction: the field
                     // needs a paragraph with who/what/how, and "describe the
@@ -202,7 +221,21 @@ export default function RuleDefaultsStep({ ruleId, onDone, finalize }) {
                     }}
                 />
             )}
-            {deriveError && <div style={warnStyle}><FiAlertTriangle size={13} /> {deriveError}</div>}
+            {deriveError && (
+                <div style={warnStyle}>
+                    <FiAlertTriangle size={13} style={{ flexShrink: 0 }} />
+                    <span style={{ flex: 1 }}>{deriveError}</span>
+                    {deriveNeedsKey && (
+                        <button
+                            type="button"
+                            onClick={() => promptForOpenAiKey({ onSaved: derive })}
+                            style={warnActionStyle}
+                        >
+                            <FiKey size={12} /> Set API key
+                        </button>
+                    )}
+                </div>
+            )}
             {error && <div style={errStyle}>{error}</div>}
 
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
@@ -232,6 +265,12 @@ const warnStyle = {
     display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.8rem', color: '#fcd34d',
     background: 'rgba(245, 158, 11, 0.14)', border: '1px solid rgba(251, 191, 36, 0.30)',
     borderRadius: 8, padding: '8px 12px',
+};
+const warnActionStyle = {
+    display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0,
+    padding: '5px 10px', borderRadius: 8, cursor: 'pointer',
+    border: '1px solid rgba(251, 191, 36, 0.45)', background: 'rgba(251, 191, 36, 0.16)',
+    color: '#fde68a', fontSize: '0.78rem', fontWeight: 600, fontFamily: 'inherit',
 };
 const errStyle = {
     fontSize: '0.82rem', color: '#fca5a5',

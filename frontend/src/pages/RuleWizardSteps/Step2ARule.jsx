@@ -5,10 +5,14 @@
 // new CEs the model proposed. Accepting links rule_id
 // onto the pipeline_run row so downstream steps can find them.
 import { useState, useMemo } from 'react';
-import { FiCpu, FiCheckCircle, FiAlertTriangle, FiPlay } from 'react-icons/fi';
+import { FiCpu, FiCheckCircle, FiAlertTriangle, FiPlay, FiKey } from 'react-icons/fi';
 import { generateGavelPipeline, updatePipelineLinks, discardPipelineResources } from '../../api';
 import InlineHelp from '../../components/InlineHelp/InlineHelp';
 import { step2aRuleGeneration } from '../../components/InlineHelp/instructorHelp';
+import {
+    isOpenAiKeyMissing, openAiKeyMissingMessage, promptForOpenAiKey,
+} from '../../components/OpenAiKeyModal/openAiKeyPrompt';
+import { errorText } from '../../utils/errorText';
 import {
     getStepState, startStep, completeStep, errorStep,
     card, primaryBtn, secondaryBtn, errorBanner, successBanner, muted,
@@ -37,6 +41,9 @@ export default function Step2ARule({ run, classifierId, onPatchStep, setRun, onA
     const [proposal, setProposal] = useState(data.proposal || null);
     const [error, setError] = useState(null);
     const [approving, setApproving] = useState(false);
+    const [needsKey, setNeedsKey] = useState(false);
+
+    const askForKey = () => promptForOpenAiKey({ onSaved: () => generate() });
 
     // Approve → hand off to the wizard's onFinish, which runs CE training,
     // CE calibration, the test/calibration set and finalization as ONE
@@ -95,7 +102,11 @@ export default function Step2ARule({ run, classifierId, onPatchStep, setRun, onA
                 new_ces: r.new_ces || [],
             });
         } catch (err) {
-            const msg = err?.response?.data?.detail || err.message;
+            const keyMissing = isOpenAiKeyMissing(err);
+            const msg = keyMissing
+                ? openAiKeyMissingMessage(err)
+                : errorText(err, 'Rule generation failed.');
+            setNeedsKey(keyMissing);
             setError(msg);
             await errorStep(onPatchStep, '2A', msg, { ...data });
         } finally {
@@ -148,7 +159,16 @@ export default function Step2ARule({ run, classifierId, onPatchStep, setRun, onA
                 </div>
             )}
 
-            {error && <div style={card}><div style={errorBanner}><FiAlertTriangle /> {error}</div></div>}
+            {error && (
+                <div style={card}>
+                    <div style={errorBanner}><FiAlertTriangle /> {error}</div>
+                    {needsKey && (
+                        <button onClick={askForKey} style={{ ...primaryBtn, marginTop: 10 }}>
+                            <FiKey /> Set API key
+                        </button>
+                    )}
+                </div>
+            )}
 
             {proposal && (
                 <>

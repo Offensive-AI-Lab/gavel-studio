@@ -9,14 +9,23 @@
 // On `is_final` the wizard saves description + name to step.data and
 // the user can advance. Step 2A reads description from this step's data.
 import { useState, useEffect, useRef } from 'react';
-import { FiSend, FiCheckCircle, FiRefreshCw, FiAlertTriangle } from 'react-icons/fi';
+import { FiSend, FiCheckCircle, FiRefreshCw, FiAlertTriangle, FiKey } from 'react-icons/fi';
 import { startScenarioChat, sendScenarioChatMessage } from '../../api';
 import InlineHelp from '../../components/InlineHelp/InlineHelp';
 import { automatedPipeline } from '../../components/InlineHelp/instructorHelp';
 import {
+    isOpenAiKeyMissing,
+    openAiKeyMissingMessage,
+    promptForOpenAiKey,
+} from '../../components/OpenAiKeyModal/openAiKeyPrompt';
+import useOpenAiKeyStatus from '../../hooks/useOpenAiKeyStatus';
+import { errorText } from '../../utils/errorText';
+import {
     getStepState, startStep, completeStep,
     card, primaryBtn, secondaryBtn, fieldStyle, successBanner, errorBanner, muted,
 } from './wizardShared';
+
+const KEY_MISSING_TEXT = 'This step needs an OpenAI key. Add yours to continue.';
 
 
 export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
@@ -28,11 +37,32 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
     const [input, setInput] = useState('');
     const [sending, setSending] = useState(false);
     const [error, setError] = useState(null);
+    const [needsKey, setNeedsKey] = useState(false);
     const [finalized, setFinalized] = useState(state.status === 'completed');
     const [scenario, setScenario] = useState(data.description || '');
     const [name, setName] = useState(data.name || '');
     const scrollRef = useRef(null);
     const inputRef = useRef(null);
+    // What to re-run once a key is saved: the exact call that failed.
+    const retryRef = useRef(null);
+    // Asked once on mount: is a key set at all? Nothing opens here — the note
+    // below goes up straight away, the modal still waits to be asked for.
+    const { configured: keyConfigured, checked: keyChecked } = useOpenAiKeyStatus();
+
+    const askForKey = () => promptForOpenAiKey({ onSaved: () => retryRef.current?.() });
+
+    // Every failure lands here so the banner always holds a STRING — the
+    // backend's `detail` is an object for the missing-key error.
+    const showFailure = (err, retry, fallback) => {
+        retryRef.current = retry;
+        if (isOpenAiKeyMissing(err)) {
+            setNeedsKey(true);
+            setError(openAiKeyMissingMessage(err) || KEY_MISSING_TEXT);
+        } else {
+            setNeedsKey(false);
+            setError(errorText(err, fallback));
+        }
+    };
 
     // Bootstrap the chat if we don't already have a session.
     useEffect(() => {
@@ -40,7 +70,7 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
         let cancelled = false;
         (async () => {
             try {
-                const res = await startScenarioChat();
+                const res = await startScenarioChat({ skipKeyPrompt: true });
                 if (cancelled) return;
                 const sid = res.data.session_id;
                 const initial = res.data.message;
@@ -49,9 +79,10 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
                 setMessages(initialMessages);
                 startStep(onPatchStep, '1', { session_id: sid, messages: initialMessages });
             } catch (err) {
-                // Surface the failure (e.g. missing OPENAI_API_KEY) — Restart
-                // is the retry path for a failed bootstrap.
-                if (!cancelled) setError(err?.response?.data?.detail || err.message);
+                // Surface the failure (e.g. missing OPENAI_API_KEY). Restart is
+                // the retry path for a failed bootstrap, so hand the same thing
+                // to the key modal — adding a key re-opens the chat by itself.
+                if (!cancelled) showFailure(err, () => reset(), 'Could not start the chat.');
             }
         })();
         return () => { cancelled = true; };
@@ -126,7 +157,7 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
         } catch (err) {
             // Non-blocking: the banner shows the backend detail (e.g.
             // "LLM error: ...") and the input stays usable for a retry.
-            setError(err?.response?.data?.detail || err.message);
+            showFailure(err, null, 'Could not send that message.');
         } finally {
             setSending(false);
         }
@@ -161,9 +192,16 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
             });
         } catch (err) {
             // Restart doubles as the bootstrap retry — show why it failed.
-            setError(err?.response?.data?.detail || err.message);
+            showFailure(err, null, 'Could not restart the chat.');
         }
     };
+
+    // Two ways we know the key is missing: a call came back with the marker,
+    // or the upfront status check said so before the user did anything. Both
+    // get the same note + button; a finalized step needs no more AI calls, so
+    // it stays quiet. Typing is never blocked either way.
+    const keyMissing = needsKey || (keyChecked && !keyConfigured && !finalized);
+    const banner = error || (keyMissing ? KEY_MISSING_TEXT : null);
 
     return (
         <div>
@@ -230,7 +268,16 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
                 )}
             </div>
 
-            {error && <div style={card}><div style={errorBanner}><FiAlertTriangle /> {error}</div></div>}
+            {banner && (
+                <div style={card}>
+                    <div style={errorBanner}><FiAlertTriangle /> {banner}</div>
+                    {keyMissing && (
+                        <button onClick={askForKey} style={{ ...primaryBtn, marginTop: 10 }}>
+                            <FiKey /> Set API key
+                        </button>
+                    )}
+                </div>
+            )}
 
             {finalized && (
                 <div style={card}>
