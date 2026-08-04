@@ -1,18 +1,35 @@
 # GAVEL Studio — frontend
 
-React + Vite single-page app for GAVEL Studio. See the [repository README](../README.md) for what Studio is and how to run the whole stack.
+This is the GAVEL Studio interface: the pages where you browse rules, write Cognitive Elements, train and evaluate probes, and watch a conversation as it happens. It is a React app served by Vite.
 
-## Development
+It does nothing on its own. The GAVEL Studio backend has to be running as well.
 
-```bash
+Most people never start this part separately. The `docker compose` command in the [repository README](../README.md) starts the interface and the backend together, and it is the recommended way to run GAVEL Studio.
+
+## Run it
+
+You need [Node.js 20 or newer](https://nodejs.org) and the backend already running on port 8000.
+
+```sh
 npm install
-npm run dev        # http://localhost:5173 (expects the backend on :8000)
+npm run dev
 ```
 
-Leave `VITE_API_URL` unset for local development — the Vite dev proxy forwards API calls to the backend on `:8000`. Only set it (see `.env.example`) when the frontend is served from a different host than the backend.
+Then open [http://localhost:5173](http://localhost:5173).
 
-## Tests
+There is nothing to configure. The dev server passes API calls through to the backend at `http://127.0.0.1:8000`. Set `VITE_API_URL` only if the interface is served from a different machine than the backend; [`.env.example`](.env.example) shows the format.
 
-```bash
+For a static build instead of the dev server, run `npm run build` (the files land in `dist/`) and `npm run preview` to open that build locally.
+
+## Test it
+
+```sh
 npm test
 ```
+
+This runs the test suite once. `npm run test:watch` re-runs tests as you edit, `npm run test:coverage` writes a coverage report, and `npm run lint` checks code style.
+
+## Learn more
+
+* [Repository README](../README.md) — what GAVEL Studio is, how to run the whole application, and how to configure it.
+* [GAVEL user guide](https://github.com/Offensive-AI-Lab/gavel-rules/blob/main/GUIDE.md) — Cognitive Elements, rules, and rule sets explained with an example.
