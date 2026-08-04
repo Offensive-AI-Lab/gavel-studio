@@ -4,7 +4,8 @@
 // pages. It:
 //   - debounces keystrokes (default 250ms) into a single searchLibrary call
 //   - refuses to search for sub-2-char queries (unless categories/author give
-//     it something to browse when allowEmptyQuery is true)
+//     it something to browse when allowEmptyQuery is true, or browseWhenEmpty
+//     opts the caller into browsing on a completely empty box)
 //   - maps query/categories/author/page into one API call
 //   - drops stale in-flight responses via a request-id ref
 //   - maps res.data.results -> results and res.data.total_results -> total
@@ -69,6 +70,53 @@ describe('useLibrarySearch — empty / no-search states', () => {
         })));
         act(() => { vi.advanceTimersByTime(1000); });
         expect(searchLibrary).not.toHaveBeenCalled();
+    });
+
+    it('does not browse an empty query when browseWhenEmpty is off (the default)', () => {
+        vi.useFakeTimers();
+        renderHook(() => useLibrarySearch(baseArgs()));
+        act(() => { vi.advanceTimersByTime(1000); });
+        expect(searchLibrary).not.toHaveBeenCalled();
+        // Explicitly off reads the same as omitted — the Browse pages, the
+        // Bookmarks pages and Profile all rely on this staying silent.
+        renderHook(() => useLibrarySearch(baseArgs({ browseWhenEmpty: false })));
+        act(() => { vi.advanceTimersByTime(1000); });
+        expect(searchLibrary).not.toHaveBeenCalled();
+    });
+
+    it('browses once on a completely empty query when browseWhenEmpty is on', async () => {
+        const { result } = renderHook(() => useLibrarySearch(baseArgs({ browseWhenEmpty: true })));
+        await waitFor(() => expect(searchLibrary).toHaveBeenCalled());
+        expect(searchLibrary).toHaveBeenCalledTimes(1);
+        const payload = searchLibrary.mock.calls[0][0];
+        // The empty query goes out as the backend's browse sentinel: GET
+        // /library/search answers a literal empty q (with no categories and no
+        // author) with an empty result set, and only treats '*' as "browse".
+        expect(payload).toMatchObject({ q: '*', asset_types: 'rule', page: 1 });
+        expect(payload.categories).toBeUndefined();
+        expect(payload.author).toBeUndefined();
+        await waitFor(() => expect(result.current.hasSearched).toBe(true));
+    });
+
+    it('still refuses a 1-char query when browseWhenEmpty is on', () => {
+        vi.useFakeTimers();
+        renderHook(() => useLibrarySearch(baseArgs({ query: 't', browseWhenEmpty: true })));
+        act(() => { vi.advanceTimersByTime(1000); });
+        // Half a word is neither a search nor a browse: browsing everything
+        // under it would list rules that have nothing to do with what was typed.
+        expect(searchLibrary).not.toHaveBeenCalled();
+    });
+
+    it('browseWhenEmpty leaves categories/author browsing exactly as it was', async () => {
+        renderHook(() => useLibrarySearch(baseArgs({
+            categories: ['Safety'], author: 'bob', browseWhenEmpty: true,
+        })));
+        await waitFor(() => expect(searchLibrary).toHaveBeenCalled());
+        // Same single request, same payload as without the flag.
+        expect(searchLibrary).toHaveBeenCalledTimes(1);
+        expect(searchLibrary.mock.calls[0][0]).toMatchObject({
+            q: '*', categories: 'Safety', author: 'bob',
+        });
     });
 
     it('clears prior results when filters go empty', async () => {

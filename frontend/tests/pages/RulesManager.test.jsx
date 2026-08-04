@@ -43,6 +43,8 @@ vi.mock('../../src/api', () => ({
     getTrainingStatus: vi.fn(() => ok({ status: 'untrained', is_training: false, training_phase: null, training_phase_detail: null })),
     downloadClassifier: vi.fn(() => Promise.resolve()),
     listLocalDrafts: vi.fn(() => ok({ rules: [] })),
+    // The "Add a Rule" picker searches the public library inline.
+    searchLibrary: vi.fn(() => ok({ results: [], total_results: 0 })),
     // Was missing from this mock, so the page's call threw and was swallowed.
     // Defined now so the models loading/empty split is actually testable.
     getUserModels: vi.fn(() => ok({ models: [] })),
@@ -127,6 +129,7 @@ beforeEach(() => {
     api.getRuleBookmarks.mockResolvedValue({ data: { bookmarks: [] } });
     api.getCEBookmarks.mockResolvedValue({ data: { bookmarks: [] } });
     api.listLocalDrafts.mockResolvedValue({ data: { rules: [] } });
+    api.searchLibrary.mockResolvedValue({ data: { results: [], total_results: 0 } });
     api.updateRuleLogic.mockResolvedValue({ data: { predicate: 'NEW PRED' } });
     api.checkRuleDuplicate.mockResolvedValue({ data: { exists: false } });
     api.saveEditedRule.mockResolvedValue({ data: { predicate: 'SAVED PRED' } });
@@ -421,11 +424,11 @@ describe('RulesManager — add existing rule modal', () => {
         expect(screen.getByText('DRAFT')).toBeInTheDocument();
     });
 
-    it('shows an empty-list message when no bookmarks or drafts exist', async () => {
+    it('shows an empty-list message when no bookmarks, drafts or library rules exist', async () => {
         renderPage();
         await screen.findByText('No Rules Defined');
         fireEvent.click(screen.getAllByText('Add an Existing Rule')[0]);
-        expect(await screen.findByText(/No rules in your Library yet/)).toBeInTheDocument();
+        expect(await screen.findByText(/No rules to add yet/)).toBeInTheDocument();
     });
 
     it('adds a selected rule to the classifier and refetches', async () => {
@@ -495,8 +498,406 @@ describe('RulesManager — add existing rule modal', () => {
         await screen.findByText('Rule Alpha');
         // Open via the always-present action card.
         fireEvent.click(screen.getByText('Add an Existing Rule'));
-        expect(await screen.findByText(/No rules in your Library yet/)).toBeInTheDocument();
+        expect(await screen.findByText(/No rules to add yet/)).toBeInTheDocument();
         expect(screen.queryByText('Already Attached')).not.toBeInTheDocument();
+    });
+});
+
+// Adding a community rule used to mean leaving for the Community page,
+// bookmarking the rule and coming back. The picker searches the public library
+// itself now: local bookmarks/drafts narrow to matches, library hits are
+// appended, and the existing selection/add machinery attaches them.
+describe('RulesManager — add existing rule modal, inline library search', () => {
+    const libraryHit = (over = {}) => ({
+        id: 70,
+        asset_type: 'rule',
+        name: 'Toxic Speech',
+        content: 'CE One AND CE Two',
+        description: 'Flags toxic speech.',
+        public_id: 'pub-70',
+        is_local_draft: false,
+        hybrid_score: 0.9,
+        ...over,
+    });
+
+    const openModal = async () => {
+        renderPage();
+        await screen.findByText('No Rules Defined');
+        fireEvent.click(screen.getAllByText('Add an Existing Rule')[0]);
+        return screen.findByLabelText('Search rules');
+    };
+
+    const type = (input, value) => fireEvent.change(input, { target: { value } });
+
+    // jsdom does no layout, so the scroll metrics the handler reads are all 0.
+    // Stub them to "the user is at the bottom" and fire the event React listens
+    // for on the list container.
+    const scrollToBottom = () => {
+        const el = screen.getByTestId('add-rule-list');
+        Object.defineProperty(el, 'scrollHeight', { value: 900, configurable: true });
+        Object.defineProperty(el, 'clientHeight', { value: 300, configurable: true });
+        Object.defineProperty(el, 'scrollTop', { value: 600, configurable: true });
+        fireEvent.scroll(el);
+        return el;
+    };
+
+    // Serve a different response per requested page.
+    const pagedLibrary = (pages, totalResults) =>
+        api.searchLibrary.mockImplementation(({ page }) =>
+            ok({ results: pages[(page || 1) - 1] || [], total_results: totalResults }));
+
+    it('searches the library for rules and shows the hits with a LIBRARY badge', async () => {
+        api.searchLibrary.mockResolvedValue({ data: { results: [libraryHit()], total_results: 1 } });
+        const input = await openModal();
+        type(input, 'toxic');
+        expect(await screen.findByText('Toxic Speech')).toBeInTheDocument();
+        expect(screen.getByText('LIBRARY')).toBeInTheDocument();
+        // The rule's explanation renders, same as for bookmarks/drafts.
+        expect(screen.getByText('Flags toxic speech.')).toBeInTheDocument();
+        expect(api.searchLibrary).toHaveBeenCalledWith(expect.objectContaining({
+            q: 'toxic',
+            asset_types: 'rule',
+        }));
+    });
+
+    it('does not search below the two-character minimum', async () => {
+        const input = await openModal();
+        type(input, 't');
+        await new Promise((r) => setTimeout(r, 400));
+        // The empty box browses ('*'), so the picker may have asked for the
+        // browse list — but never for the half-typed word itself.
+        expect(api.searchLibrary).not.toHaveBeenCalledWith(expect.objectContaining({ q: 't' }));
+    });
+
+    it('adds a searched library rule through the normal add flow', async () => {
+        api.searchLibrary.mockResolvedValue({ data: { results: [libraryHit()], total_results: 1 } });
+        const input = await openModal();
+        type(input, 'toxic');
+        fireEvent.click(await screen.findByText('Toxic Speech'));
+        fireEvent.click(screen.getByText('Add to Rule Set'));
+        await waitFor(() => expect(api.addRuleToClassifier).toHaveBeenCalledWith('5', '70'));
+        // No bookmark is created on the way — attaching is the whole point.
+        await waitFor(() => expect(api.getClassifierRules).toHaveBeenCalledTimes(2));
+    });
+
+    it('hides a library hit that is already attached to this rule set', async () => {
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture({ source_rule_id: 70 })] } });
+        api.searchLibrary.mockResolvedValue({ data: { results: [libraryHit()], total_results: 1 } });
+        renderPage();
+        await screen.findByText('Rule Alpha');
+        fireEvent.click(screen.getByText('Add an Existing Rule'));
+        type(await screen.findByLabelText('Search rules'), 'toxic');
+        await waitFor(() => expect(api.searchLibrary).toHaveBeenCalled());
+        expect(await screen.findByText(/No rules match your search/)).toBeInTheDocument();
+        expect(screen.queryByText('Toxic Speech')).not.toBeInTheDocument();
+    });
+
+    it('dedupes a library hit against the bookmark row for the same rule', async () => {
+        api.getRuleBookmarks.mockResolvedValue({ data: { bookmarks: [
+            { rule_id: 70, name: 'Toxic Bookmark', predicate: 'X', public_id: 'pub-70' },
+        ] } });
+        api.searchLibrary.mockResolvedValue({ data: { results: [libraryHit()], total_results: 1 } });
+        const input = await openModal();
+        type(input, 'toxic');
+        await waitFor(() => expect(api.searchLibrary).toHaveBeenCalled());
+        // One row, keeping the badge that belongs to the row's own state.
+        expect(await screen.findByText('Toxic Bookmark')).toBeInTheDocument();
+        expect(screen.queryByText('Toxic Speech')).not.toBeInTheDocument();
+        expect(screen.getByText('BOOKMARK')).toBeInTheDocument();
+        expect(screen.queryByText('LIBRARY')).not.toBeInTheDocument();
+    });
+
+    it('badges a draft library hit DRAFT, not LIBRARY', async () => {
+        api.searchLibrary.mockResolvedValue({
+            data: { results: [libraryHit({ id: 71, name: 'Draft Hit', public_id: null, is_local_draft: true })], total_results: 1 },
+        });
+        const input = await openModal();
+        type(input, 'toxic');
+        expect(await screen.findByText('Draft Hit')).toBeInTheDocument();
+        expect(screen.getByText('DRAFT')).toBeInTheDocument();
+        expect(screen.queryByText('LIBRARY')).not.toBeInTheDocument();
+    });
+
+    it('narrows the local list while searching and restores it when the query is cleared', async () => {
+        api.getRuleBookmarks.mockResolvedValue({ data: { bookmarks: [{ rule_id: 50, name: 'Alpha Rule', predicate: 'X' }] } });
+        api.searchLibrary.mockResolvedValue({ data: { results: [libraryHit()], total_results: 1 } });
+        const input = await openModal();
+        expect(await screen.findByText('Alpha Rule')).toBeInTheDocument();
+        type(input, 'toxic');
+        expect(await screen.findByText('Toxic Speech')).toBeInTheDocument();
+        await waitFor(() => expect(screen.queryByText('Alpha Rule')).not.toBeInTheDocument());
+        // Empty query → the local rows are back, unfiltered.
+        type(input, '');
+        expect(await screen.findByText('Alpha Rule')).toBeInTheDocument();
+    });
+
+    it('does not ask the user to narrow the search when more matches exist', async () => {
+        // The truncation hint is gone: the rest of the matches arrive by
+        // scrolling, so neither a count nor an end-of-list note belongs here.
+        api.searchLibrary.mockResolvedValue({ data: { results: [libraryHit()], total_results: 4 } });
+        const input = await openModal();
+        type(input, 'toxic');
+        expect(await screen.findByText('Toxic Speech')).toBeInTheDocument();
+        expect(screen.queryByText(/more results/)).not.toBeInTheDocument();
+        expect(screen.queryByText(/No more rules to show/)).not.toBeInTheDocument();
+    });
+
+    it('appends the next page of library hits when the list is scrolled to the bottom', async () => {
+        api.getRuleBookmarks.mockResolvedValue({ data: { bookmarks: [{ rule_id: 50, name: 'Toxic Bookmark', predicate: 'X' }] } });
+        pagedLibrary([
+            [libraryHit({ id: 70, name: 'Hit One' })],
+            [libraryHit({ id: 71, name: 'Hit Two' })],
+        ], 2);
+        const input = await openModal();
+        type(input, 'toxic');
+        expect(await screen.findByText('Hit One')).toBeInTheDocument();
+        expect(screen.queryByText('Hit Two')).not.toBeInTheDocument();
+
+        scrollToBottom();
+        expect(await screen.findByText('Hit Two')).toBeInTheDocument();
+        // Page 1 stays put — pages accumulate, they do not replace each other.
+        expect(screen.getByText('Hit One')).toBeInTheDocument();
+        // Local rows still lead the list, library hits still follow.
+        expect(screen.getByText('Toxic Bookmark')).toBeInTheDocument();
+        await waitFor(() => expect(api.searchLibrary).toHaveBeenCalledWith(expect.objectContaining({ q: 'toxic', page: 2 })));
+    });
+
+    it('keeps a ticked row ticked when the next page arrives', async () => {
+        pagedLibrary([
+            [libraryHit({ id: 70, name: 'Hit One' })],
+            [libraryHit({ id: 71, name: 'Hit Two' })],
+        ], 2);
+        const input = await openModal();
+        type(input, 'toxic');
+        fireEvent.click(await screen.findByText('Hit One'));
+        scrollToBottom();
+        expect(await screen.findByText('Hit Two')).toBeInTheDocument();
+        expect(screen.getByText('Hit One').closest('[role="checkbox"]')).toHaveAttribute('aria-checked', 'true');
+    });
+
+    it('stops asking for pages once every match is listed', async () => {
+        pagedLibrary([[libraryHit()]], 1);
+        const input = await openModal();
+        type(input, 'toxic');
+        expect(await screen.findByText('Toxic Speech')).toBeInTheDocument();
+        await waitFor(() => expect(screen.getByText(/No more rules to show/)).toBeInTheDocument());
+
+        const before = api.searchLibrary.mock.calls.length;
+        scrollToBottom();
+        scrollToBottom();
+        await new Promise((r) => setTimeout(r, 400));
+        expect(api.searchLibrary).toHaveBeenCalledTimes(before);
+        expect(api.searchLibrary).not.toHaveBeenCalledWith(expect.objectContaining({ page: 2 }));
+    });
+
+    it('lists a rule once when two pages overlap', async () => {
+        const shared = libraryHit({ id: 70, name: 'Shared Hit' });
+        pagedLibrary([
+            [shared, libraryHit({ id: 71, name: 'Hit Two' })],
+            [shared, libraryHit({ id: 72, name: 'Hit Three' })],
+        ], 4);
+        const input = await openModal();
+        type(input, 'toxic');
+        expect(await screen.findByText('Shared Hit')).toBeInTheDocument();
+
+        scrollToBottom();
+        expect(await screen.findByText('Hit Three')).toBeInTheDocument();
+        expect(screen.getAllByText('Shared Hit')).toHaveLength(1);
+        expect(screen.getAllByText('Hit Two')).toHaveLength(1);
+    });
+
+    it('drops the pages collected so far when the query changes', async () => {
+        api.searchLibrary.mockImplementation(({ q, page }) => {
+            if (q === 'toxic') {
+                return ok({
+                    results: page === 1
+                        ? [libraryHit({ id: 70, name: 'Toxic One' })]
+                        : [libraryHit({ id: 71, name: 'Toxic Two' })],
+                    total_results: 2,
+                });
+            }
+            return ok({ results: [libraryHit({ id: 80, name: 'Spam One' })], total_results: 1 });
+        });
+        const input = await openModal();
+        type(input, 'toxic');
+        expect(await screen.findByText('Toxic One')).toBeInTheDocument();
+        scrollToBottom();
+        expect(await screen.findByText('Toxic Two')).toBeInTheDocument();
+
+        type(input, 'spammy');
+        expect(await screen.findByText('Spam One')).toBeInTheDocument();
+        expect(screen.queryByText('Toxic One')).not.toBeInTheDocument();
+        expect(screen.queryByText('Toxic Two')).not.toBeInTheDocument();
+        // The new query starts again at page 1.
+        expect(api.searchLibrary).toHaveBeenLastCalledWith(expect.objectContaining({ q: 'spammy', page: 1 }));
+    });
+
+    it('shows a loading line while the next page is on its way', async () => {
+        let releasePage2;
+        api.searchLibrary.mockImplementation(({ page }) => {
+            if (page === 1) return ok({ results: [libraryHit({ id: 70, name: 'Hit One' })], total_results: 2 });
+            return new Promise((resolve) => {
+                releasePage2 = () => resolve({ data: { results: [libraryHit({ id: 71, name: 'Hit Two' })], total_results: 2 } });
+            });
+        });
+        const input = await openModal();
+        type(input, 'toxic');
+        expect(await screen.findByText('Hit One')).toBeInTheDocument();
+
+        scrollToBottom();
+        expect(await screen.findByText(/Loading more rules/)).toBeInTheDocument();
+        // Still showing once the request is actually out and unanswered.
+        await waitFor(() => expect(api.searchLibrary).toHaveBeenCalledWith(expect.objectContaining({ page: 2 })));
+        expect(screen.getByText(/Loading more rules/)).toBeInTheDocument();
+        await act(async () => { releasePage2(); });
+        expect(await screen.findByText('Hit Two')).toBeInTheDocument();
+        expect(screen.queryByText(/Loading more rules/)).not.toBeInTheDocument();
+    });
+
+    it('shows the search error without losing the local list', async () => {
+        api.getRuleBookmarks.mockResolvedValue({ data: { bookmarks: [{ rule_id: 50, name: 'Toxic Bookmark', predicate: 'X' }] } });
+        api.searchLibrary.mockRejectedValue(new Error('down'));
+        const input = await openModal();
+        type(input, 'toxic');
+        expect(await screen.findByText(/Search failed/)).toBeInTheDocument();
+        expect(screen.getByText('Toxic Bookmark')).toBeInTheDocument();
+    });
+});
+
+// An empty box used to list bookmarks and drafts only, so there was nothing to
+// scroll into and the paging looked broken. The picker now browses the public
+// library from the moment it opens: bookmarks and drafts first, the library
+// under them, more of it as the user scrolls.
+describe('RulesManager — add existing rule modal, browsing with an empty box', () => {
+    const libraryHit = (over = {}) => ({
+        id: 70,
+        asset_type: 'rule',
+        name: 'Toxic Speech',
+        content: 'CE One AND CE Two',
+        description: 'Flags toxic speech.',
+        public_id: 'pub-70',
+        is_local_draft: false,
+        ...over,
+    });
+
+    // Browse (empty box) and search (typed) are told apart by the query the
+    // picker sends: '*' is the backend's browse sentinel.
+    const BROWSE_Q = '*';
+
+    const openModal = async () => {
+        renderPage();
+        await screen.findByText('No Rules Defined');
+        fireEvent.click(screen.getAllByText('Add an Existing Rule')[0]);
+        return screen.findByLabelText('Search rules');
+    };
+
+    const type = (input, value) => fireEvent.change(input, { target: { value } });
+
+    const scrollToBottom = () => {
+        const el = screen.getByTestId('add-rule-list');
+        Object.defineProperty(el, 'scrollHeight', { value: 900, configurable: true });
+        Object.defineProperty(el, 'clientHeight', { value: 300, configurable: true });
+        Object.defineProperty(el, 'scrollTop', { value: 600, configurable: true });
+        fireEvent.scroll(el);
+    };
+
+    // The rows in list order, top to bottom (name span of each row).
+    // Row containers only — the tick box inside each row carries the same role.
+    const rowNames = () => Array.from(
+        screen.getByTestId('add-rule-list').querySelectorAll('div[role="checkbox"]'),
+    ).map((row) => row.querySelector('span').textContent);
+
+    it('lists library rules under the bookmarks and drafts without any typing', async () => {
+        api.getRuleBookmarks.mockResolvedValue({ data: { bookmarks: [{ rule_id: 50, name: 'Bookmarked R', predicate: 'X' }] } });
+        api.listLocalDrafts.mockResolvedValue({ data: { rules: [{ rule_id: 60, name: 'Draft R', predicate: 'Y' }] } });
+        api.searchLibrary.mockResolvedValue({ data: { results: [libraryHit()], total_results: 1 } });
+        await openModal();
+
+        expect(await screen.findByText('Toxic Speech')).toBeInTheDocument();
+        // Local rows lead, the library follows.
+        expect(rowNames()).toEqual(['Bookmarked R', 'Draft R', 'Toxic Speech']);
+        expect(screen.getByText('LIBRARY')).toBeInTheDocument();
+        expect(api.searchLibrary).toHaveBeenCalledWith(expect.objectContaining({
+            q: BROWSE_Q, asset_types: 'rule', page: 1,
+        }));
+    });
+
+    it('pages in the next batch of library rules as the list is scrolled', async () => {
+        api.searchLibrary.mockImplementation(({ page }) => ok({
+            results: page === 1
+                ? [libraryHit({ id: 70, name: 'Browse One' })]
+                : [libraryHit({ id: 71, name: 'Browse Two' })],
+            total_results: 2,
+        }));
+        await openModal();
+        expect(await screen.findByText('Browse One')).toBeInTheDocument();
+        expect(screen.queryByText('Browse Two')).not.toBeInTheDocument();
+
+        scrollToBottom();
+        expect(await screen.findByText('Browse Two')).toBeInTheDocument();
+        // Page 1 is kept, not replaced.
+        expect(rowNames()).toEqual(['Browse One', 'Browse Two']);
+        await waitFor(() => expect(api.searchLibrary).toHaveBeenCalledWith(
+            expect.objectContaining({ q: BROWSE_Q, page: 2 }),
+        ));
+    });
+
+    it('returns to the browse list when the typed query is cleared', async () => {
+        api.searchLibrary.mockImplementation(({ q }) => ok({
+            results: q === BROWSE_Q
+                ? [libraryHit({ id: 70, name: 'Browse One' })]
+                : [libraryHit({ id: 80, name: 'Searched Hit' })],
+            total_results: 1,
+        }));
+        const input = await openModal();
+        expect(await screen.findByText('Browse One')).toBeInTheDocument();
+
+        type(input, 'toxic');
+        expect(await screen.findByText('Searched Hit')).toBeInTheDocument();
+        expect(screen.queryByText('Browse One')).not.toBeInTheDocument();
+
+        type(input, '');
+        expect(await screen.findByText('Browse One')).toBeInTheDocument();
+        expect(screen.queryByText('Searched Hit')).not.toBeInTheDocument();
+    });
+
+    it('hides a browsed rule that is already attached to this rule set', async () => {
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture({ source_rule_id: 70 })] } });
+        api.searchLibrary.mockResolvedValue({ data: { results: [libraryHit()], total_results: 1 } });
+        renderPage();
+        await screen.findByText('Rule Alpha');
+        fireEvent.click(screen.getByText('Add an Existing Rule'));
+        await waitFor(() => expect(api.searchLibrary).toHaveBeenCalled());
+        expect(await screen.findByText(/No rules to add yet/)).toBeInTheDocument();
+        expect(screen.queryByText('Toxic Speech')).not.toBeInTheDocument();
+    });
+
+    it('dedupes a browsed rule against the bookmark row for the same rule', async () => {
+        api.getRuleBookmarks.mockResolvedValue({ data: { bookmarks: [
+            { rule_id: 70, name: 'Toxic Bookmark', predicate: 'X', public_id: 'pub-70' },
+        ] } });
+        api.searchLibrary.mockResolvedValue({ data: { results: [libraryHit()], total_results: 1 } });
+        await openModal();
+        await waitFor(() => expect(api.searchLibrary).toHaveBeenCalled());
+        expect(await screen.findByText('Toxic Bookmark')).toBeInTheDocument();
+        expect(screen.queryByText('Toxic Speech')).not.toBeInTheDocument();
+        expect(screen.getByText('BOOKMARK')).toBeInTheDocument();
+        expect(screen.queryByText('LIBRARY')).not.toBeInTheDocument();
+    });
+
+    it('attaches a browsed rule through the normal add flow', async () => {
+        api.searchLibrary.mockResolvedValue({ data: { results: [libraryHit()], total_results: 1 } });
+        await openModal();
+        fireEvent.click(await screen.findByText('Toxic Speech'));
+        fireEvent.click(screen.getByText('Add to Rule Set'));
+        await waitFor(() => expect(api.addRuleToClassifier).toHaveBeenCalledWith('5', '70'));
+    });
+
+    it('does not browse while the picker is closed', async () => {
+        renderPage();
+        await screen.findByText('No Rules Defined');
+        await new Promise((r) => setTimeout(r, 400));
+        expect(api.searchLibrary).not.toHaveBeenCalled();
     });
 });
 

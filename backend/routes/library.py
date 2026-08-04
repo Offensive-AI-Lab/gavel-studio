@@ -31,6 +31,10 @@ class SearchResult(BaseModel):
     asset_type: str
     name: str
     content: Optional[str]
+    # Rule blurb, straight from rules.description. None for CE results — the
+    # "Add a Rule" picker shows it under the rule name and falls back to the
+    # predicate when it's missing.
+    description: Optional[str] = None
     ces: List[str] = []
     # Group-aware CE list for rule results. Each entry is
     # {ce_id, name, groups: [group_name, ...]} — the logic group(s) the CE
@@ -90,14 +94,16 @@ def _hydrate_results(paged_candidates: List[dict]) -> List[SearchResult]:
     rule_ce_map = {}          # rule_id -> [name, ...]
     rule_active_ces_map = {}  # rule_id -> [{ce_id, name, groups: [gname]}, ...]
     rule_condition_map = {}   # rule_id -> condition string
+    rule_description_map = {} # rule_id -> description string
     if rule_ids:
         logic_rows = execute_query_dict(
-            "SELECT rule_id, ce_groups, condition FROM rules WHERE rule_id = ANY(%s)",
+            "SELECT rule_id, ce_groups, condition, description FROM rules WHERE rule_id = ANY(%s)",
             (rule_ids,),
         ) or []
         groups_of_by_rule = {}  # rule_id -> {ce_name: [gname, ...]}
         for r in logic_rows:
             rule_condition_map[r["rule_id"]] = r.get("condition")
+            rule_description_map[r["rule_id"]] = r.get("description")
             groups_of: dict = {}
             for gname, members in (r.get("ce_groups") or {}).items():
                 for member in members or []:
@@ -161,6 +167,7 @@ def _hydrate_results(paged_candidates: List[dict]) -> List[SearchResult]:
             asset_type=cand["asset_type"],
             name=cand["name"],
             content=cand["content"],
+            description=rule_description_map.get(cand["id"]) if cand["asset_type"] == "rule" else None,
             ces=c_ces,
             active_ces=c_active_ces,
             condition=rule_condition_map.get(cand["id"]) if cand["asset_type"] == "rule" else None,
@@ -290,10 +297,15 @@ async def search_library(
                 author_filter = "AND created_by_username = %s"
                 author_params.append(author_norm)
 
+            # Same visibility gating as the hybrid path (see
+            # HybridSearchService._fetch_candidates): half-generated rows never
+            # surface, and the public library hides local drafts.
+            visibility = "is_ready = TRUE AND is_local_draft = FALSE"
+
             if "rule" in requested_assets:
-                browse_sqls.append(f"SELECT rule_id as id, 'rule' as asset_type, name, predicate as content, type, categories, is_local_draft, created_by_username, public_id, 1.0 as final_score FROM rules WHERE 1=1 {cat_filter} {author_filter}")
+                browse_sqls.append(f"SELECT rule_id as id, 'rule' as asset_type, name, predicate as content, type, categories, is_local_draft, created_by_username, public_id, 1.0 as final_score FROM rules WHERE {visibility} {cat_filter} {author_filter}")
             if "ce" in requested_assets:
-                browse_sqls.append(f"SELECT ce_id as id, 'ce' as asset_type, name, definition as content, type, categories, is_local_draft, created_by_username, public_id, 1.0 as final_score FROM cognitive_elements WHERE 1=1 {cat_filter} {author_filter}")
+                browse_sqls.append(f"SELECT ce_id as id, 'ce' as asset_type, name, definition as content, type, categories, is_local_draft, created_by_username, public_id, 1.0 as final_score FROM cognitive_elements WHERE {visibility} {cat_filter} {author_filter}")
 
             browse_sql = f"SELECT * FROM ({' UNION ALL '.join(browse_sqls)}) as unified ORDER BY name ASC LIMIT {candidate_limit}"
             # Author param appears once per UNION arm.
@@ -427,7 +439,7 @@ async def search_bookmarks(
                            r.public_id, 1.0 AS final_score
                     FROM rules r
                     JOIN rule_bookmarks rb ON rb.rule_id = r.rule_id
-                    WHERE rb.user_id = %(user_id)s
+                    WHERE rb.user_id = %(user_id)s AND r.is_ready = TRUE
                     {cat_filter}
                     """
                 )
@@ -441,7 +453,7 @@ async def search_bookmarks(
                            r.public_id, 1.0 AS final_score
                     FROM cognitive_elements r
                     JOIN ce_bookmarks cb ON cb.ce_id = r.ce_id
-                    WHERE cb.user_id = %(user_id)s
+                    WHERE cb.user_id = %(user_id)s AND r.is_ready = TRUE
                     {cat_filter}
                     """
                 )

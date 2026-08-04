@@ -35,13 +35,14 @@ import {
     updateModelLayers,
 } from '../api';
 import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
+import useLibrarySearch from '../hooks/useLibrarySearch';
 import { useTutorialContent } from '../contexts/TutorialContext';
 import { recordRecent } from '../utils/recents';
 import { extractLogic, normalizeGroups, validateEditorState } from '../utils/ruleLogic';
 
 // Icons & Utils
 import { showAlertDialog, showConfirmDialog } from '../components/ConfirmDialog/confirmDialog';
-import { FiPlus, FiGlobe, FiZap, FiRefreshCw, FiArrowLeft, FiInbox, FiDownload, FiUploadCloud, FiCheckCircle, FiSettings, FiBarChart2, FiRadio, FiAlertTriangle, FiCpu, FiCopy, FiBookmark, FiLayers, FiHome, FiShield, FiChevronRight, FiFileText } from 'react-icons/fi';
+import { FiPlus, FiGlobe, FiZap, FiRefreshCw, FiArrowLeft, FiInbox, FiDownload, FiUploadCloud, FiCheckCircle, FiSettings, FiBarChart2, FiRadio, FiAlertTriangle, FiCpu, FiCopy, FiBookmark, FiLayers, FiHome, FiShield, FiChevronRight, FiFileText, FiSearch } from 'react-icons/fi';
 
 import '../css/RulesManager.css';
 
@@ -58,6 +59,20 @@ function friendlyTrainingError(detail) {
     }
     return d;
 }
+
+// How many library matches the "Add a Rule" picker asks for per request. The
+// modal list is a short scrollable strip: it shows one page at a time and asks
+// for the next one as the user scrolls towards the bottom.
+const ADD_SEARCH_PAGE_SIZE = 20;
+// How deep the picker can page. The backend collects at most `candidate_limit`
+// rows and paginates within them, so this is the ceiling on how far the list
+// can be scrolled — with the hook's default of 80 the browse list would stop
+// four pages in. 200 is the route's maximum (candidate_limit: le=200).
+const ADD_SEARCH_CANDIDATE_LIMIT = 200;
+// How close to the bottom of the list (in px) counts as "scrolled to the end"
+// and triggers the next page. A small cushion so the fetch starts just before
+// the last row is reached instead of after it.
+const ADD_SEARCH_SCROLL_SLACK = 80;
 
 const RulesManager = () => {
     const { classifierId } = useParams();
@@ -89,6 +104,127 @@ const RulesManager = () => {
     const [ruleDrafts, setRuleDrafts] = useState([]);
     // rule_ids whose explanation is expanded in the "Add a Rule" picker.
     const [expandedAddDescIds, setExpandedAddDescIds] = useState(new Set());
+
+    // "Add a Rule" picker search. Bookmarks and drafts alone meant a community
+    // rule could only be added by leaving for the Community page, bookmarking
+    // it and coming back; the picker searches the public library itself now.
+    const [addSearchQuery, setAddSearchQuery] = useState('');
+    // Stable identities so the search hook's deps don't churn on re-render.
+    const addSearchAssetTypes = useMemo(() => ['rule'], []);
+    const addSearchCategories = useMemo(() => [], []);
+    const addModalOpen = modalConfig.isOpen && modalConfig.type === 'add_bookmarked_rule';
+    // Which page of library matches has been asked for. Bumped by scrolling to
+    // the bottom of the picker list.
+    const [addSearchPage, setAddSearchPage] = useState(1);
+    const {
+        results: addSearchResults,
+        totalResults: addSearchTotal,
+        loading: addSearchLoading,
+        error: addSearchError,
+    } = useLibrarySearch({
+        // Blanking the query while the modal is closed keeps a leftover search
+        // from firing on an unrelated re-render.
+        query: addModalOpen ? addSearchQuery : '',
+        categories: addSearchCategories,
+        page: addSearchPage,
+        pageSize: ADD_SEARCH_PAGE_SIZE,
+        assetTypes: addSearchAssetTypes,
+        candidateLimit: ADD_SEARCH_CANDIDATE_LIMIT,
+        allowEmptyQuery: false,
+        // Open the picker and the library is already listed, so the user can
+        // scroll from their bookmarks and drafts straight into it. Tied to the
+        // modal being open: with it closed there is nothing to browse for.
+        browseWhenEmpty: addModalOpen,
+    });
+    // useLibrarySearch REPLACES its results on every page, so the picker keeps
+    // the pages it has already been given: { [pageNumber]: results }. Scrolling
+    // to page 2 would otherwise swap the first 20 hits out from under the user —
+    // and take any ticked row with them. Keyed by page rather than concatenated
+    // so a response landing twice can only overwrite its own slot.
+    const [addSearchPages, setAddSearchPages] = useState({});
+    // Highest page claimed. Kept in a ref as well as state because a burst of
+    // scroll events all run against the same render, and each of them has to see
+    // the page the one before it already claimed.
+    const addPageRef = useRef(1);
+    // The response last filed away, by identity. Bumping the page re-runs the
+    // effect below while the hook still holds the PREVIOUS page's results; this
+    // is what tells the two apart.
+    const addFiledResultsRef = useRef(null);
+
+    // Drop every collected page and go back to page 1.
+    const resetAddLibraryPaging = () => {
+        addPageRef.current = 1;
+        addFiledResultsRef.current = null;
+        setAddSearchPage(1);
+        setAddSearchPages({});
+    };
+
+    // A new query means new results, and reopening the modal starts a fresh
+    // pick — neither may inherit the pages collected before it.
+    useEffect(() => {
+        resetAddLibraryPaging();
+    }, [addSearchQuery, addModalOpen]);
+
+    // A failed search leaves nothing trustworthy to page from: clear what was
+    // collected and start again from page 1.
+    useEffect(() => {
+        if (addSearchError) resetAddLibraryPaging();
+    }, [addSearchError]);
+
+    // File each response under the page it was asked for.
+    useEffect(() => {
+        if (addSearchLoading || addSearchError) return;
+        // Same results object as last time — the page was just bumped and its
+        // response is still on the way.
+        if (addFiledResultsRef.current === addSearchResults) return;
+        addFiledResultsRef.current = addSearchResults;
+        setAddSearchPages((prev) => ({ ...prev, [addSearchPage]: addSearchResults || [] }));
+    }, [addSearchResults, addSearchLoading, addSearchError, addSearchPage]);
+
+    // Every page collected so far, in the order they were asked for, deduped by
+    // id — pages can overlap when the library shifts between requests.
+    const addLibraryRows = useMemo(() => {
+        const seen = new Set();
+        const rows = [];
+        Object.keys(addSearchPages).map(Number).sort((a, b) => a - b).forEach((p) => {
+            (addSearchPages[p] || []).forEach((item) => {
+                const id = item.id ?? item.rule_id;
+                if (id == null || seen.has(String(id))) return;
+                seen.add(String(id));
+                rows.push(item);
+            });
+        });
+        return rows;
+    }, [addSearchPages]);
+
+    // Whether the library has matches beyond the ones already collected. Counted
+    // on the raw hits, duplicates included: counting the deduped rows would never
+    // reach the total when pages overlap, and the picker would ask for page after
+    // page forever. An empty page also means the end, whatever the total says.
+    const addLibraryHasMore = useMemo(() => {
+        const pages = Object.keys(addSearchPages).map(Number).sort((a, b) => a - b);
+        if (pages.length === 0) return false;
+        if ((addSearchPages[pages[pages.length - 1]] || []).length === 0) return false;
+        const fetched = pages.reduce((n, p) => n + (addSearchPages[p] || []).length, 0);
+        return fetched < (addSearchTotal || 0);
+    }, [addSearchPages, addSearchTotal]);
+
+    // A page has been asked for and its results are not in yet.
+    const addPageInFlight = !addSearchError && addSearchPages[addSearchPage] === undefined;
+
+    // Ask for the next page once the user reaches the bottom of the list. Held
+    // back while a request is out, and once every match is on screen.
+    const handleAddListScroll = (e) => {
+        const el = e.currentTarget;
+        if (!el || !addLibraryHasMore) return;
+        if (addSearchLoading || addPageInFlight) return;
+        // A bump claimed earlier in this same burst of scroll events.
+        if (addPageRef.current !== addSearchPage) return;
+        const distanceToEnd = el.scrollHeight - el.scrollTop - el.clientHeight;
+        if (distanceToEnd > ADD_SEARCH_SCROLL_SLACK) return;
+        addPageRef.current = addSearchPage + 1;
+        setAddSearchPage(addPageRef.current);
+    };
 
     const [sidebarContext, setSidebarContext] = useState({ modelName: 'Loading...', classifierName: 'Loading...' });
     // Seed from sessionStorage so navigating back to this page mid-training
@@ -681,6 +817,7 @@ const RulesManager = () => {
     // --- Modal Logic ---
     const openAddFromBookmarks = () => {
         setSelectedRuleIds(new Set());
+        setAddSearchQuery('');
         // Refetch so a rule the user just finished building (which became ready
         // in the background while they were on this page) shows up immediately,
         // instead of only after leaving and re-entering the page.
@@ -1294,38 +1431,116 @@ const RulesManager = () => {
                     // Merge bookmarked (public) rules with the user's own draft
                     // rules so freshly-built / AI-generated rules — which have no
                     // public_id and can't be bookmarked — can still be added to a
-                    // guardrail. Hide any rule already attached, then dedup by id.
+                    // guardrail. The public library follows them — browsed with an
+                    // empty box, searched once something is typed (which also
+                    // narrows the local rows) — so a community rule can be
+                    // attached here instead of via the Community page.
+                    // Hide any rule already attached, then dedup by id.
                     const attached = new Set((rules || []).map((r) => String(r.source_rule_id)));
-                    const merged = [
-                        ...ruleBookmarks.map((b) => ({ rule_id: b.rule_id, name: b.name, predicate: b.predicate, description: b.description, source: 'bookmark' })),
-                        ...ruleDrafts.map((d) => ({ rule_id: d.rule_id, name: d.name, predicate: d.predicate, description: d.description, source: 'draft' })),
-                    ].filter((c) => !attached.has(String(c.rule_id)));
+                    const q = addSearchQuery.trim().toLowerCase();
+                    // Mirrors the hook's 2-character minimum: below it nothing is
+                    // requested, so the local list must not narrow either.
+                    const searching = q.length >= 2;
+                    // With the box empty the picker browses the library instead
+                    // of searching it, so there are library rows to scroll into
+                    // from the very first paint. The gap in between — one typed
+                    // character — asks for nothing (see useLibrarySearch), so
+                    // the list is the local rows alone for that keystroke.
+                    const libraryLive = searching || q.length === 0;
+                    const matchesQuery = (c) => !searching
+                        || [c.name, c.description, c.predicate].some((f) => String(f || '').toLowerCase().includes(q));
                     const seen = new Set();
-                    const list = merged.filter((c) => {
+                    const keepFirst = (c) => {
                         const k = String(c.rule_id);
                         if (seen.has(k)) return false;
                         seen.add(k);
                         return true;
-                    });
+                    };
+                    const local = [
+                        ...ruleBookmarks.map((b) => ({ rule_id: b.rule_id, name: b.name, predicate: b.predicate, description: b.description, source: 'bookmark' })),
+                        ...ruleDrafts.map((d) => ({ rule_id: d.rule_id, name: d.name, predicate: d.predicate, description: d.description, source: 'draft' })),
+                    ].filter((c) => !attached.has(String(c.rule_id))).filter(matchesQuery).filter(keepFirst);
+                    // Library hits come after the local rows and are deduped
+                    // against them, so a rule the user already bookmarked stays a
+                    // single row carrying its own badge. Every page collected so
+                    // far is listed, oldest first, so scrolling past the
+                    // bookmarks and drafts keeps going into the library.
+                    const libraryRows = !libraryLive ? [] : (addLibraryRows || [])
+                        .filter((item) => (item.asset_type || item.type) === 'rule')
+                        .map((item) => ({
+                            rule_id: item.id ?? item.rule_id,
+                            name: item.name,
+                            predicate: item.content || item.predicate,
+                            description: item.description,
+                            is_local_draft: item.is_local_draft,
+                            source: 'library',
+                        }))
+                        .filter((c) => c.rule_id != null && !attached.has(String(c.rule_id)))
+                        .filter(keepFirst);
+                    const list = [...local, ...libraryRows];
+                    // A request is out (or about to be) for the rows this list
+                    // is still missing.
+                    const fetching = libraryLive && (addSearchLoading || addPageInFlight);
+                    // Footer state, in the order it can occur: the next page is
+                    // on its way / there is nothing left to fetch.
+                    const loadingMore = fetching && list.length > 0;
+                    const atEnd = libraryLive && !loadingMore && !addLibraryHasMore && libraryRows.length > 0;
                     return (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                             <p style={{ margin: 0, fontSize: '0.9rem', color: '#64748b' }}>
-                                Add rules to this rule set — from your bookmarks or your unpublished drafts. Pick as many as you like.
+                                Add rules to this rule set — from your bookmarks, your unpublished drafts, or the public library. Pick as many as you like.
                             </p>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '300px', overflowY: 'auto' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '12px 16px', background: 'rgba(2, 6, 23, 0.55)', border: '1.5px solid rgba(148, 163, 184, 0.22)', borderRadius: '12px' }}>
+                                <FiSearch style={{ color: '#94a3b8', flexShrink: 0 }} />
+                                <input
+                                    type="text"
+                                    value={addSearchQuery}
+                                    onChange={(e) => {
+                                        // A new query changes which rows are visible;
+                                        // carrying ticks on now-hidden rows would attach
+                                        // rules the user can no longer see.
+                                        setSelectedRuleIds(new Set());
+                                        setAddSearchQuery(e.target.value);
+                                    }}
+                                    placeholder="Search the public library…"
+                                    aria-label="Search rules"
+                                    style={{ flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none', color: '#f1f5f9', fontSize: '0.95rem', fontFamily: 'inherit' }}
+                                />
+                            </div>
+                            {addSearchError && (
+                                <div style={{ fontSize: '0.82rem', color: '#fca5a5' }}>{addSearchError}</div>
+                            )}
+                            <div
+                                data-testid="add-rule-list"
+                                onScroll={handleAddListScroll}
+                                style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '300px', overflowY: 'auto' }}
+                            >
                                 {list.length === 0 ? (
                                     <div style={{ textAlign: 'center', padding: '24px', color: '#94a3b8', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '12px', alignItems: 'center' }}>
-                                        <span>No rules in your Library yet — bookmark rules from the Community, or build your own.</span>
-                                        <button
-                                            onClick={() => navigate('/community')}
-                                            style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '8px 16px', borderRadius: '10px', border: '1px solid rgba(96, 165, 250, 0.45)', background: 'rgba(59, 130, 246, 0.18)', color: '#bfdbfe', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600 }}
-                                        >
-                                            <FiGlobe size={14} /> Browse Community rules
-                                        </button>
+                                        {fetching ? (
+                                            <span>{searching ? 'Searching…' : 'Loading the library…'}</span>
+                                        ) : searching ? (
+                                            <span>No rules match your search.</span>
+                                        ) : (
+                                            <>
+                                                {/* The public library is already listed here, so
+                                                    an empty list means there is nothing anywhere. */}
+                                                <span>No rules to add yet — nothing in your bookmarks or drafts, and nothing in the public library.</span>
+                                                <button
+                                                    onClick={() => navigate('/community')}
+                                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '8px 16px', borderRadius: '10px', border: '1px solid rgba(96, 165, 250, 0.45)', background: 'rgba(59, 130, 246, 0.18)', color: '#bfdbfe', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600 }}
+                                                >
+                                                    <FiGlobe size={14} /> Browse Community rules
+                                                </button>
+                                            </>
+                                        )}
                                     </div>
                                 ) : list.map((r) => {
                                     const selected = selectedRuleIds.has(String(r.rule_id));
-                                    const isDraft = r.source === 'draft';
+                                    // A search hit's badge comes from the row itself, not from
+                                    // the list it arrived in — a bookmarked rule stays BOOKMARK.
+                                    const isDraft = r.source === 'library' ? !!r.is_local_draft : r.source === 'draft';
+                                    const isLibrary = r.source === 'library' && !isDraft;
                                     return (
                                         <div
                                             key={`${r.source}-${r.rule_id}`}
@@ -1357,10 +1572,10 @@ const RulesManager = () => {
                                                 <span style={{
                                                     flexShrink: 0, fontSize: '0.66rem', fontWeight: 700, letterSpacing: '0.04em',
                                                     padding: '2px 8px', borderRadius: 999,
-                                                    color: isDraft ? '#fcd34d' : '#93c5fd',
-                                                    background: isDraft ? 'rgba(245, 158, 11, 0.18)' : 'rgba(59, 130, 246, 0.18)',
-                                                    border: `1px solid ${isDraft ? 'rgba(251, 191, 36, 0.40)' : 'rgba(96, 165, 250, 0.40)'}`,
-                                                }}>{isDraft ? 'DRAFT' : 'BOOKMARK'}</span>
+                                                    color: isDraft ? '#fcd34d' : (isLibrary ? '#6ee7b7' : '#93c5fd'),
+                                                    background: isDraft ? 'rgba(245, 158, 11, 0.18)' : (isLibrary ? 'rgba(16, 185, 129, 0.18)' : 'rgba(59, 130, 246, 0.18)'),
+                                                    border: `1px solid ${isDraft ? 'rgba(251, 191, 36, 0.40)' : (isLibrary ? 'rgba(52, 211, 153, 0.40)' : 'rgba(96, 165, 250, 0.40)')}`,
+                                                }}>{isDraft ? 'DRAFT' : (isLibrary ? 'LIBRARY' : 'BOOKMARK')}</span>
                                             </div>
                                             {/* Prefer the rule's plain-English explanation over the raw
                                                 predicate; clamp long ones with an inline Show more/less. Falls
@@ -1403,6 +1618,16 @@ const RulesManager = () => {
                                         </div>
                                     );
                                 })}
+                                {loadingMore && (
+                                    <div style={{ padding: '10px 4px', textAlign: 'center', fontSize: '0.78rem', color: '#94a3b8' }}>
+                                        Loading more rules…
+                                    </div>
+                                )}
+                                {atEnd && (
+                                    <div style={{ padding: '10px 4px', textAlign: 'center', fontSize: '0.78rem', color: '#64748b' }}>
+                                        No more rules to show.
+                                    </div>
+                                )}
                             </div>
                             <ReactiveButton
                                 label={selectedRuleIds.size > 1 ? `Add ${selectedRuleIds.size} Rules to Rule Set` : 'Add to Rule Set'}

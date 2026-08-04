@@ -6,7 +6,8 @@ import { searchLibrary } from '../api';
 //     introducing perceptible latency on the rendered results.
 //   * 2-character minimum — single-character queries are too low-signal for the
 //     embedder and would generate spurious requests. Categories-only search is
-//     still permitted when allowEmptyQuery is true.
+//     still permitted when allowEmptyQuery is true, and a completely empty box
+//     browses the library when browseWhenEmpty is true.
 const DEFAULT_DEBOUNCE_MS = 250;
 const MIN_QUERY_LEN = 2;
 
@@ -32,6 +33,11 @@ const MIN_QUERY_LEN = 2;
  * @param {string[]} args.assetTypes      — ['rule'] | ['ce'] | ['rule','ce']
  * @param {number} [args.candidateLimit]  — backend retrieval pool size
  * @param {boolean} [args.allowEmptyQuery] — if true, categories-only search is OK
+ * @param {boolean} [args.browseWhenEmpty] — if true, a completely empty query
+ *        (no text, no categories, no author) still issues a request, so the
+ *        caller can list the library and page through it without the user
+ *        typing anything. OFF by default: the Browse pages deliberately show
+ *        nothing until there is something to search on.
  * @param {number} [args.debounceMs]      — override debounce window
  */
 export default function useLibrarySearch({
@@ -43,6 +49,7 @@ export default function useLibrarySearch({
     author,
     candidateLimit = 80,
     allowEmptyQuery = true,
+    browseWhenEmpty = false,
     debounceMs = DEFAULT_DEBOUNCE_MS,
     // Bump this (e.g. from a "Try again" button) to force the effect to
     // re-issue the current search even when no query/filter changed — used to
@@ -70,9 +77,18 @@ export default function useLibrarySearch({
         const hasQuery = trimmed.length >= MIN_QUERY_LEN;
         const hasCategories = (categories?.length || 0) > 0;
         const hasAuthor = !!(author && author.trim());
+        // Nothing typed at all. A half-typed query (1 char) is NOT this: it is
+        // below the minimum, so it stays a no-search — browsing the whole
+        // library under a query the user is mid-way through typing would show
+        // rows that have nothing to do with what they typed.
+        const emptyQuery = trimmed.length === 0;
         // An author filter alone is a valid search — the empty-query
         // browse path on the backend accepts (categories OR author).
-        const wantSearch = hasQuery || (allowEmptyQuery && (hasCategories || hasAuthor));
+        // browseWhenEmpty is the third way in: browse everything, no filter at
+        // all. Opt-in per caller (see the picker in RulesManager).
+        const wantSearch = hasQuery
+            || (allowEmptyQuery && (hasCategories || hasAuthor))
+            || (browseWhenEmpty && emptyQuery);
 
         if (!wantSearch) {
             setResults([]);
@@ -90,8 +106,12 @@ export default function useLibrarySearch({
             setError('');
             try {
                 const res = await searchLibrary({
-                    // '*' tells the backend "categories-only browse" — preserved
-                    // for backward compat with the existing route.
+                    // '*' is the backend's "no query — browse" sentinel
+                    // (GET /library/search: `search_query = q if q and q != "*"
+                    // else ""`). It cannot be sent as a literal empty string:
+                    // the route answers an empty q with no filters by returning
+                    // an empty result set, so '*' is what makes the browse
+                    // branch run for both the filtered and the unfiltered case.
                     q: trimmed || '*',
                     categories: hasCategories ? categories.join(',') : undefined,
                     asset_types: (assetTypes || []).join(','),
@@ -117,7 +137,7 @@ export default function useLibrarySearch({
         return () => clearTimeout(timer);
         // categoriesKey / assetTypesKey are derived from the array contents above.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [query, categoriesKey, page, pageSize, assetTypesKey, author, candidateLimit, allowEmptyQuery, debounceMs, reloadKey]);
+    }, [query, categoriesKey, page, pageSize, assetTypesKey, author, candidateLimit, allowEmptyQuery, browseWhenEmpty, debounceMs, reloadKey]);
 
     return { results, totalResults, loading, error, hasSearched };
 }

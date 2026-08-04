@@ -20,6 +20,7 @@ automatically. Names are uniquified per-test to dodge 409/unique conflicts.
 """
 import json
 import time
+import uuid
 
 import pytest
 
@@ -425,6 +426,211 @@ class TestPublishEndpointsRemoved:
             res = client.post(path, json={"old_name": "a", "new_name": "b"},
                               headers=auth_headers)
             assert res.status_code == 404, path
+
+
+# ---------------------------------------------------------------------------
+# GET /library/search — visibility gating + rule description
+#
+# Rules of the road (both the hybrid and the browse branch must honour them):
+#   * is_ready = FALSE never surfaces anywhere;
+#   * public search hides is_local_draft = TRUE rows;
+#   * bookmark-scoped search keeps the user's bookmarked drafts.
+#
+# The embedder is stubbed so these run without loading MiniLM. Seeded rows
+# have no embedding, so the semantic signal contributes nothing and hits come
+# from FTS5 + the name-trigram bonus — enough to rank a uniquely-named row.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def stub_embedder(monkeypatch):
+    from routes import library as library_routes
+
+    monkeypatch.setattr(
+        library_routes._search_service, "_embed", lambda text: [0.0] * 384
+    )
+
+
+def _insert_library_rule(
+    name: str,
+    *,
+    is_ready: bool = True,
+    is_local_draft: bool = False,
+    description: str = "seeded library rule",
+    author: str = None,
+) -> int:
+    rows = execute_query_dict(
+        """
+        INSERT INTO rules (name, predicate, description, categories, is_ready,
+                           is_local_draft, public_id, created_by_username)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING rule_id
+        """,
+        (
+            name,
+            "A AND B",
+            description,
+            [],
+            is_ready,
+            is_local_draft,
+            None if is_local_draft else f"pid_{uuid.uuid4().hex}",
+            author,
+        ),
+    )
+    return rows[0]["rule_id"]
+
+
+def _insert_library_ce(name: str) -> int:
+    rows = execute_query_dict(
+        """
+        INSERT INTO cognitive_elements (name, definition, categories, is_ready,
+                                        is_local_draft, public_id)
+        VALUES (%s, %s, %s, TRUE, FALSE, %s) RETURNING ce_id
+        """,
+        (name, "seeded library CE", [], f"pid_{uuid.uuid4().hex}"),
+    )
+    return rows[0]["ce_id"]
+
+
+def _bookmark_rule(user_id: int, rule_id: int) -> None:
+    execute_query_dict(
+        "INSERT INTO rule_bookmarks (user_id, rule_id) VALUES (%s, %s)",
+        (user_id, rule_id),
+    )
+
+
+def _search_ids(client, path, **params):
+    res = client.get(path, params=params)
+    assert res.status_code == 200, res.text
+    return res.json(), [r["id"] for r in res.json()["results"]]
+
+
+class TestSearchVisibilityGating:
+    def test_public_search_returns_published_ready_rule(self, client, stub_embedder):
+        name = _uniq("visgate-published")
+        rule_id = _insert_library_rule(name)
+        _, ids = _search_ids(client, "/library/search", q=name, asset_types="rule")
+        assert rule_id in ids
+
+    def test_public_search_hides_unready_rule(self, client, stub_embedder):
+        name = _uniq("visgate-unready")
+        rule_id = _insert_library_rule(name, is_ready=False)
+        _, ids = _search_ids(client, "/library/search", q=name, asset_types="rule")
+        assert rule_id not in ids
+
+    def test_public_search_hides_local_draft(self, client, stub_embedder):
+        name = _uniq("visgate-draft")
+        rule_id = _insert_library_rule(name, is_local_draft=True)
+        _, ids = _search_ids(client, "/library/search", q=name, asset_types="rule")
+        assert rule_id not in ids
+
+    def test_public_search_hides_unready_ce(self, client, stub_embedder):
+        name = _uniq("visgate-ce-unready")
+        rows = execute_query_dict(
+            """
+            INSERT INTO cognitive_elements (name, definition, categories, is_ready,
+                                            is_local_draft, public_id)
+            VALUES (%s, %s, %s, FALSE, FALSE, %s) RETURNING ce_id
+            """,
+            (name, "seeded library CE", [], f"pid_{uuid.uuid4().hex}"),
+        )
+        ce_id = rows[0]["ce_id"]
+        _, ids = _search_ids(client, "/library/search", q=name, asset_types="ce")
+        assert ce_id not in ids
+
+    def test_browse_by_author_hides_unready_and_drafts(self, client, stub_embedder):
+        author = _uniq("visgate-author").lower()
+        published = _insert_library_rule(_uniq("visgate-b-pub"), author=author)
+        unready = _insert_library_rule(
+            _uniq("visgate-b-unready"), is_ready=False, author=author
+        )
+        draft = _insert_library_rule(
+            _uniq("visgate-b-draft"), is_local_draft=True, author=author
+        )
+
+        # Empty q + author → the browse branch, not the hybrid one.
+        _, ids = _search_ids(client, "/library/search", q="", author=author,
+                             asset_types="rule")
+        assert ids == [published]
+        assert unready not in ids and draft not in ids
+
+    def test_bookmark_search_surfaces_bookmarked_draft(
+        self, client, stub_embedder, test_user
+    ):
+        name = _uniq("visgate-bm-draft")
+        rule_id = _insert_library_rule(name, is_local_draft=True)
+        _bookmark_rule(test_user["user_id"], rule_id)
+
+        _, ids = _search_ids(
+            client, "/library/bookmarks/search",
+            user_id=test_user["user_id"], q=name, asset_types="rule",
+        )
+        assert rule_id in ids
+
+    def test_bookmark_search_hides_unready_bookmarked_rule(
+        self, client, stub_embedder, test_user
+    ):
+        name = _uniq("visgate-bm-unready")
+        rule_id = _insert_library_rule(name, is_ready=False, is_local_draft=True)
+        _bookmark_rule(test_user["user_id"], rule_id)
+
+        _, ids = _search_ids(
+            client, "/library/bookmarks/search",
+            user_id=test_user["user_id"], q=name, asset_types="rule",
+        )
+        assert rule_id not in ids
+
+    def test_bookmark_search_ignores_rules_the_user_did_not_bookmark(
+        self, client, stub_embedder, test_user
+    ):
+        name = _uniq("visgate-bm-unbookmarked")
+        rule_id = _insert_library_rule(name)
+        _, ids = _search_ids(
+            client, "/library/bookmarks/search",
+            user_id=test_user["user_id"], q=name, asset_types="rule",
+        )
+        assert rule_id not in ids
+
+
+class TestSearchResultDescription:
+    def test_hybrid_rule_result_carries_description(self, client, stub_embedder):
+        name = _uniq("desc-hybrid")
+        rule_id = _insert_library_rule(name, description="Flags refund promises.")
+        data, ids = _search_ids(client, "/library/search", q=name, asset_types="rule")
+        assert rule_id in ids
+        row = next(r for r in data["results"] if r["id"] == rule_id)
+        assert row["description"] == "Flags refund promises."
+
+    def test_browse_rule_result_carries_description(self, client, stub_embedder):
+        author = _uniq("desc-author").lower()
+        rule_id = _insert_library_rule(
+            _uniq("desc-browse"), description="Flags refund promises.", author=author
+        )
+        data, ids = _search_ids(client, "/library/search", q="", author=author,
+                                asset_types="rule")
+        assert ids == [rule_id]
+        assert data["results"][0]["description"] == "Flags refund promises."
+
+    def test_ce_result_description_is_null(self, client, stub_embedder):
+        name = _uniq("desc-ce")
+        ce_id = _insert_library_ce(name)
+        data, ids = _search_ids(client, "/library/search", q=name, asset_types="ce")
+        assert ce_id in ids
+        row = next(r for r in data["results"] if r["id"] == ce_id)
+        assert row["description"] is None
+
+    def test_bookmark_search_rule_result_carries_description(
+        self, client, stub_embedder, test_user
+    ):
+        name = _uniq("desc-bookmark")
+        rule_id = _insert_library_rule(name, description="Flags refund promises.")
+        _bookmark_rule(test_user["user_id"], rule_id)
+        data, ids = _search_ids(
+            client, "/library/bookmarks/search",
+            user_id=test_user["user_id"], q=name, asset_types="rule",
+        )
+        assert rule_id in ids
+        row = next(r for r in data["results"] if r["id"] == rule_id)
+        assert row["description"] == "Flags refund promises."
 
 
 # ---------------------------------------------------------------------------
