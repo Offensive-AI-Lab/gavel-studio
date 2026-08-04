@@ -307,6 +307,47 @@ class TestDeriveScenario:
         res = client.post("/ai/derive-scenario", json={"rule_id": 1})
         assert res.status_code not in (401, 403)  # no auth exists: a request is never rejected for credentials
 
+    def test_derive_scenario_missing_openai_key_503(
+        self, client, auth_headers, test_user, monkeypatch
+    ):
+        """With no OPENAI_API_KEY the endpoint names the real cause — 503 with
+        actionable detail — instead of letting litellm bury it in an opaque
+        500 'Scenario derivation failed: ...'. Uses a real draft rule so the
+        request gets past the 404 rule lookup."""
+        ce1 = _make_ce(client, auth_headers, test_user)
+        ce2 = _make_ce(client, auth_headers, test_user)
+        res = client.post(
+            "/ai/rules/from-bookmarked-ce",
+            json={"name": _uniq("aipl_no_key"),
+                  "groups": {"required": [ce1, ce2]},
+                  "condition": "all of required"},
+            headers=auth_headers,
+        )
+        assert res.status_code == 200, res.text
+        rule_id = res.json()["rule_id"]
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        res = client.post(
+            "/ai/derive-scenario", json={"rule_id": rule_id}, headers=auth_headers
+        )
+        assert res.status_code == 503
+        detail = res.json()["detail"]
+        assert "OPENAI_API_KEY" in detail
+        assert "backend/.env" in detail
+
+    def test_derive_scenario_404_wins_over_missing_key(
+        self, client, auth_headers, monkeypatch
+    ):
+        """The key precheck sits AFTER the rule lookup: a nonexistent rule is
+        still a 404 even when OPENAI_API_KEY is absent."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        res = client.post(
+            "/ai/derive-scenario",
+            json={"rule_id": 999999995},
+            headers=auth_headers,
+        )
+        assert res.status_code == 404
+
 
 # ---------------------------------------------------------------------------
 # Step orchestration: default test/calibration set generation (Step 2D)
@@ -386,3 +427,45 @@ class TestTestConfigGeneration:
             "/ai/test-config/negative/generate", json={}, headers=auth_headers
         )
         assert res.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# POST /ai/generate-pipeline — error-detail propagation
+# ---------------------------------------------------------------------------
+class TestGeneratePipelineErrorDetail:
+    def test_early_failure_preserves_real_detail(
+        self, client, auth_headers, test_user, monkeypatch
+    ):
+        """An early generation failure (e.g. missing OPENAI_API_KEY) must
+        surface its real HTTPException detail to the client.
+
+        Regression: the rollback handlers referenced `new_ces_info`, which was
+        only assigned *after* the early `raise` — so the intended
+        "Rule generation failed: ..." detail was replaced by an
+        UnboundLocalError-driven bare 500. `new_ces_info` is now initialized
+        before the try block. No LLM is called: the generator is stubbed to
+        report failure the way a dead LLM call does.
+        """
+        import routes.ai_pipeline as ai_pipeline
+
+        monkeypatch.setattr(
+            ai_pipeline,
+            "_generate_rule_from_scenario",
+            lambda scenario: {
+                "success": False,
+                "error": "LLM error: AuthenticationError - no api key",
+            },
+        )
+        res = client.post(
+            "/ai/generate-pipeline",
+            json={
+                "scenario": "detect unqualified medical advice",
+                "user_id": test_user["user_id"],
+            },
+            headers=auth_headers,
+        )
+        assert res.status_code == 500
+        assert (
+            res.json()["detail"]
+            == "Rule generation failed: LLM error: AuthenticationError - no api key"
+        )

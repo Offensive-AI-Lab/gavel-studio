@@ -26,5 +26,9 @@ pillow>=10.0.0
 # httpx: remote-GPU-worker client, and FastAPI's TestClient in the test suite.
 # <0.28 — later versions break the TestClient API used by the tests.
 httpx<0.28
+# Emitting gavel-rules contribution files (services/registry_export.py). Already
+# present transitively via transformers; declared so the export path does not
+# depend on someone else's dependency tree.
+pyyaml>=6.0
 # wandb is optional: the classifier engine guards its import and defaults to
 # use_wandb=False. `pip install wandb` yourself if you want metric logging.

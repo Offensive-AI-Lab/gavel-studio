@@ -89,11 +89,21 @@ export function groupProgressLabel(gname, info) {
     return `${hits.length}/${need} of ${gname}`;
 }
 
+// Group names a condition selects: "all of aggression" -> aggression. Kept to
+// a scan rather than a parse so nested / parenthesized conditions (which the
+// flat picker model cannot represent) are read too.
+function referencedGroups(condition) {
+    const names = new Set();
+    for (const m of String(condition || '').matchAll(/\bof\s+([a-z][a-z0-9_]*)/g)) {
+        names.add(m[1]);
+    }
+    return names;
+}
+
 // Client-side sanity check for the group/condition editor. Server-side
 // validation (utils/rule_condition.validate_condition) is authoritative —
 // this only catches the obvious mistakes before a round-trip. Mirrors the
-// gavel-rules CI invariants: descriptive group names, no negation, and no
-// dead groups (every defined group must be referenced by the condition).
+// gavel-rules CI descriptive-group-name and dead-group lints.
 // `groupList` = [{ name, ceIds }], condition = string.
 // Returns an error message or null.
 export function validateEditorState(groupList, condition) {
@@ -115,17 +125,17 @@ export function validateEditorState(groupList, condition) {
             return `Group "${name}" has no cognitive elements — add some or delete the group.`;
         }
     }
-    const cond = String(condition || '').trim();
-    if (!cond) {
-        return 'Write a firing condition, e.g. "all of required".';
+    if (!String(condition || '').trim()) {
+        return 'Nothing would make this rule fire — set each group to "Needs all of them" or "Needs any N".';
     }
-    const tokens = new Set(cond.split(/[()\s]+/).filter(Boolean));
-    if (tokens.has('not')) {
-        return 'Negation ("not") is not supported in rule conditions.';
-    }
-    for (const name of seen) {
-        if (!tokens.has(name)) {
-            return `Group "${name}" is not referenced by the condition — use it or delete the group.`;
+    // The pickers write every group into the condition, so this only catches a
+    // stored rule from before that was required. The backend rejects the same
+    // shape (a group the condition never mentions), so it can never be saved.
+    const referenced = referencedGroups(condition);
+    for (const g of groupList) {
+        const name = (g.name || '').trim();
+        if (!referenced.has(name)) {
+            return `Group "${name}" is not used by the condition — every group has to be part of it. Set its quantifier again or delete the group.`;
         }
     }
     return null;

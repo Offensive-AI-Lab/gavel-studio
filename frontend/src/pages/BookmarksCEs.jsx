@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import Layout from '../components/Layout/Layout';
 import SearchPanel from '../components/SearchPanel/SearchPanel';
 import Pagination from '../components/Pagination/Pagination';
-import { getCEBookmarks, removeCEBookmark, getCognitiveDataset, getCognitiveElements, searchBookmarks, listLocalDrafts, deleteDraftCE } from '../api';
+import { getCEBookmarks, removeCEBookmark, getCognitiveDataset, getCognitiveElements, searchBookmarks, listLocalDrafts, deleteDraftCE, getCeDependentDraftRules } from '../api';
+import { forgetRecent } from '../utils/recents';
 import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
 import { useTutorialContent } from '../contexts/TutorialContext';
 import CognitiveElementCard from '../components/CognitiveElementCard/CognitiveElementCard';
@@ -13,11 +14,17 @@ import { showAlertDialog, showConfirmDialog } from '../components/ConfirmDialog/
 
 const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
     const navigate = useNavigate();
+    const [searchParams] = useSearchParams();
+    // The ?ce= value we've already auto-expanded, so a re-render doesn't force
+    // a card the user just collapsed back open.
+    const autoExpandedRef = useRef(null);
     const [bookmarks, setBookmarks] = useState([]);
     const [filteredBookmarks, setFilteredBookmarks] = useState([]);
     const [expandedCe, setExpandedCe] = useState(null);
     const [loading, setLoading] = useState(true);
     const [previewCache, setPreviewCache] = useState({});
+    // True sample count per CE — the preview itself is capped at 10.
+    const [previewTotals, setPreviewTotals] = useState({});
     
     // Search state
     const [searchQuery, setSearchQuery] = useState('');
@@ -172,8 +179,21 @@ const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
             confirmText: 'Delete', cancelText: 'Keep', variant: 'danger',
         });
         if (!ok) return;
+        // Deleting a draft CE cascade-deletes the draft rules that use it, so
+        // collect their ids BEFORE the delete — their Recents entries have to
+        // go too, and afterwards there's no way to look them up.
+        let cascadedRuleIds = [];
+        try {
+            const dep = await getCeDependentDraftRules(ce.ce_id);
+            cascadedRuleIds = (dep.data?.rules || []).map(r => r.rule_id);
+        } catch {
+            // Best-effort: if this fails, the navigation-time prune still
+            // cleans the entries up the first time one is clicked.
+        }
         try {
             await deleteDraftCE(ce.ce_id);
+            forgetRecent('ce', ce.ce_id);
+            cascadedRuleIds.forEach(id => forgetRecent('rule', id));
             fetchBookmarks();
         } catch (err) {
             showAlertDialog({ title: 'Could not delete', message: err.response?.data?.detail || err.message || 'Try again', variant: 'error' });
@@ -272,6 +292,7 @@ const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
             const raw = res.data?.training_data_preview || res.data?.training_data || [];
             const normalized = normalizeSamples(raw);
             setPreviewCache((prev) => ({ ...prev, [ceId]: normalized }));
+            setPreviewTotals((prev) => ({ ...prev, [ceId]: res.data?.samples_count ?? null }));
         } catch {
             setPreviewCache((prev) => ({ ...prev, [ceId]: [] }));
         }
@@ -306,6 +327,23 @@ const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
     const myName = user?.username;
     const isMine = (c) => c.is_local_draft || (myName && c.created_by_username === myName);
     const visibleBookmarks = mineOnly ? filteredBookmarks.filter(isMine) : filteredBookmarks;
+
+    // Deep link: /bookmarks/ces?ce=<id> auto-expands that CE once the list has
+    // loaded — the counterpart of BrowseCEs' ?ce= handling, and where a DRAFT
+    // CE's Recents entry points: the public browse page filters drafts out of
+    // its list, so a /community/ces?ce=<draft id> link could never open one.
+    // Keyed on the param so navigating to a DIFFERENT recent re-expands, while
+    // a manual collapse on the same URL is respected.
+    useEffect(() => {
+        const ceParam = searchParams.get('ce');
+        if (!ceParam || loading || autoExpandedRef.current === ceParam) return;
+        const idx = visibleBookmarks.findIndex((c) => String(c.ce_id) === String(ceParam));
+        if (idx < 0) return;
+        autoExpandedRef.current = ceParam;
+        if (!hasSearched) setPage(Math.floor(idx / topK) + 1);   // jump to its page
+        toggleExpand(visibleBookmarks[idx].ce_id);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [searchParams, visibleBookmarks, loading, hasSearched, topK]);
 
     const body = (
         <div style={{ display: 'flex', gap: '20px', alignItems: 'flex-start' }}>
@@ -377,6 +415,7 @@ const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
                                             isOpen={expandedCe === ce.ce_id}
                                             onToggle={toggleExpand}
                                             samples={previewCache[ce.ce_id]}
+                                        samplesTotal={previewTotals[ce.ce_id]}
                                             onDelete={(c) => handleDeleteDraftCe(c)}
                                         />
                                     ) : (
@@ -386,6 +425,7 @@ const BookmarksCEs = ({ embedded = false, mineOnly = false }) => {
                                             isOpen={expandedCe === ce.ce_id}
                                             onToggle={toggleExpand}
                                             samples={previewCache[ce.ce_id]}
+                                        samplesTotal={previewTotals[ce.ce_id]}
                                             onBookmark={handleRemoveBookmark}
                                             isBookmarked={true}
                                         />

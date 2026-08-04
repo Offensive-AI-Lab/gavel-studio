@@ -185,6 +185,33 @@ describe('runInTray', () => {
         expect(task.error).toHaveBeenCalledWith({ title: 'T', subtitle: 'precise detail' });
     });
 
+    it('passes an onOpen wrapper to task.error when errorOnOpen is provided', async () => {
+        const { tray, task } = makeTray();
+        const errorOnOpen = vi.fn();
+        const err = new Error('boom');
+        const job = vi.fn(() => Promise.reject(err));
+        runInTray(tray, { title: 'T', job, errorOnOpen });
+
+        await flush();
+        const patch = task.error.mock.calls[0][0];
+        expect(patch.subtitle).toBe('boom');
+        expect(typeof patch.onOpen).toBe('function');
+        // Clicking the chip forwards the ORIGINAL thrown error to errorOnOpen.
+        expect(errorOnOpen).not.toHaveBeenCalled();
+        patch.onOpen();
+        expect(errorOnOpen).toHaveBeenCalledWith(err);
+    });
+
+    it('omits onOpen from the error patch when errorOnOpen is not provided', async () => {
+        const { tray, task } = makeTray();
+        const job = vi.fn(() => Promise.reject(new Error('boom')));
+        runInTray(tray, { title: 'T', job });
+
+        await flush();
+        const patch = task.error.mock.calls[0][0];
+        expect('onOpen' in patch).toBe(false);
+    });
+
     it('calls onError with the thrown error on failure', async () => {
         const { tray } = makeTray();
         const onError = vi.fn();

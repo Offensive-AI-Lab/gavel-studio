@@ -37,14 +37,6 @@ const EXAMPLES = [
         },
         condition: '1 of action and 1 of channel',
     },
-    {
-        title: 'Scam pressure · either pattern fires',
-        groups: {
-            coercion: ['making_threat'],
-            lure: ['emotionally_engaging', 'trust_seeding'],
-        },
-        condition: 'all of coercion or 2 of lure',
-    },
 ];
 
 export default function RoleLogicGuide() {
@@ -55,6 +47,8 @@ export default function RoleLogicGuide() {
                 <p style={{ margin: '0 0 10px', fontSize: '0.85rem', color: '#cbd5e1' }}>
                     A rule organizes its cognitive elements into <b>named groups</b>, then a
                     <b> condition</b> written over the group names decides when the rule fires.
+                    Every group has to appear in the condition — a group the condition never
+                    names is not allowed.
                 </p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
@@ -68,10 +62,6 @@ export default function RoleLogicGuide() {
                     <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
                         <span style={tag('#6366f1', '#4f46e5')}>and / or</span>
                         <span style={{ fontSize: '0.85rem', color: '#cbd5e1' }}>combine group requirements; parentheses control grouping, e.g. <code>all of required and (1 of a or 1 of b)</code>.</span>
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                        <span style={tag('#34d399', '#10b981')}>every group counts</span>
-                        <span style={{ fontSize: '0.85rem', color: '#cbd5e1' }}>the condition must reference every group you define — a group the condition never mentions is invalid, matching the public library's rules.</span>
                     </div>
                 </div>
             </div>

@@ -4,7 +4,7 @@ import Layout from '../components/Layout/Layout';
 import CommunityTabs from '../components/CommunityTabs/CommunityTabs';
 import SearchPanel from '../components/SearchPanel/SearchPanel';
 import Pagination from '../components/Pagination/Pagination';
-import { getCognitiveElements, getCognitiveDataset, addCEBookmark, getCEBookmarks, removeCEBookmark, getAllCategories } from '../api';
+import { getCognitiveElements, getCognitiveElement, getCognitiveDataset, addCEBookmark, getCEBookmarks, removeCEBookmark, getAllCategories } from '../api';
 import useLibrarySearch from '../hooks/useLibrarySearch';
 import { useLibraryRefresh } from '../hooks/useLibraryRefresh';
 import { useTutorialContent } from '../contexts/TutorialContext';
@@ -13,7 +13,7 @@ import { FiArrowLeft, FiInbox } from 'react-icons/fi';
 import Swal from 'sweetalert2';
 import { showAlertDialog } from '../components/ConfirmDialog/confirmDialog';
 import { normalizeCategoryValue } from '../utils/categoryUtils';
-import { recordRecent } from '../utils/recents';
+import { forgetRecent, recordRecent } from '../utils/recents';
 
 const BrowseCEs = () => {
     const navigate = useNavigate();
@@ -31,6 +31,9 @@ const BrowseCEs = () => {
     const [expandedCe, setExpandedCe] = useState(null);
     const [loading, setLoading] = useState(true);
     const [previewCache, setPreviewCache] = useState({});
+    // True sample count per CE. The endpoint caps the preview at 10, so the
+    // card needs this to say "showing 10 of 240" instead of implying 10 is all.
+    const [previewTotals, setPreviewTotals] = useState({});
     const [bookmarkIds, setBookmarkIds] = useState(new Set());
     const [bookmarks, setBookmarks] = useState([]);
     const [searchQuery, setSearchQuery] = useState('');
@@ -258,18 +261,31 @@ const BrowseCEs = () => {
             const res = await getCognitiveDataset(ceId);
             const raw = res.data?.training_data_preview || res.data?.training_data || [];
             setPreviewCache((prev) => ({ ...prev, [ceId]: normalizeSamples(raw) }));
+            setPreviewTotals((prev) => ({ ...prev, [ceId]: res.data?.samples_count ?? null }));
         } catch {
             setPreviewCache((prev) => ({ ...prev, [ceId]: [] }));
         }
     };
 
-    const toggleExpand = async (ceId, ceName) => {
+    const toggleExpand = async (ceId, ceName, isDraft = false) => {
         setExpandedCe(expandedCe === ceId ? null : ceId);
         if (expandedCe === ceId) return;
         // Opening a CE → record it for the sidebar's Recents. CEs have no detail
-        // route, so the recent deep-links back here with ?ce=<id>, which auto-
-        // expands this exact CE (and keeps each recent's "active" highlight unique).
-        if (ceName) recordRecent('ce', { id: ceId, name: ceName, path: `/community/ces?ce=${ceId}` });
+        // route, so the recent deep-links to the page that can actually show it,
+        // with ?ce=<id> to auto-expand that exact CE (which also keeps each
+        // recent's "active" highlight unique).
+        //
+        // Drafts point at Bookmarks → CEs, NOT back here: this page is the public
+        // space and filters drafts out of its list (see fetchCes), so a
+        // /community/ces?ce=<draft id> link could never resolve. Drafts only
+        // reach this page through the search box, which does return them.
+        if (ceName) {
+            recordRecent('ce', {
+                id: ceId,
+                name: ceName,
+                path: isDraft ? `/bookmarks/ces?ce=${ceId}` : `/community/ces?ce=${ceId}`,
+            });
+        }
         ensurePreview(ceId);
     };
 
@@ -277,11 +293,31 @@ const BrowseCEs = () => {
     // Keyed on the param value so navigating to a DIFFERENT recent re-expands,
     // but a manual collapse (same URL) is respected — we don't force it back open.
     const autoExpandedRef = useRef(null);
+    // CE ids we've already probed for existence after a deep-link miss, so a
+    // re-render doesn't re-issue the same GET.
+    const probedMissingRef = useRef(new Set());
     useEffect(() => {
         const ceParam = searchParams.get('ce');
         if (!ceParam || loading || autoExpandedRef.current === ceParam) return;
         const idx = ces.findIndex((c) => String(c.ce_id) === String(ceParam));
-        if (idx < 0) return;
+        if (idx < 0) {
+            // Missing from the browse list. Two very different reasons, and we
+            // can't tell them apart without asking the backend:
+            //   * the CE is a local draft — filtered out of this public list, but
+            //     alive and viewable in Bookmarks → CEs, so hand off there
+            //     (older Recents entries still point here);
+            //   * the CE is gone — prune the Recents entry that led here.
+            // Doing neither is what made a draft recent open a blank page.
+            if (!probedMissingRef.current.has(ceParam)) {
+                probedMissingRef.current.add(ceParam);
+                getCognitiveElement(ceParam)
+                    .then(() => navigate(`/bookmarks/ces?ce=${ceParam}`, { replace: true }))
+                    .catch((err) => {
+                        if (err?.response?.status === 404) forgetRecent('ce', ceParam);
+                    });
+            }
+            return;
+        }
         const found = ces[idx];
         autoExpandedRef.current = ceParam;
         setPage(Math.floor(idx / 10) + 1);   // jump to the page that holds this CE
@@ -307,6 +343,11 @@ const BrowseCEs = () => {
             categories: parsedCategories,
             is_local_draft: item.is_local_draft,
             examples: item.examples || [],
+            // CognitiveElementCard gates the Save button on public_id and the
+            // author link on created_by_username — both must survive the map or
+            // search results silently lose them.
+            public_id: item.public_id,
+            created_by_username: item.created_by_username,
             // v2 CE fields — role is the primary badge, title the display
             // name; tags render as muted pills.
             role: item.role,
@@ -508,8 +549,11 @@ const BrowseCEs = () => {
                                         key={`ce-${ce.ce_id}`}
                                         ce={ce}
                                         isOpen={expandedCe === ce.ce_id}
-                                        onToggle={() => toggleExpand(ce.ce_id, ce.name)}
+                                        // Search is the only place a DRAFT surfaces on this page,
+                                        // so it's the only call that can pass is_local_draft.
+                                        onToggle={() => toggleExpand(ce.ce_id, ce.name, !!ce.is_local_draft)}
                                         samples={previewCache[ce.ce_id]}
+                                        samplesTotal={previewTotals[ce.ce_id]}
                                         onBookmark={handleBookmark}
                                         isBookmarked={bookmarkIds.has(ce.ce_id)}
                                     />
@@ -559,6 +603,7 @@ const BrowseCEs = () => {
                                             isOpen={expandedCe === ce.ce_id}
                                             onToggle={() => toggleExpand(ce.ce_id, ce.name)}
                                             samples={previewCache[ce.ce_id]}
+                                        samplesTotal={previewTotals[ce.ce_id]}
                                             onBookmark={handleBookmark}
                                             isBookmarked={bookmarkIds.has(ce.ce_id)}
                                         />

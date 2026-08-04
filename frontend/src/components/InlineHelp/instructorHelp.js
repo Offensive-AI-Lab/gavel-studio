@@ -58,28 +58,28 @@ export const manualRuleConfig = {
 
 // "Unified GAVEL Evaluation Pipeline" (shown on Evaluation)
 export const evaluateModel = {
-    title: 'Unified GAVEL Evaluation Pipeline',
-    summary: 'The evaluation automatically handles:',
+    title: 'Calibration & Evaluation',
+    summary: 'Two steps that tell you whether this rule set is safe to run:',
     sections: [
         {
             bullets: [
-                '**Calibration**: Optimizes detection thresholds using calibration data',
+                '**Calibration** picks how confident each CE has to be before it counts as detected. It runs automatically after training; recalibrate only if the calibration data changed.',
                 '**Evaluation**: Computes metrics (TPR, FPR, AUC) on test data',
                 '**Visualization**: Generates calibration plots and metric reports',
             ],
         },
-        { body: 'Everything is processed in-memory for efficiency.' },
+        { body: 'Both run in the background, so you can leave this page and come back.' },
     ],
 };
 
 // "Rule Generation" (shown on the automated rule generation flow)
 export const step2aRuleGeneration = {
     title: 'Rule Generation',
-    summary: 'This step converts your scenario into a **GAVEL-compliant detection rule** built from Cognitive Elements (CEs). The rule formalizes the behavioral and contextual signals that must co-occur to detect the misuse, keeping detection interpretable, targeted, and aligned with your scenario.',
+    summary: 'Turns the scenario you described into a rule: which signals (CEs) have to appear together for this to count as misuse.',
     sections: [
         {
-            heading: 'What the Agent Will Do',
-            body: 'To generate the rule, the agent runs a structured, in-depth analysis over the existing CE inventory and your scenario. Specifically, it will:',
+            heading: 'What happens next',
+            body: 'The studio reads your scenario against the CEs already in your library, and:',
             bullets: [
                 '**Identify scenario-specific behavioral signatures** that distinguish your misuse from other types',
                 '**Evaluate all existing CEs**, determining which ones apply and how they contribute to the misuse',
@@ -89,10 +89,10 @@ export const step2aRuleGeneration = {
                 '**Assemble a complete rule** by organizing essential CEs into a coherent detection logic that specifies the required co-occurrence conditions',
             ],
         },
-        { body: 'A detailed reasoning section is included with the rule, making the whole process transparent and auditable.' },
+        { body: 'It explains its reasoning alongside the rule, so you can check the choices rather than take them on trust.' },
         {
             heading: 'What you get',
-            body: 'A complete rule plus the list of all prerequisite CEs — both existing and newly proposed. Any missing CEs and their training datasets are then generated automatically in the background.',
+            body: 'A finished rule plus the CEs it needs, existing ones and any new ones. Missing CEs and their example dialogues are generated for you in the background.',
         },
     ],
 };
@@ -101,13 +101,13 @@ export const step2aRuleGeneration = {
 // as a SINGLE step in the background.
 export const automatedPipeline = {
     title: 'Automated Rule Generation',
-    summary: 'This flow automates building a GAVEL rule for your use case — and automatically generates any missing cognitive elements (CEs) and their training datasets for you.',
+    summary: 'Describe the misuse you want caught; the studio writes the rule and fills in any signals (CEs) you don’t have yet.',
     sections: [
         {
             heading: 'How it works',
             body: [
-                'The GAVEL framework is a rule-based detection system over an LLM’s activations. Defining these rules and extracting their underlying cognitive elements (CEs) is normally a challenging, manual process.',
-                'Here you just describe your scenario. The system then uses LLM agents to (1) generate the rule from your description, (2) identify which CEs you’re missing to support it, and (3) generate the training datasets for those new CEs — all automatically. The CE and dataset generation runs in the background as a single step, so you don’t have to manage it yourself.',
+                'Writing a rule by hand means deciding which signals matter, naming each one, and producing example dialogues to teach it: slow, fiddly work.',
+                'Here you describe the scenario instead. The studio drafts the rule, checks which CEs you are missing, and generates example dialogues for those, in the background, as one step. You review the result before anything is kept.',
             ],
         },
     ],

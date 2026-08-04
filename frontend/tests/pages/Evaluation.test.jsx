@@ -205,7 +205,8 @@ describe('Evaluation — Calibration tab', () => {
         renderPage();
         const btn = await screen.findByText('Run Calibration');
         fireEvent.click(btn.closest('button'));
-        await waitFor(() => expect(api.startCalibration).toHaveBeenCalledWith('77', {}));
+        // force:false — this is a first calibration, not a manual recalibrate.
+        await waitFor(() => expect(api.startCalibration).toHaveBeenCalledWith('77', { force: false }));
         // Button label flips to "Calibrating..." while the run is in flight.
         expect(await screen.findByText('Calibrating...')).toBeInTheDocument();
     });
@@ -517,7 +518,10 @@ describe('Evaluation — Evaluation tab: metrics display', () => {
 });
 
 describe('Evaluation — once-per-training lock', () => {
-    it('locks calibration once a successful calibration exists', async () => {
+    // Calibration is NOT locked once it has run: training auto-calibrates, so the
+    // button's remaining job is the data-changed case (regenerated CE calibration
+    // sets), which needs force:true. Evaluation stays locked — see above.
+    it('offers Recalibrate once a successful calibration exists', async () => {
         api.getCalibrationDataStatus.mockResolvedValue({ data: { all_ready: true, ces: [{ ce_id: 1, name: 'CE-A', has_calibration: true }] } });
         api.getEvaluationResults.mockResolvedValue({
             data: { calibration: calibrationResult(), evaluation: null },
@@ -525,9 +529,12 @@ describe('Evaluation — once-per-training lock', () => {
         api.getCalibratedThresholds.mockResolvedValue({ data: { thresholds: { 'CE-A': { threshold: 0.5, patience: 1 } } } });
         renderPage();
         await screen.findByText('Evaluate: Test Classifier');
-        const btn = await screen.findByRole('button', { name: /Calibrated/ });
-        expect(btn).toBeDisabled();
-        expect(screen.getByText(/retrain to recalibrate/i)).toBeInTheDocument();
+        const btn = await screen.findByRole('button', { name: /Recalibrate/ });
+        expect(btn).not.toBeDisabled();
+        expect(screen.getByText(/retraining recalibrates automatically/i)).toBeInTheDocument();
+
+        fireEvent.click(btn);
+        await waitFor(() => expect(api.startCalibration).toHaveBeenCalledWith('77', { force: true }));
     });
 });
 

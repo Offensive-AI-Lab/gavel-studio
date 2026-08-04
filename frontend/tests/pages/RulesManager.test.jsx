@@ -16,7 +16,7 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
 import { TutorialProvider } from '../../src/contexts/TutorialContext';
 
 // ---- navigate spy; useParams comes from the real route ----
@@ -43,6 +43,9 @@ vi.mock('../../src/api', () => ({
     getTrainingStatus: vi.fn(() => ok({ status: 'untrained', is_training: false, training_phase: null, training_phase_detail: null })),
     downloadClassifier: vi.fn(() => Promise.resolve()),
     listLocalDrafts: vi.fn(() => ok({ rules: [] })),
+    // Was missing from this mock, so the page's call threw and was swallowed.
+    // Defined now so the models loading/empty split is actually testable.
+    getUserModels: vi.fn(() => ok({ models: [] })),
     getComputeStatus: vi.fn(() => Promise.resolve({ data: { workloads: {} } })),
     // Machine picker — default to a single target so training proceeds directly.
     getComputeTargets: vi.fn(() => Promise.resolve({ data: { targets: [{ name: 'local', label: 'This machine' }] } })),
@@ -522,14 +525,13 @@ describe('RulesManager — delete rule', () => {
     });
 });
 
-describe('RulesManager — publish & test-set entry points', () => {
-    it('shows a DISABLED Publish button on a draft rule (PR-based contributions)', async () => {
+describe('RulesManager — export & test-set entry points', () => {
+    it('offers Export on a draft rule instead of the removed Publish button', async () => {
         api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture({ is_local_draft: true })] } });
         renderPage();
         await screen.findByText('Rule Alpha');
-        const btn = screen.getByRole('button', { name: 'Publish rule to library (coming soon)' });
-        expect(btn).toBeDisabled();
-        expect(btn).toHaveAttribute('title', expect.stringContaining('gavel-rules pull requests'));
+        expect(screen.getByRole('button', { name: /export rule/i })).toBeEnabled();
+        expect(screen.queryByRole('button', { name: /publish/i })).toBeNull();
     });
 
     it('opens the in-place logic editor (groups + condition) and saves via saveEditedRule', async () => {
@@ -550,7 +552,10 @@ describe('RulesManager — publish & test-set entry points', () => {
         // Modal shows the group editor prefilled with the rule's condition.
         const conditionInput = await screen.findByLabelText('Firing condition');
         expect(conditionInput).toHaveValue('all of required');
-        fireEvent.change(conditionInput, { target: { value: '1 of required' } });
+        // The condition is generated now — choose "any 1" instead of typing.
+        expect(conditionInput).toHaveAttribute('readonly');
+        fireEvent.change(screen.getByLabelText('How much of required must match'),
+            { target: { value: '1' } });
         fireEvent.click(screen.getByRole('button', { name: /Save logic/ }));
         await waitFor(() => expect(api.saveEditedRule).toHaveBeenCalledTimes(1));
         expect(api.saveEditedRule).toHaveBeenCalledWith(1, {
@@ -659,5 +664,97 @@ describe('RulesManager — library refresh event', () => {
         await waitFor(() => expect(api.getClassifierRules).toHaveBeenCalledTimes(1));
         window.dispatchEvent(new Event('gavel:libraryChanged'));
         await waitFor(() => expect(api.getClassifierRules).toHaveBeenCalledTimes(2));
+    });
+});
+
+describe('RulesManager — post-training chain banner', () => {
+    // Training's own banner is gated on status === 'training', so once the run
+    // finished the page went silent while calibration ran for minutes. The same
+    // banner now carries the chain stage; the Calibration/Evaluation tabs are
+    // untouched — this only says which stage is running right now.
+    it('shows "Calibrating" with its live detail after training completes', async () => {
+        api.getTrainingStatus.mockResolvedValue({
+            data: {
+                status: 'active', is_training: false, is_trained: true,
+                training_phase: null, training_phase_detail: null,
+                post_training_phase: 'Calibrating',
+                post_training_phase_detail: 'Loading calibration datasets…',
+            },
+        });
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture()] } });
+        renderPage();
+        expect(await screen.findByText('Calibrating')).toBeInTheDocument();
+        expect(screen.getByText(/Loading calibration datasets/)).toBeInTheDocument();
+    });
+
+    it('shows "Evaluating" for the second stage', async () => {
+        api.getTrainingStatus.mockResolvedValue({
+            data: {
+                status: 'active', is_training: false, is_trained: true,
+                training_phase: null, training_phase_detail: null,
+                post_training_phase: 'Evaluating',
+                post_training_phase_detail: 'Scoring rule 1 of 3…',
+            },
+        });
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture()] } });
+        renderPage();
+        expect(await screen.findByText('Evaluating')).toBeInTheDocument();
+        expect(screen.getByText(/Scoring rule 1 of 3/)).toBeInTheDocument();
+    });
+
+    it('shows no banner once the chain is done', async () => {
+        api.getTrainingStatus.mockResolvedValue({
+            data: {
+                status: 'active', is_training: false, is_trained: true,
+                training_phase: null, training_phase_detail: null,
+                post_training_phase: null, post_training_phase_detail: null,
+            },
+        });
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture()] } });
+        renderPage();
+        await screen.findByText(ruleFixture().custom_name || ruleFixture().name);
+        expect(screen.queryByText('Calibrating')).not.toBeInTheDocument();
+        expect(screen.queryByText('Evaluating')).not.toBeInTheDocument();
+    });
+});
+
+describe('RulesManager — empty states wait for the fetch (#11)', () => {
+    // An empty array meant both "not fetched yet" and "fetched, nothing there",
+    // so a slow backend rendered "No Rules Defined" and "No models yet" as if
+    // they were answers — next to a "Loading..." breadcrumb saying otherwise.
+    it('shows a loading state, not "No Rules Defined", while the fetch is in flight', async () => {
+        let release;
+        api.getClassifierRules.mockReturnValue(new Promise((resolve) => {
+            release = () => resolve({ data: { rules: [] } });
+        }));
+        renderPage();
+
+        expect(await screen.findByText(/Loading rules/i)).toBeInTheDocument();
+        expect(screen.queryByText('No Rules Defined')).not.toBeInTheDocument();
+
+        // Only once the response resolves EMPTY does the empty state appear.
+        await act(async () => { release(); });
+        expect(await screen.findByText('No Rules Defined')).toBeInTheDocument();
+        expect(screen.queryByText(/Loading rules/i)).not.toBeInTheDocument();
+    });
+
+    it('still reaches the empty state when the request fails', async () => {
+        // A rejected fetch must not leave the page stuck on "Loading rules…".
+        api.getClassifierRules.mockRejectedValue(new Error('boom'));
+        renderPage();
+        expect(await screen.findByText('No Rules Defined')).toBeInTheDocument();
+    });
+
+    it('does not claim "No models yet" before the models call resolves', async () => {
+        let release;
+        api.getUserModels.mockReturnValue(new Promise((resolve) => {
+            release = () => resolve({ data: { models: [] } });
+        }));
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture()] } });
+        renderPage();
+
+        await screen.findByText(ruleFixture().custom_name || ruleFixture().name);
+        expect(screen.queryByText(/No models yet — add one/i)).not.toBeInTheDocument();
+        await act(async () => { release(); });
     });
 });

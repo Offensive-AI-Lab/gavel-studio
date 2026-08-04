@@ -1,4 +1,4 @@
-"""Unit tests for utils/rule_condition.py — the ported gavel-rules
+"""Unit tests for utils/rule_condition.py — the ported gavel-rules v2
 condition grammar. The parser/evaluator must stay byte-compatible with
 upstream tools/condition.py: same strings accepted, same firing decisions.
 validate_condition mirrors the library CI validator (tools/validate.py)."""

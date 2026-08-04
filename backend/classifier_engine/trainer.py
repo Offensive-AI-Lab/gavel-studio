@@ -701,6 +701,15 @@ def run_training(classifier_id: int, progress_callback=None):
         except Exception as snap_err:
             logger.error(f"[Trainer] Failed to commit trained-policy snapshot for classifier {classifier_id}: {snap_err}")
 
+        # 14. Chain straight into calibration. Monitoring an uncalibrated rule
+        # set is meaningless (every CE falls back to a 0.5 threshold), and the
+        # step takes no user input — so don't make the user remember it.
+        try:
+            from services.auto_calibration import schedule_post_training_calibration
+            schedule_post_training_calibration(classifier_id)
+        except Exception as cal_err:
+            logger.error(f"[Trainer] Auto-calibration not scheduled for classifier {classifier_id}: {cal_err}")
+
         _progress("done", f"Training complete. Model saved to {rnn_path}")
 
     except TrainingCancelled:

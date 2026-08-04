@@ -52,7 +52,7 @@ function groupsToEditable(groups, baseCes) {
     }));
 }
 
-export default function BuildRuleFromCEs({ onClose, baseRule = null }) {
+export default function BuildRuleFromCEs({ onClose, baseRule = null, dirtyRef = null }) {
     const user = readUser();
     // EDIT mode: `baseRule` carries an existing rule to start from. We pre-load
     // its CEs/groups/condition/categories/name and start at Pick CEs (step 1)
@@ -86,13 +86,38 @@ export default function BuildRuleFromCEs({ onClose, baseRule = null }) {
     const committedRef = useRef(false);
     useEffect(() => { createdRuleIdRef.current = createdRuleId; }, [createdRuleId]);
 
+    // Snapshot of the selection the wizard opened with (pre-seeded from the
+    // base rule in edit mode), for the dirty check below.
+    const initialCeIdsRef = useRef(new Set(baseCes.map((c) => c.ce_id)));
+
+    // Keep the wrapper's dirty signal current (see BuildRuleFromCEsModal): the
+    // modal confirms before an unmount would discard real progress. Dirty =
+    // moved past Pick CEs, a provisional rule exists, or the name/CE selection
+    // differs from what the wizard opened with — unless the build was
+    // committed, after which there is nothing left to lose. No dep array on
+    // purpose: recompute on every render so it never goes stale.
+    useEffect(() => {
+        if (!dirtyRef) return;
+        const initial = initialCeIdsRef.current;
+        const cesChanged = selectedCes.size !== initial.size
+            || Array.from(selectedCes).some((id) => !initial.has(id));
+        dirtyRef.current = !committedRef.current && (
+            createdRuleId != null
+            || step > 1
+            || nameInput.trim() !== (baseRule?.name || '').trim()
+            || cesChanged
+        );
+    });
+
     // Discard the provisional (is_ready=FALSE) rule if the user navigates away
     // before finishing. Tab-close won't fire this, but such rows are wiped by
     // boot recovery, so nothing half-baked survives either way.
     useEffect(() => () => {
+        if (dirtyRef) dirtyRef.current = false; // unmounted — nothing left to guard
         if (createdRuleIdRef.current && !committedRef.current) {
             discardUnreadyRule(createdRuleIdRef.current).catch(() => {});
         }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     const load = useCallback(async () => {
@@ -202,6 +227,9 @@ export default function BuildRuleFromCEs({ onClose, baseRule = null }) {
     // once finalizeWhenReady() reveals it, after the test set finishes.
     const handleStarted = () => {
         committedRef.current = true;
+        // Committed — nothing left to discard, so the wrapper's guarded close
+        // must NOT prompt on this programmatic close.
+        if (dirtyRef) dirtyRef.current = false;
         onClose?.();
     };
 
@@ -221,7 +249,7 @@ export default function BuildRuleFromCEs({ onClose, baseRule = null }) {
             <p style={{ margin: '0 0 16px', color: '#94a3b8', fontSize: '0.9rem' }}>
                 {isEdit
                     ? <>Editing <strong style={{ color: '#e2e8f0' }}>{baseRule.name}</strong> — adjust its cognitive elements, groups and condition, then give it a new name. This creates a new draft in your Library; the original rule is unchanged.</>
-                    : 'Compose a rule from your bookmarked Cognitive Elements. The finished rule lands in your Drafts.'}
+                    : 'Compose a rule from your bookmarked Cognitive Elements. The finished rule lands in Your Library → Rules.'}
             </p>
 
             <div style={cardStyle}>
@@ -315,8 +343,8 @@ export default function BuildRuleFromCEs({ onClose, baseRule = null }) {
                         {step === 3 && (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                                 <p style={{ margin: 0, fontSize: '0.88rem', color: '#94a3b8' }}>
-                                    Organize the CEs into named groups, then write the firing condition over the
-                                    group names — the preview updates live below.
+                                    Organize the CEs into named groups, then choose how much of each group the
+                                    rule needs — the condition and the preview update as you choose.
                                 </p>
                                 {/* Real-time firing-logic preview for the current groups + condition. */}
                                 <RuleLogicPreview title="Firing logic — live preview" groups={groupsForPreview} condition={condition} />

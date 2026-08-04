@@ -100,9 +100,15 @@ def rule_defaults_status(rule_id: int) -> dict:
     Rolled-up `state` is one of: 'missing' (no rows yet), 'generating'
     (some not ready, none errored), 'error' (any errored), 'ready' (all
     three ready).
+
+    Failure reasons: an errored bucket's entry carries an `error` field (its
+    generation_log, which holds the failure message written by
+    _mark_row_error / _run_test_generation), and the top level gets a
+    rolled-up `error` string. The frontend tray chip surfaces it so the user
+    sees WHY generation failed. Both fields are absent when nothing errored.
     """
     rows = execute_query_dict(
-        "SELECT dataset_id, dataset_type, status FROM test_datasets "
+        "SELECT dataset_id, dataset_type, status, generation_log FROM test_datasets "
         "WHERE rule_id = %s AND is_default = TRUE",
         (rule_id,),
     ) or []
@@ -115,14 +121,33 @@ def rule_defaults_status(rule_id: int) -> dict:
         state = "ready"
     else:
         state = "generating"
-    return {
-        "rule_id": rule_id,
-        "state": state,
-        "datasets": [
-            {"dataset_id": r["dataset_id"], "dataset_type": r["dataset_type"], "status": r["status"]}
-            for r in rows
-        ],
-    }
+    datasets = []
+    errors = []
+    for r in rows:
+        entry = {"dataset_id": r["dataset_id"], "dataset_type": r["dataset_type"], "status": r["status"]}
+        if r["status"] == "error":
+            reason = r.get("generation_log") or "generation failed"
+            entry["error"] = reason
+            errors.append(f"{r['dataset_type']}: {reason}")
+        datasets.append(entry)
+    result = {"rule_id": rule_id, "state": state, "datasets": datasets}
+    if errors:
+        result["error"] = "; ".join(errors)
+    return result
+
+
+def _flip_visibility(rule_id: int, finalize_ce_ids: Optional[list] = None) -> None:
+    """Flip the rule (and any deferred new CEs) to is_ready=TRUE — the moment
+    they become visible in Drafts/Browse/bookmarks/the CE picker."""
+    if finalize_ce_ids:
+        execute_query(
+            "UPDATE cognitive_elements SET is_ready = TRUE WHERE ce_id = ANY(%s)",
+            (finalize_ce_ids,),
+        )
+    execute_query(
+        "UPDATE rules SET is_ready = TRUE WHERE rule_id = %s",
+        (rule_id,),
+    )
 
 
 def _run_rule_defaults(
@@ -163,6 +188,12 @@ def _run_rule_defaults(
     except Exception as e:
         for did in (pos_id, cal_id, neg_id):
             _mark_row_error(did, f"positive config generation failed: {e}")
+        # Terminal failure — reveal the rule rather than stranding it hidden
+        # (see the failure-reveal comment at the end of this function).
+        try:
+            _flip_visibility(rule_id, finalize_ce_ids)
+        except Exception as flip_err:
+            print(f"[default_datasets] failure-reveal failed for rule {rule_id}: {flip_err}")
         return
     pos_json = json.dumps(pos_config).replace("\\u0000", "")
     execute_query(
@@ -194,17 +225,19 @@ def _run_rule_defaults(
     # (hidden in Browse / Drafts / bookmarks / CE picker everywhere) until the
     # whole default test/calibration set is built — so a rule never appears
     # half-finished. Flip them ready now that generation is done.
-    if finalize_ce_ids is not None:
+    #
+    # FAILURE reveal: if any bucket errored, the rule is revealed REGARDLESS of
+    # which flow owns the finalize (the AI pipeline passes finalize_ce_ids; the
+    # build-from-CEs wizard finalizes from the frontend, which never runs on
+    # failure). A rule left is_ready=FALSE would be invisible everywhere and
+    # silently DELETED by boot-time crash recovery. Same philosophy as the
+    # embed path: don't strand the rule hidden forever — it's still usable,
+    # and the user can regenerate its sets (retry from the tray chip, or Edit
+    # the revealed rule). The status endpoint carries the per-bucket reason.
+    failed = rule_defaults_status(rule_id).get("state") == "error"
+    if failed or finalize_ce_ids is not None:
         try:
-            if finalize_ce_ids:
-                execute_query(
-                    "UPDATE cognitive_elements SET is_ready = TRUE WHERE ce_id = ANY(%s)",
-                    (finalize_ce_ids,),
-                )
-            execute_query(
-                "UPDATE rules SET is_ready = TRUE WHERE rule_id = %s",
-                (rule_id,),
-            )
+            _flip_visibility(rule_id, finalize_ce_ids)
         except Exception as e:
             print(f"[default_datasets] is_ready finalize failed for rule {rule_id}: {e}")
 

@@ -11,7 +11,8 @@ import AddModelModal from '../components/AddModelModal/AddModelModal';
 import Breadcrumb from '../components/Breadcrumb/Breadcrumb';
 
 // Icons & Utils
-import { FiPlus, FiInbox, FiHome, FiShield, FiCpu, FiLayers, FiZap, FiCheckCircle, FiAlertCircle, FiRefreshCw, FiUploadCloud, FiCopy, FiFolder, FiFolderPlus, FiEdit2, FiTrash2, FiMove, FiChevronDown, FiChevronRight, FiGitBranch } from 'react-icons/fi';
+import { FiPlus, FiInbox, FiHome, FiShield, FiCpu, FiLayers, FiZap, FiCheckCircle, FiAlertCircle, FiRefreshCw, FiUploadCloud, FiDownload, FiCopy, FiFolder, FiFolderPlus, FiEdit2, FiTrash2, FiMove, FiChevronDown, FiChevronRight, FiGitBranch } from 'react-icons/fi';
+import ExportToRegistryModal from '../components/ExportToRegistry/ExportToRegistryModal';
 import { FaRocket } from 'react-icons/fa';
 import Swal from 'sweetalert2';
 import { showAlertDialog, showConfirmDialog, showLoadingDialog } from '../components/ConfirmDialog/confirmDialog';
@@ -88,6 +89,7 @@ const Guardrails = () => {
     const [renameTarget, setRenameTarget] = useState(null); // folder being renamed (modal)
     const [renameValue, setRenameValue] = useState('');
     const [moveTarget, setMoveTarget] = useState(null);     // rule set being moved (modal)
+    const [exportTarget, setExportTarget] = useState(null); // rule set being exported (modal)
     const [collapsed, setCollapsed] = useState(() => new Set()); // collapsed folder_ids
     const [draggingId, setDraggingId] = useState(null);     // rule set being dragged
     const [dragOverKey, setDragOverKey] = useState(null);   // drop target: folder_id or 'ungrouped'
@@ -561,12 +563,11 @@ const Guardrails = () => {
                         <FiMove size={12} /> Move
                     </button>
                     <button
-                        onClick={(e) => e.stopPropagation()}
-                        disabled
-                        style={{ ...cloneBtnStyle, opacity: 0.55, cursor: 'not-allowed' }}
-                        title="Library contributions move to gavel-rules pull requests — submission from Studio coming soon"
+                        onClick={(e) => { e.stopPropagation(); setExportTarget(c); }}
+                        style={cloneBtnStyle}
+                        title="Save this rule set in the public library's format, ready to contribute"
                     >
-                        <FiUploadCloud size={12} /> Share
+                        <FiDownload size={12} /> Export
                     </button>
                     {c.model_id ? (
                         <button
@@ -863,6 +864,16 @@ const Guardrails = () => {
                 userId={user?.user_id}
                 onAdded={() => fetchModels(user)}
             />
+
+            {exportTarget && (
+                <ExportToRegistryModal
+                    open={!!exportTarget}
+                    onClose={() => setExportTarget(null)}
+                    kind="ruleset"
+                    entityId={exportTarget.classifier_id}
+                    defaultTitle={exportTarget.name || ''}
+                />
+            )}
 
             <GlassModal isOpen={folderModalOpen} onClose={() => setFolderModalOpen(false)} title="New folder">
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>

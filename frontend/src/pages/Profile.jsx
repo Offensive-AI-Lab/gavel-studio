@@ -61,6 +61,8 @@ const Profile = () => {
     const [expandedCeId, setExpandedCeId] = useState(null);
     // CE expanded view fetches its excitation samples on first open.
     const [previewCache, setPreviewCache] = useState({});
+    // True sample count per CE — the preview itself is capped at 10.
+    const [previewTotals, setPreviewTotals] = useState({});
 
     // Bookmark state (for the visitor, not the profile owner). Lets
     // someone "save" an artist's rule/CE straight from the profile.
@@ -281,6 +283,7 @@ const Profile = () => {
                 const res = await getCognitiveDataset(ceId);
                 const raw = res.data?.training_data_preview || res.data?.training_data || [];
                 setPreviewCache((p) => ({ ...p, [ceId]: raw }));
+                setPreviewTotals((p) => ({ ...p, [ceId]: res.data?.samples_count ?? null }));
             } catch {
                 setPreviewCache((p) => ({ ...p, [ceId]: [] }));
             }
@@ -518,6 +521,7 @@ const Profile = () => {
                                     isOpen={expandedCeId === ce.ce_id}
                                     onToggle={toggleCeExpand}
                                     samples={previewCache[ce.ce_id]}
+                                        samplesTotal={previewTotals[ce.ce_id]}
                                     onBookmark={currentUser ? handleCeBookmark : undefined}
                                     isBookmarked={ceBookmarkIds.has(ce.ce_id)}
                                 />

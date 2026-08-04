@@ -66,6 +66,12 @@ const RulesManager = () => {
     // --- State Management ---
     const [rules, setRules] = useState([]);
     const [rulesLoadError, setRulesLoadError] = useState(false);   // getClassifierRules failed
+    // An empty array means two different things — "not fetched yet" and
+    // "fetched, genuinely nothing" — and the empty states used to render on the
+    // bare length check, so a slow or hanging backend showed "No rules in this
+    // rule set" and "No models yet" as if they were answers (#11). These flags
+    // start TRUE so the very first paint is a loading state, never an empty one.
+    const [rulesLoading, setRulesLoading] = useState(true);
     const [expandedRule, setExpandedRule] = useState(null);
     
     // Modal Config
@@ -111,6 +117,14 @@ const RulesManager = () => {
     // can't linger past completion.
     const [trainingPhase, setTrainingPhase] = useState(_cachedPhase || null);
     const [trainingPhaseDetail, setTrainingPhaseDetail] = useState(_cachedDetail || null);
+    // The post-training chain — "Calibrating" then "Evaluating" — which runs
+    // AFTER status flips to 'active'. Tracked separately from trainingPhase
+    // because the training banner is gated on trainingStatus === 'training';
+    // without this the page went silent while calibration ran for minutes.
+    const [chainPhase, setChainPhase] = useState(null);
+    const [chainPhaseDetail, setChainPhaseDetail] = useState(null);
+    // Consecutive post-training polls that reported no chain stage.
+    const postTrainIdleRef = useRef(0);
     // True while we're awaiting the trainClassifier API call — the remote
     // submission (payload staging + job submit) can take 10-20s, and without
     // this flag the UI sits silent until the "Training started" dialog pops.
@@ -119,6 +133,7 @@ const RulesManager = () => {
     // (at train time). `models` backs both the attach picker and the
     // "Apply to another model" clone picker.
     const [models, setModels] = useState([]);
+    const [modelsLoading, setModelsLoading] = useState(true);   // see rulesLoading
     const [attachOpen, setAttachOpen] = useState(false);
     const [attachTargetModelId, setAttachTargetModelId] = useState('');
     // Per-model LLM layer editor inside the Choose-Model modal.
@@ -178,7 +193,9 @@ const RulesManager = () => {
     // can't detect rules the user added DURING training, because the
     // local trainedSetupIds stays stuck at the page-mount value.
     useEffect(() => {
-        if (trainingStatus !== 'training') return;
+        // Keep polling past the end of training while the calibration →
+        // evaluation chain is still running, so its progress keeps ticking.
+        if (trainingStatus !== 'training' && !chainPhase) return;
         const interval = setInterval(async () => {
             try {
                 const res = await getTrainingStatus(classifierId);
@@ -186,6 +203,9 @@ const RulesManager = () => {
                 if (newStatus !== trainingStatus) {
                     setTrainingStatus(newStatus);
                 }
+                setChainPhase(res.data.post_training_phase || null);
+                setChainPhaseDetail(res.data.post_training_phase_detail || null);
+                if (res.data.post_training_phase) postTrainIdleRef.current = 0;
                 // Pick up the live phase + detail on every poll so the
                 // banner ticks forward as the trainer crosses stage
                 // boundaries. Backend forces these to null off-status,
@@ -201,7 +221,12 @@ const RulesManager = () => {
                     sessionStorage.removeItem(`trainPhase_${classifierId}`);
                     sessionStorage.removeItem(`trainDetail_${classifierId}`);
                 }
-                if (!res.data.is_training) {
+                // The chain's first marker row lands a moment after training
+                // flips to 'active', so one empty poll doesn't mean "done" —
+                // stopping there would miss calibration entirely. Give it two.
+                if (!res.data.is_training && !res.data.post_training_phase) {
+                    postTrainIdleRef.current += 1;
+                    if (postTrainIdleRef.current < 2) return;
                     clearInterval(interval);
                     // Training just completed (success or error). Refresh
                     // the guardrail-details payload so the snapshot we
@@ -215,7 +240,11 @@ const RulesManager = () => {
             }
         }, 5000);
         return () => clearInterval(interval);
-    }, [trainingStatus]);
+        // chainPhase is a dep so the poll RESTARTS if training ends and the
+        // chain picks up; it only toggles at stage boundaries, so this doesn't
+        // churn the interval.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [trainingStatus, chainPhase]);
 
     const fetchSidebarContext = async () => {
         try {
@@ -236,6 +265,10 @@ const RulesManager = () => {
             setTrainingStatus(res.data.status);
             setTrainingPhase(res.data.training_phase || null);
             setTrainingPhaseDetail(res.data.training_phase_detail || null);
+            // Picked up on mount too, so landing on the page mid-calibration
+            // shows the banner (and starts the poll) instead of looking idle.
+            setChainPhase(res.data.post_training_phase || null);
+            setChainPhaseDetail(res.data.post_training_phase_detail || null);
             // Cache so navigating away and back shows the banner instantly.
             if (res.data.status === 'training') {
                 sessionStorage.setItem(`trainStatus_${classifierId}`, res.data.status);
@@ -302,10 +335,12 @@ const RulesManager = () => {
             {
                 heading: 'Right now',
                 bullets:
-                    rules.length === 0
+                    rulesLoading
+                        ? ['Loading this rule set…']
+                        : rules.length === 0
                         ? [
                             'No rules yet. Use "Add an Existing Rule" to drop a bookmarked public rule or one of your drafts into this rule set.',
-                            'To author a new rule, use "Create a New Rule" — it opens the Create menu (Rule with AI, Build Rule from CEs, or a new CE); the finished rule lands in your Drafts and you add it here.',
+                            'To author a new rule, use "Create a New Rule" — it opens the Create menu (Rule with AI, Build Rule from CEs, or a new CE); the finished rule lands in Your Library → Rules and you add it here.',
                         ]
                         : trainingStatus === 'training'
                             ? ['Training is running — the banner above shows the live phase. Don\'t close the tab; the run keeps going on the server even if you navigate away.']
@@ -343,6 +378,8 @@ const RulesManager = () => {
             setModels(res.data.models || []);
         } catch {
             setModels([]);
+        } finally {
+            setModelsLoading(false);
         }
     };
 
@@ -622,6 +659,8 @@ const RulesManager = () => {
         } catch {
             setRulesLoadError(true);
             showAlertDialog({ title: 'Error', message: 'Failed to load rules', variant: 'error' });
+        } finally {
+            setRulesLoading(false);
         }
     };
 
@@ -853,7 +892,7 @@ const RulesManager = () => {
               * Calm indigo palette (matches the active-tab pills) — this
               * is informational, not a warning like the policy banners.
               */}
-            {(trainingStatus === 'training' || submitting) && (
+            {(trainingStatus === 'training' || submitting || chainPhase) && (
                 <div
                     role="status"
                     style={{
@@ -875,9 +914,24 @@ const RulesManager = () => {
                         style={{ animation: 'spin 1.4s linear infinite', flexShrink: 0 }}
                     />
                     <div style={{ minWidth: 0, flex: 1 }}>
-                        <strong>{submitting ? 'Looking for a GPU' : (trainingPhase || 'Training in progress')}</strong>
+                        {/* Same banner, three sources: the submit round-trip, the
+                            training run, and — once training is done — the
+                            calibration → evaluation chain. Calibration and
+                            evaluation keep their own tabs; this only says which
+                            stage is currently running. */}
+                        <strong>
+                            {submitting
+                                ? 'Looking for a GPU'
+                                : (trainingStatus === 'training'
+                                    ? (trainingPhase || 'Training in progress')
+                                    : chainPhase)}
+                        </strong>
                         <span style={{ marginLeft: 8, color: '#a5b4fc', fontWeight: 500 }}>
-                            — {submitting ? 'Uploading the job and requesting a GPU...' : (trainingPhaseDetail || 'Status updating shortly')}
+                            — {submitting
+                                ? 'Uploading the job and requesting a GPU...'
+                                : (trainingStatus === 'training'
+                                    ? (trainingPhaseDetail || 'Status updating shortly')
+                                    : (chainPhaseDetail || 'Status updating shortly'))}
                         </span>
                     </div>
                 </div>
@@ -1116,6 +1170,8 @@ const RulesManager = () => {
                         })()}
                         <span style={{ color: '#64748b', marginLeft: 8 }}>(locked once trained — use “Apply to another model” to try a different one)</span>
                     </div>
+                ) : modelsLoading ? (
+                    <p style={{ color: '#94a3b8', fontSize: '0.85rem', margin: '8px 0 0' }} role="status">Loading models…</p>
                 ) : models.length === 0 ? (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 8 }}>
                         <p style={{ color: '#94a3b8', fontSize: '0.85rem', margin: 0 }}>No models yet — add one to configure this rule set.</p>
@@ -1180,7 +1236,14 @@ const RulesManager = () => {
             <CreateChooserModal isOpen={createOpen} onClose={() => setCreateOpen(false)} />
 
             {/* 3. Rules List */}
-            {rules.length === 0 ? (
+            {rulesLoading ? (
+                // Still fetching: say so. Rendering "No Rules Defined" here told
+                // the user this rule set was empty when we simply didn't know yet.
+                <div className="empty-state" role="status">
+                    <FiRefreshCw size={40} style={{ color: '#64748b', marginBottom: '16px', animation: 'spin 1.4s linear infinite' }} />
+                    <p style={{ color: '#94a3b8' }}>Loading rules…</p>
+                </div>
+            ) : rules.length === 0 ? (
                 <div className="empty-state">
                     <FiInbox size={64} style={{ color: '#64748b', marginBottom: '20px' }} />
                     <h2 style={{ fontSize: '1.5rem', marginBottom: '10px', color: '#cbd5e1' }}>No Rules Defined</h2>

@@ -249,8 +249,37 @@ class TestTrainThenClassify:
             assert meta["readout_dim"] > 0
             assert len(meta["selected_layers"]) == 2
 
-            # ---- REALTIME CLASSIFY (inference forward + triggers + rule eval) ----
+            # ---- MONITORING IS BLOCKED UNTIL CALIBRATED ----
+            # Scoring against a default 0.5 threshold per CE would look
+            # functional and mean nothing, so realtime refuses (409) rather
+            # than serving meaningless verdicts. In the app, training chains
+            # into calibration automatically; the suite disables that chain
+            # (see conftest), so here the rule set is genuinely uncalibrated.
             convo = _conversation("alpha topic number 0")
+            res = client.post(
+                f"/realtime/{classifier_id}/analyze-stored",
+                json={"messages": convo},
+                headers=auth_headers,
+            )
+            assert res.status_code == 409, res.text
+            assert "calibrat" in res.json()["detail"].lower()
+
+            # Stand in for a finished calibration. The real sweep is covered by
+            # TestCalibrationOnRealActivations; here we only need thresholds to
+            # exist so the forward path is reachable.
+            execute_query(
+                "INSERT INTO evaluation_results (classifier_id, eval_type, thresholds) "
+                "VALUES (%s, 'calibration', %s::jsonb)",
+                (
+                    classifier_id,
+                    json.dumps({
+                        name: {"threshold": 0.5, "patience": 1}
+                        for name in meta["labels"]
+                    }),
+                ),
+            )
+
+            # ---- REALTIME CLASSIFY (inference forward + triggers + rule eval) ----
             res = client.post(
                 f"/realtime/{classifier_id}/analyze-stored",
                 json={"messages": convo},

@@ -316,6 +316,26 @@ describe('BrowseCEs — live search', () => {
         expect(screen.getByText('directive to user')).toBeInTheDocument();
     });
 
+    it('keeps search results bookmarkable and credited to their author', async () => {
+        // Regression: the search-row mapping dropped public_id (which gates the
+        // card's Save button) and created_by_username (the author link), so
+        // searching silently removed both from every result.
+        api.searchLibrary.mockResolvedValue({
+            data: {
+                results: [searchRow({ public_id: 'pub-100', created_by_username: 'ofek' })],
+                total_results: 1,
+            },
+        });
+        renderPage();
+        await screen.findByText('No Cognitive Elements');
+        const input = screen.getByPlaceholderText('Search cognitive elements...');
+        fireEvent.change(input, { target: { value: 'privacy' } });
+        const card = (await screen.findByText('Searched CE', { selector: 'h3' })).closest('.ce-card');
+        expect(within(card).getByText('by @ofek')).toBeInTheDocument();
+        fireEvent.click(within(card).getByRole('button', { name: /Bookmark CE/i }));
+        await waitFor(() => expect(api.addCEBookmark).toHaveBeenCalledWith(7, 100));
+    });
+
     it('shows a no-results message when the search returns nothing', async () => {
         api.searchLibrary.mockResolvedValue({ data: { results: [], total_results: 0 } });
         renderPage();

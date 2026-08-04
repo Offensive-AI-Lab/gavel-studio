@@ -54,9 +54,9 @@ const fullProposal = {
     groups: {
         required: ['ce_nec'],
         option_1: ['ce_f1', 'ce_f2'],
-        supporting: ['ce_suf'],
+        scam_context: ['ce_ctx'],
     },
-    condition: 'all of required and 1 of option_1',
+    condition: 'all of required and 1 of option_1 and all of scam_context',
     new_ces: [
         { ce_id: 1, ce_name: 'New CE One', definition: 'def one' },
         { ce_id: 2, ce_name: 'New CE Two', definition: 'def two' },
@@ -336,9 +336,9 @@ describe('Step2ARule — proposal rendering variants', () => {
         expect(screen.getByText(/ce_nec/)).toBeInTheDocument();
         expect(screen.getByText('option_1:')).toBeInTheDocument();
         expect(screen.getByText(/ce_f1, ce_f2/)).toBeInTheDocument();
-        expect(screen.getByText('supporting:')).toBeInTheDocument();
+        expect(screen.getByText('scam_context:')).toBeInTheDocument();
         // Condition verbatim.
-        expect(screen.getByText('all of required and 1 of option_1')).toBeInTheDocument();
+        expect(screen.getByText('all of required and 1 of option_1 and all of scam_context')).toBeInTheDocument();
         // New CEs.
         expect(screen.getByText('New Cognitive Elements (2)')).toBeInTheDocument();
         expect(screen.getByText('New CE One')).toBeInTheDocument();

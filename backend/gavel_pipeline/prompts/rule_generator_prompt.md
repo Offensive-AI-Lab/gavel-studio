@@ -186,7 +186,6 @@ You MUST show your complete reasoning process:
 5. **Rule Logic** (Clear structure!)
    - Why these specific groups — what ONE aspect of the misuse pattern does each group represent?
    - Why this quantifier (`all of` vs `1 of` vs `<K> of`) for each referenced group?
-   - If you added an unreferenced `supporting` group: how do its CEs add confidence without being required?
    - Why this condition captures the scenario?
 
 6. Perform an explicit NON-OVERLAP / BOUNDARY CHECK:

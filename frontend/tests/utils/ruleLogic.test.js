@@ -106,9 +106,9 @@ describe('groupProgressLabel', () => {
         const info = { members: ['a', 'b', 'c'], hits: ['a'], quantifier: 2, satisfied: false };
         expect(groupProgressLabel('opts', info)).toBe('1/2 of opts');
     });
-    it('marks unreferenced (supporting) groups', () => {
+    it('marks a legacy group the condition does not reference', () => {
         const info = { members: ['a'], hits: [], quantifier: null, satisfied: true };
-        expect(groupProgressLabel('supporting', info)).toBe('supporting (not in condition)');
+        expect(groupProgressLabel('trust_seeding', info)).toBe('trust_seeding (not in condition)');
     });
 });
 
@@ -130,15 +130,19 @@ describe('validateEditorState', () => {
         expect(validateEditorState([g('a', [])], 'all of a')).toMatch(/no cognitive elements/);
     });
     it('rejects a blank condition', () => {
-        expect(validateEditorState([g('a')], '   ')).toMatch(/firing condition/);
+        // Nothing is required, so the rule can never fire.
+        expect(validateEditorState([g('a')], '   ')).toMatch(/Nothing would make this rule fire/);
+    });
+    it('rejects a group the condition never references', () => {
+        // The backend rejects the same shape, so it could never be saved.
+        expect(validateEditorState([g('required'), g('extra')], 'all of required'))
+            .toMatch(/"extra" is not used by the condition/);
+    });
+    it('reads the group references out of an advanced condition', () => {
+        expect(validateEditorState([g('a'), g('b'), g('c')], '(all of a or 1 of b) and 1 of c'))
+            .toBeNull();
     });
     it('rejects positional (lazy) group names', () => {
         expect(validateEditorState([g('group1')], 'all of group1')).toMatch(/not a descriptive group name/);
-    });
-    it('rejects negation in the condition', () => {
-        expect(validateEditorState([g('a')], 'not all of a')).toMatch(/Negation/);
-    });
-    it('rejects a group the condition never references (no dead groups)', () => {
-        expect(validateEditorState([g('a'), g('b')], 'all of a')).toMatch(/"b" is not referenced/);
     });
 });

@@ -377,6 +377,10 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
     4. Creates new CEs in database if o3 identifies gaps
     5. Identifies which new CEs need excitation datasets
     """
+    # Initialized BEFORE the try so the rollback handlers below can always
+    # reference it — a failure raised before any CE is created must surface
+    # its real detail, not an UnboundLocalError from the except block.
+    new_ces_info = []
     try:
         # Call rule generation (delegates to the reference rule_generator)
         result = _generate_rule_from_scenario(request.scenario)
@@ -390,7 +394,6 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
         rule_data = result['rule_data']
         
         # Process NEW CEs - create them in database
-        new_ces_info = []
         new_ces_dict = rule_data.get('new_ces', {})
         
         for ce_name, ce_details in new_ces_dict.items():
@@ -1828,7 +1831,28 @@ def derive_scenario(req: DeriveScenarioRequest, _: int = Depends(get_current_use
     frontend shows it to the user to confirm/edit before generating the
     rule's default test set."""
     rule_context = _load_rule_context(req.rule_id)
-    scenario = _derive_scenario_from_rule(rule_context)
+    # Fail fast with the REAL cause when the LLM key is absent — litellm would
+    # otherwise bury it inside an opaque 500 "Scenario derivation failed: ...".
+    # Checked after the rule lookup so a missing rule still 404s first.
+    if not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(
+            status_code=503,
+            detail="OPENAI_API_KEY is not configured. Add it to backend/.env and restart the backend.",
+        )
+    # A missing key is only ONE way this fails — an invalid key, a rate limit,
+    # a provider outage, a timeout, a model that no longer exists all raise
+    # here too. Uncaught, FastAPI turns every one of them into a bare 500
+    # "Internal Server Error" and the frontend can only say "could not
+    # auto-write a scenario", which is the complaint in #2. Pass the provider's
+    # own message through as the detail so the user sees the actual cause.
+    # 502, not 500: the failure is upstream of us.
+    try:
+        scenario = _derive_scenario_from_rule(rule_context)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[!] [derive-scenario] rule {req.rule_id} failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Scenario auto-write failed: {e}")
     return {"success": True, "rule_id": req.rule_id, "scenario": scenario}
 
 

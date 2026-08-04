@@ -86,6 +86,25 @@ describe('buildRuleInBackground', () => {
         await waitFor(() => expect(trayTask.error).toHaveBeenCalled());
         expect(api.completePipelineRun).not.toHaveBeenCalled();
     });
+
+    it('fails the chip with the backend reason when the default set errors (run still completed)', async () => {
+        // The status endpoint reports WHY generation failed; the backend has
+        // already revealed the rule, so the message names where it landed:
+        // Your Library → Rules (there is no "Drafts" page — #14).
+        api.getRuleDefaultsStatus.mockResolvedValue({
+            data: { state: 'error', error: 'negative: LLM quota exceeded' },
+        });
+        const run = { run_id: 19, rule_id: 4, steps: { '2A': { data: { ce_ids: [] } } } };
+        buildRuleInBackground(tray, { run, userId: 1 });
+
+        await waitFor(() => expect(trayTask.error).toHaveBeenCalled());
+        const subtitle = trayTask.error.mock.calls[0][0].subtitle;
+        expect(subtitle).toContain('negative: LLM quota exceeded');
+        expect(subtitle).toMatch(/Your Library/);
+        // The pipeline run is still closed out so nothing dangles/offers resume.
+        expect(api.completePipelineRun).toHaveBeenCalledWith(19);
+        expect(trayTask.success).not.toHaveBeenCalled();
+    });
 });
 
 describe('buildCeInBackground', () => {

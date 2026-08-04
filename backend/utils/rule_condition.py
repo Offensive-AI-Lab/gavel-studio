@@ -1,8 +1,8 @@
-"""The gavel-rules condition grammar: parser, group extraction, evaluation,
+"""The gavel-rules v2 condition grammar: parser, group extraction, evaluation,
 and the derived readable-predicate renderer.
 
 Ported from gavel-rules tools/condition.py
-(Offensive-AI-Lab/gavel-rules @ 8ac552c, schema v1).
+(Offensive-AI-Lab/gavel-rules @ f0d2d9f3a901cf5619671b44d63fca23a0feed4f).
 Keep the parser/evaluator semantics byte-compatible with upstream — the same
 condition string must accept/reject and fire identically here and in the
 library's CI validator. Deliberately dependency-free.
@@ -10,6 +10,7 @@ library's CI validator. Deliberately dependency-free.
 The parser accepts `not` (it is a reserved keyword) but validation rejects
 it, exactly like the library CI: negation stays unavailable until its
 calibration semantics are defined in a future schema version.
+
 
     condition   ::= disjunction
     disjunction ::= conjunction ( "or" conjunction )*

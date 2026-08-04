@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { FiHome, FiShield, FiFileText, FiSend, FiSettings, FiRadio, FiTrash2, FiMessageSquare, FiDatabase, FiServer, FiAlertTriangle, FiRefreshCw } from 'react-icons/fi';
+import { FiHome, FiShield, FiFileText, FiSend, FiSettings, FiRadio, FiTrash2, FiMessageSquare, FiDatabase, FiServer, FiAlertTriangle, FiRefreshCw, FiSliders } from 'react-icons/fi';
 import Layout from '../components/Layout/Layout';
 import Breadcrumb from '../components/Breadcrumb/Breadcrumb';
 import {
@@ -94,7 +94,8 @@ export default function RealtimeViewer() {
     const [activeSampleIdx, setActiveSampleIdx] = useState(null);
     const [storedAnalysis, setStoredAnalysis] = useState(null);
     const [storedLoading, setStoredLoading] = useState(false);
-    // Warm remote session lifecycle: starting | queued | loading | ready | dead | error | local.
+    // Warm remote session lifecycle: starting | queued | loading | ready | dead | error |
+    // uncalibrated | local.
     // 'local' = no remote GPU worker is configured, so we fall back to loading the
     // model on THIS machine (only viable on a capable PC) via the legacy endpoints.
     const [sessionState, setSessionState] = useState('starting');
@@ -154,7 +155,11 @@ export default function RealtimeViewer() {
             .catch(err => {
                 pendingStartRef.current = false;
                 if (cancelled) return;
-                setSessionState('error');
+                // 409 = the rule set isn't calibrated (or calibration is still
+                // running). Its own state, not a generic failure: monitoring
+                // uncalibrated would silently score every CE at 0.5, so the
+                // backend refuses and we point the user at Calibration.
+                setSessionState(err.response?.status === 409 ? 'uncalibrated' : 'error');
                 setSessionError(err.response?.data?.detail || 'Failed to start the realtime session.');
             });
         return () => { cancelled = true; };
@@ -441,6 +446,29 @@ export default function RealtimeViewer() {
                     </div>
                 )}
 
+                {sessionState === 'uncalibrated' && (
+                    <div className="rtv-firstload is-error" role="alert">
+                        <FiAlertTriangle size={20} style={{ color: '#fbbf24', flexShrink: 0 }} />
+                        <div className="rtv-firstload-text">
+                            {/* Two ways to land here — no calibration yet, or a policy edited
+                                since training — so the heading stays general and the backend's
+                                message says which. Both CTAs are offered rather than guessing. */}
+                            <strong>Monitoring is blocked.</strong>
+                            <span>{sessionError} Scoring on thresholds that don&apos;t match the
+                            current model would look functional and mean nothing.</span>
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                            <button className="rtv-restart-btn" onClick={() => navigate(`/classifiers/${classifierId}/evaluate`)}>
+                                <FiSliders size={13} /> Go to Calibration
+                            </button>
+                            <button className="rtv-restart-btn" onClick={() => navigate(`/classifiers/${classifierId}/rules`)}>
+                                <FiShield size={13} /> Go to Rule Set
+                            </button>
+                            <button className="rtv-restart-btn" onClick={restartSession}><FiRefreshCw size={13} /> Retry</button>
+                        </div>
+                    </div>
+                )}
+
                 {sessionDead && (
                     <div className="rtv-firstload is-error" role="alert">
                         <FiAlertTriangle size={20} style={{ color: '#f87171', flexShrink: 0 }} />
@@ -597,10 +625,9 @@ export default function RealtimeViewer() {
                                             </div>
                                         )}
                                         {/* Per-group progress: hits vs. what the condition
-                                          * demands (e.g. "2/3 of solicited_action"). Groups
-                                          * not referenced by the condition (possible only on
-                                          * legacy rows — validation now rejects dead groups)
-                                          * are skipped here. */}
+                                          * demands (e.g. "2/3 of solicited_action"). Every
+                                          * group is part of the condition; a legacy rule
+                                          * with an unreferenced one is skipped here. */}
                                         {Object.entries(rt.groups || {}).filter(([, info]) => info?.quantifier != null).length > 0 && (
                                             <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 4, display: 'flex', flexDirection: 'column', gap: 2 }}>
                                                 {Object.entries(rt.groups || {})

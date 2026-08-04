@@ -63,25 +63,32 @@ class TestLLMFailureDuringDefaultsGeneration:
         assert all(s == "error" for s in statuses), statuses
         assert any("LLM connection reset" in (r["generation_log"] or "") for r in rows)
 
-    def test_orphaned_draft_rule_reclaimed_by_recovery(self, monkeypatch):
+    def test_failed_rule_is_revealed_and_survives_recovery(self, monkeypatch):
+        """A generation FAILURE reveals the rule (is_ready=TRUE) so it lands in
+        Drafts with the failure reason instead of being stranded hidden — where
+        the boot-time incomplete-pipeline sweep would silently delete it. The
+        revealed rule must therefore SURVIVE a recovery run (the user retries
+        the set generation from it). Only crash-interrupted rows (still
+        is_ready=FALSE) are reclaimed by the sweep."""
         rule_id = _make_draft_rule()
         import routes.ai_pipeline as aip
         monkeypatch.setattr(aip, "build_positive_config", _raise_runtime)
         from services.default_datasets import _run_rule_defaults
         _run_rule_defaults(rule_id, "scenario", 4, 2)
 
-        # The draft is is_ready=FALSE and not inside any active (completed=FALSE)
-        # pipeline run, so the incomplete-pipeline sweep must reclaim it — the
-        # half-built rule never lingers as a visible orphan.
+        rows = execute_query_dict("SELECT is_ready FROM rules WHERE rule_id=%s", (rule_id,))
+        assert rows and bool(rows[0]["is_ready"]), "failed rule must be revealed, not stranded hidden"
+
         from utils.crash_recovery import IncompletePipelineRecovery
         IncompletePipelineRecovery().run()
 
         still_there = execute_query_dict("SELECT 1 FROM rules WHERE rule_id=%s", (rule_id,))
-        assert not still_there, "is_ready=FALSE orphan draft should be wiped by recovery"
+        assert still_there, "revealed failed rule must survive the recovery sweep (user can retry)"
 
-    def test_failed_generation_keeps_rule_hidden_from_library(self, client, monkeypatch, auth_headers):
-        """A rule whose default generation failed must not surface in the public
-        library before recovery runs (it's still is_ready=FALSE)."""
+    def test_failed_generation_keeps_rule_out_of_public_library(self, client, monkeypatch, auth_headers):
+        """A rule whose default generation failed is revealed as a LOCAL DRAFT
+        (it surfaces via /library/drafts) but must not leak into the public
+        library, which lists is_local_draft=FALSE rules only."""
         rule_id = _make_draft_rule()
         import routes.ai_pipeline as aip
         monkeypatch.setattr(aip, "build_positive_config", _raise_runtime)
@@ -93,6 +100,6 @@ class TestLLMFailureDuringDefaultsGeneration:
         data = res.json()
         rules = data.get("rules", data) if isinstance(data, dict) else data
         ids = {r.get("rule_id") for r in rules} if isinstance(rules, list) else set()
-        assert rule_id not in ids, "half-built draft must stay hidden until finalized"
+        assert rule_id not in ids, "failed local draft must not leak into the public library"
 
 

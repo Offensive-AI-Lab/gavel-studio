@@ -1,8 +1,9 @@
 import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { showAlertDialog } from '../ConfirmDialog/confirmDialog';
-import { FiPenTool, FiTrash2, FiChevronDown, FiChevronUp, FiCpu, FiPlus, FiMinus, FiInfo, FiTag, FiUpload, FiFileText, FiBookmark, FiEdit2 } from 'react-icons/fi';
+import { FiPenTool, FiTrash2, FiChevronDown, FiChevronUp, FiCpu, FiPlus, FiMinus, FiInfo, FiTag, FiDownload, FiFileText, FiBookmark, FiEdit2 } from 'react-icons/fi';
 import GlassModal from '../GlassModal/GlassModal';
+import ExportToRegistryModal from '../ExportToRegistry/ExportToRegistryModal';
 import RoleLogicGuide from '../RoleLogicGuide/RoleLogicGuide';
 import RuleLogicPreview from '../RuleLogicPreview/RuleLogicPreview';
 import BuildRuleFromCEsModal from '../../pages/BuildRuleFromCEsModal';
@@ -22,11 +23,9 @@ const RuleCard = ({
     isBookmarked = false,
     onEditLogic,
 }) => {
-    // Drafts show a DISABLED Publish button: publishing from Studio is gone —
-    // library contributions now go through gavel-rules pull requests. The
-    // button stays (disabled, with an explanatory tooltip) so the affordance
-    // isn't silently missing for users who knew the old flow.
-    const isDraftRule = rule?.is_local_draft === true;
+    // Contributions go out as gavel-rules pull requests, so the card's outbound
+    // action is Export (registry-format files), not an in-studio publish.
+    const [exportOpen, setExportOpen] = React.useState(false);
     // CE bookmarking from the rule card — which of this rule's CEs the user has
     // saved. Loaded lazily when the card expands (the CE tags are only shown
     // then), so list views don't each fire a fetch.
@@ -204,16 +203,18 @@ const RuleCard = ({
                             {isBookmarked ? 'Remove' : bookmarkLabel}
                         </button>
                     )}
-                    {isDraftRule && (
+                    {ruleNavId && (
                         <button
-                            className="bookmark-btn publish-btn"
-                            disabled
-                            onClick={(e) => e.stopPropagation()}
-                            aria-label="Publish rule to library (coming soon)"
-                            title="Library contributions move to gavel-rules pull requests — submission from Studio coming soon"
+                            className="bookmark-btn"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setExportOpen(true);
+                            }}
+                            aria-label="Export rule for a gavel-rules pull request"
+                            title="Save this rule in the public library's format, ready to contribute"
                         >
-                            <FiUpload />
-                            Publish
+                            <FiDownload />
+                            Export
                         </button>
                     )}
                     {ruleNavId && (
@@ -362,6 +363,16 @@ const RuleCard = ({
             {/* Edit → fork this rule into a new draft via the build-from-CEs wizard. */}
             {canEdit && (
                 <BuildRuleFromCEsModal open={editOpen} onClose={() => setEditOpen(false)} baseRule={editBase} />
+            )}
+
+            {exportOpen && (
+                <ExportToRegistryModal
+                    open={exportOpen}
+                    onClose={() => setExportOpen(false)}
+                    kind="rule"
+                    entityId={ruleNavId}
+                    defaultTitle={rule?.title || ''}
+                />
             )}
         </div>
     );

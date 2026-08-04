@@ -18,7 +18,7 @@ import Breadcrumb from '../components/Breadcrumb/Breadcrumb';
 import BuildRuleFromCEsModal from './BuildRuleFromCEsModal';
 import RuleLogicPreview from '../components/RuleLogicPreview/RuleLogicPreview';
 import { extractLogic } from '../utils/ruleLogic';
-import { recordRecent } from '../utils/recents';
+import { forgetRecent, recordRecent } from '../utils/recents';
 import { useTutorialContent } from '../contexts/TutorialContext';
 
 function readUser() {
@@ -225,8 +225,16 @@ export default function RulePage() {
                     setLoadError(false);
                     recordRecent('rule', { id: rid, name: res.data?.name || `Rule #${rid}`, path: `/rules/${rid}` });
                 }
-            } catch {
-                if (!cancelled) { setDetail(null); setLoadError(true); }
+            } catch (err) {
+                if (!cancelled) {
+                    setDetail(null);
+                    setLoadError(true);
+                    // The rule is gone (deleted, cascade, DB reset) — drop the
+                    // Recents entry that led here so the sidebar stops offering
+                    // a dead link. Only on a real 404: a network blip or a
+                    // backend restart must not wipe the user's Recents.
+                    if (err?.response?.status === 404) forgetRecent('rule', rid);
+                }
             } finally {
                 if (!cancelled) setLoading(false);
             }
@@ -291,7 +299,7 @@ export default function RulePage() {
                     detail?.public_id
                         ? 'This is a library rule — you can Save (bookmark) it for reuse on your rule sets.'
                         : 'This is a local draft — contributing it to the shared library happens via a gavel-rules pull request (submission from Studio coming soon).',
-                    'Logic: CEs are organized into named groups; the condition (e.g. "all of required and 1 of option_1") decides when the rule fires. Every group must be referenced by the condition.',
+                    'Logic: CEs are organized into named groups; the condition (e.g. "all of required and 1 of option_1") decides when the rule fires. Every group is part of the condition.',
                 ],
             },
         ],
