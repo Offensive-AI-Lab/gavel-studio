@@ -64,11 +64,23 @@ class RecoveryStrategy(ABC):
 
 
 class StuckTrainingRecovery(RecoveryStrategy):
-    """Reset guardrails stuck in 'training' status and clean up partial files.
+    """Reconcile guardrails left in 'training' status by a server restart.
 
-    If a guardrail is in 'training' but the server restarted, the background
-    task is dead. Reset to 'error' (or 'needs_retraining' if a previously
-    trained model exists on disk) and delete any partial training artifacts.
+    Two different situations wear the same status:
+
+      * The run is STILL GOING. Local training is a child process in its own
+        session, so it survives the API restarting — which happens constantly
+        under `uvicorn --reload`. Failing that guardrail would throw away a
+        multi-minute (or multi-hour) run that is about to succeed, so we ADOPT
+        it: leave the row alone and let the normal status poll finalize it.
+      * The run is GONE (a remote job, a child that died with the machine, or a
+        handle whose PID no longer belongs to us). Reset to 'error' — or
+        'needs_retraining' when a previously trained model is still on disk —
+        and delete the partial artifacts.
+
+    Adoption requires the full PID + job-directory handshake from the local
+    provider; a bare "is that PID alive" test would adopt (and later kill)
+    whatever unrelated process inherited the number after a reboot.
     """
 
     name = "training"
@@ -78,7 +90,45 @@ class StuckTrainingRecovery(RecoveryStrategy):
     # never, if the warmup hangs. We resolve the workdir from user_id directly
     # (below) rather than importing classifier_engine.trainer, which would pull
     # transformers and reintroduce the import-race that kept this strategy late.
+    # The compute provider imports we do use are torch-free at module level.
     safe_before_warmup = True
+
+    @staticmethod
+    def _adopt_if_alive(cid: int, training_log) -> bool:
+        """True when a local training run for `cid` must be left in 'training'
+        for the normal status poll to pick up — either the child is still going,
+        or it finished while the server was down and only the finalize step
+        (artifacts, snapshot, calibration) is outstanding.
+
+        Any doubt answers False: the caller then fails the guardrail, which the
+        user can recover from with a retrain. Wrongly adopting a dead run would
+        leave it in 'training' forever.
+        """
+        try:
+            from services import compute
+            from services.compute.base import JobState
+            info = compute.job_from_log(training_log, cid)
+            if not info or info[0] != "local":
+                return False
+            provider = compute.provider_by_name("local")
+            if provider is None:
+                return False
+            if provider.training_is_alive(info[1]):
+                detail = "Reconnected to a training run that survived the restart."
+            elif provider.poll_training(info[1]).state == JobState.DONE:
+                detail = "Training finished while the server was down — finishing up."
+            else:
+                return False
+            from utils.sqlite_db import execute_query
+            execute_query(
+                "UPDATE classifiers SET training_phase = %s, training_phase_detail = %s "
+                "WHERE classifier_id = %s AND status = 'training'",
+                ("Training", detail, cid),
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"[Recovery] Classifier {cid}: could not check the training child: {e}")
+            return False
 
     def run(self) -> None:
         from utils.sqlite_db import execute_query, execute_query_dict
@@ -87,14 +137,22 @@ class StuckTrainingRecovery(RecoveryStrategy):
         # (trained_classifiers/<user_id>/classifier_<id>/) is locatable WITHOUT
         # importing the trainer (= no transformers import → safe pre-warmup).
         stuck = execute_query_dict(
-            """SELECT c.classifier_id, c.model_path, tm.user_id
+            """SELECT c.classifier_id, c.model_path, c.training_log, tm.user_id
                FROM classifiers c
                LEFT JOIN target_models tm ON c.model_id = tm.model_id
                WHERE c.status = 'training'"""
         ) or []
 
+        adopted = 0
         for row in stuck:
             cid = row["classifier_id"]
+            if self._adopt_if_alive(cid, row.get("training_log")):
+                logger.info(f"[Recovery] Classifier {cid}: training child still running — adopted")
+                adopted += 1
+                continue
+            # Not ours / not alive any more. Make sure no half-dead LOCAL child
+            # is left holding this machine's GPU before we write the row off.
+            self._cancel_stale(cid, row.get("training_log"))
             logger.warning(f"[Recovery] Classifier {cid} stuck in 'training' — resetting to 'error'")
 
             user_id = row.get("user_id")
@@ -136,8 +194,35 @@ class StuckTrainingRecovery(RecoveryStrategy):
                      "Training interrupted by server restart. Please retrain.", cid),
                 )
 
-        if stuck:
-            logger.info(f"[Recovery] Recovered {len(stuck)} stuck training classifier(s)")
+        if len(stuck) - adopted:
+            logger.info(f"[Recovery] Recovered {len(stuck) - adopted} stuck training classifier(s)")
+        if adopted:
+            logger.info(f"[Recovery] Adopted {adopted} training run(s) that outlived the restart")
+
+    @staticmethod
+    def _cancel_stale(cid: int, training_log) -> None:
+        """Best-effort kill of a LOCAL training child we're about to write off.
+
+        A local child survives the API restart, so a run we've decided to fail
+        can still be holding this machine's GPU — killing it is the only way to
+        free it. The provider re-verifies ownership before signalling anything,
+        so a stale handle pointing at a recycled PID is a no-op.
+
+        Remote handles are deliberately left alone: boot recovery only flips the
+        row, exactly as it did before local training moved out of process.
+        Cancelling from here would reach across to a shared worker on the
+        strength of a handle we already consider unreliable.
+        """
+        try:
+            from services import compute
+            info = compute.job_from_log(training_log, cid)
+            if not info or info[0] != "local":
+                return
+            provider = compute.provider_by_name(info[0])
+            if provider is not None:
+                provider.cancel_training(info[1])
+        except Exception as e:
+            logger.warning(f"[Recovery] Classifier {cid}: stale training job cleanup failed: {e}")
 
 
 class StuckTestGenerationRecovery(RecoveryStrategy):

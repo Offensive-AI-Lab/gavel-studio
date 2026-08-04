@@ -25,7 +25,9 @@ from .base import (  # noqa: F401
     TrainingSpec,
     TrainingStatus,
     Workload,
+    job_from_log,
 )
+from .phases import TRAINING_PHASE_LABELS, phase_label  # noqa: F401
 from .registry import (  # noqa: F401
     get_provider, local_provider, status, all_providers,
     failover_providers, provider_by_name,

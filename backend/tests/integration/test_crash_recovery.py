@@ -521,27 +521,95 @@ class TestFullRecovery:
         run_all_recovery()
 
 
+def _trainable_classifier(client, auth_headers, test_model):
+    """A brand-new guardrail with one CE that has an excitation dataset, wired
+    through a rule_setup — the minimum POST /train accepts. Fresh (not the
+    shared session fixture) so seeding it can't leak into other tests."""
+    import uuid
+    from utils.sqlite_db import execute_query, execute_query_dict
+
+    res = client.post("/classifiers/create", json={
+        "model_id": test_model["model_id"],
+        "name": f"spawnfail-{uuid.uuid4().hex[:8]}",
+    }, headers=auth_headers)
+    assert res.status_code == 200, res.text
+    cid = res.json().get("classifier", res.json())["classifier_id"]
+
+    ce_name = f"spawnfail_ce_{uuid.uuid4().hex[:8]}_probe"
+    ce_id = execute_query_dict(
+        "INSERT INTO cognitive_elements (name, definition) VALUES (%s, %s) RETURNING ce_id",
+        (ce_name, "spawn-failure test CE"),
+    )[0]["ce_id"]
+    execute_query(
+        "INSERT INTO excitation_datasets (ce_id, dataset) VALUES (%s, %s)",
+        (ce_id, json.dumps({"samples": [
+            {"conversation": [{"role": "user", "content": "hi"},
+                              {"role": "assistant", "content": "hello"}]}]})),
+    )
+    rule_id = execute_query_dict(
+        "INSERT INTO rules (name, predicate, ce_groups, condition) "
+        "VALUES (%s, %s, %s, %s) RETURNING rule_id",
+        (f"spawnfail_rule_{uuid.uuid4().hex[:8]}", ce_name,
+         json.dumps({"required": [ce_name]}), "all of required"),
+    )[0]["rule_id"]
+    setup_id = execute_query_dict(
+        "INSERT INTO rule_setup (classifier_id, rule_id, custom_name, predicate, "
+        "ce_groups, condition, is_active) VALUES (%s, %s, %s, %s, %s, %s, TRUE) "
+        "RETURNING setup_id",
+        (cid, rule_id, f"spawnfail_setup_{uuid.uuid4().hex[:8]}", ce_name,
+         json.dumps({"required": [ce_name]}), "all of required"),
+    )[0]["setup_id"]
+    execute_query("INSERT INTO setup_ce_link (setup_id, ce_id) VALUES (%s, %s)",
+                  (setup_id, ce_id))
+    return cid
+
+
 class TestTrainingTaskErrorHandling:
-    """Verify the training background task sets error status on failure."""
+    """A training run that never gets off the ground must land on 'error'.
 
-    def test_training_task_sets_error_on_exception(self, client, test_classifier, auth_headers):
-        """If training fails, status should be 'error', not stuck in 'training'."""
-        from utils.sqlite_db import execute_query, execute_query_dict
-        cid = test_classifier["classifier_id"]
+    Local training is a spawned child process now, so the failure this guards
+    against is the spawn itself failing (no python, no disk, fork refused). The
+    row was already flipped to 'training' by then, and nothing else will ever
+    move it — there is no child to report anything — so the route has to fail it
+    on the spot instead of leaving it stuck until the next server boot.
+    """
 
-        # Set to training
-        execute_query("UPDATE classifiers SET status = 'training' WHERE classifier_id = %s", (cid,))
+    def test_failed_spawn_leaves_the_guardrail_in_error_not_training(
+            self, client, test_model, auth_headers, monkeypatch):
+        from utils.sqlite_db import execute_query_dict
+        from services.compute.base import ComputeError
+        from services.compute.providers.local import LocalProvider
+        cid = _trainable_classifier(client, auth_headers, test_model)
 
-        # Simulate training failure via the wrapper
-        from routes.classifiers import _run_training_task
-        try:
-            _run_training_task(cid)
-        except Exception:
-            pass
+        def _explode(self, spec):
+            raise ComputeError("fork failed")
+        monkeypatch.setattr(LocalProvider, "submit_training", _explode)
 
-        # Status should be 'error', not stuck in 'training'
-        row = execute_query_dict("SELECT status FROM classifiers WHERE classifier_id = %s", (cid,))
+        res = client.post(f"/classifiers/{cid}/train", headers=auth_headers)
+        assert res.status_code == 500
+
+        row = execute_query_dict(
+            "SELECT status, training_phase_detail FROM classifiers WHERE classifier_id = %s", (cid,))
         assert row[0]["status"] == "error"
+        assert "fork failed" in (row[0]["training_phase_detail"] or "")
+
+    def test_training_row_is_never_left_in_training_after_a_submit_failure(
+            self, client, test_model, auth_headers, monkeypatch):
+        """The specific regression: a stuck 'training' row shows a permanent
+        spinner in the UI and blocks retraining with a 409 forever."""
+        from utils.sqlite_db import execute_query_dict
+        from services.compute.providers.local import LocalProvider
+        cid = _trainable_classifier(client, auth_headers, test_model)
+
+        monkeypatch.setattr(LocalProvider, "submit_training",
+                            lambda self, spec: (_ for _ in ()).throw(OSError("no such file")))
+        client.post(f"/classifiers/{cid}/train", headers=auth_headers)
+
+        status = execute_query_dict(
+            "SELECT status FROM classifiers WHERE classifier_id = %s", (cid,))[0]["status"]
+        assert status != "training"
+        # ...and the user can immediately try again (no 409 lockout).
+        assert client.post(f"/classifiers/{cid}/train", headers=auth_headers).status_code != 409
 
 
 class TestClassifierModelValidation:

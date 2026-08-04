@@ -52,11 +52,17 @@ def _get_download_lock(classifier_id: int) -> threading.Lock:
 
 
 def _cancel_remote_training_for_classifier(classifier_id: int) -> None:
-    """If the guardrail has an in-flight remote training job, cancel it
-    and remove its remote job directory. Called from delete paths so a
-    user removing a guardrail mid-training doesn't leave the GPU running
-    and the job dir orphaned on the worker. Best-effort — every failure
-    is swallowed so the DB delete still proceeds."""
+    """If the guardrail has an in-flight training job — a LOCAL child process or
+    a job on the remote worker — cancel it. Called from delete paths so a user
+    removing a guardrail mid-training doesn't leave a GPU busy and a job
+    directory orphaned. Best-effort: every failure is swallowed so the DB delete
+    still proceeds.
+
+    Local runs need this as much as remote ones do. The child is DB-free, so it
+    cannot notice that the guardrail row went away the way the old in-process
+    trainer did (its cooperative `_classifier_deleted` check); killing it is the
+    only way to stop it.
+    """
     try:
         rows = execute_query_dict(
             "SELECT status, training_log FROM classifiers WHERE classifier_id = %s",
@@ -65,35 +71,19 @@ def _cancel_remote_training_for_classifier(classifier_id: int) -> None:
         if not rows:
             return
         row = rows[0]
-        # Only mid-flight remote jobs need cancelling. A successfully
-        # downloaded guardrail (status='active') already had cleanup_job
-        # called on its remote dir.
+        # Only mid-flight jobs need cancelling. A finished guardrail
+        # (status='active') already had its job dir cleaned up at finalize.
         if row["status"] != "training":
-            return
-        tl = row.get("training_log")
-        if isinstance(tl, str):
-            try:
-                tl = json.loads(tl)
-            except (json.JSONDecodeError, TypeError):
-                return
-        if not isinstance(tl, dict):
             return
         # Reconstruct (provider, job) from the training_log, then cancel
         # through the compute interface — no transport-specific code here.
-        from services.compute.base import TrainingJob
-        prov = tl.get("provider")
-        if prov == "remote_worker" and isinstance(tl.get("job"), dict):
-            job = TrainingJob(provider=prov, classifier_id=classifier_id,
-                              id=str(tl["job"].get("id")), raw=tl["job"].get("raw") or {})
-        elif tl.get("mode") == "remote_worker" and tl.get("worker_job_id"):
-            prov = "remote_worker"
-            job = TrainingJob(provider="remote_worker", classifier_id=classifier_id,
-                              id=str(tl["worker_job_id"]), raw={})
-        else:
-            return
         from services import compute
-        p = compute.get_provider(compute.Workload.TRAINING, probe=False)
-        if p.name == prov:
+        info = compute.job_from_log(row.get("training_log"), classifier_id)
+        if not info:
+            return
+        prov, job = info
+        p = compute.provider_by_name(prov)
+        if p is not None:
             p.cancel_training(job)
     except Exception as e:
         print(f"[train] Cancel-on-delete for classifier {classifier_id} failed: {e}")
@@ -513,15 +503,16 @@ def remove_classifier_endpoint(classifier_id: int, _: int = Depends(get_current_
         user_id = owner_rows[0]["user_id"]
 
         # Stop any in-flight work BEFORE the DB delete. Each pointer we need
-        # (remote job id / running-row) lives on a row the cascade delete is
+        # (job handle / running-row) lives on a row the cascade delete is
         # about to wipe, so they MUST run first:
-        #   * remote TRAINING job,
+        #   * TRAINING job — local child process OR remote worker job,
         #   * remote CALIBRATION / EVALUATION inference job,
         #   * warm REALTIME monitoring session.
-        # Local in-process tasks (training + calibration/evaluation inference)
-        # self-abort cooperatively: their loops check whether the guardrail row
-        # still exists and stop at the next checkpoint once delete_classifier runs
-        # (see trainer.TrainingCancelled / inference_core.InferenceCancelled).
+        # Local calibration/evaluation inference still runs in-process and
+        # self-aborts cooperatively: its loop checks whether the guardrail row
+        # still exists and stops at the next checkpoint once delete_classifier
+        # runs (see inference_core.InferenceCancelled). Training no longer can —
+        # the child has no DB access — so it is killed explicitly above.
         _cancel_remote_training_for_classifier(classifier_id)
         _cancel_remote_inference_for_classifier(classifier_id)
         _end_realtime_session_for_classifier(classifier_id)
@@ -606,81 +597,16 @@ def update_training_config(
 
 # --- TRAINING ENDPOINTS ---
 
-# Maps raw trainer stages to short user-facing labels. The trainer emits
-# stages from a fixed vocabulary (see _progress() calls in
-# classifier_engine/trainer.py); anything we don't recognize here falls
-# back to a Title-cased version of the raw key.
-_TRAINING_PHASE_LABELS = {
-    "init":      "Preparing",
-    "data":      "Loading datasets",
-    "load_llm":  "Loading language model",
-    "split":     "Splitting train/validation",
-    "extract":   "Extracting embeddings",
-    "train_rnn": "Training RNN",
-    "save":      "Saving model",
-}
-
-
-def _run_training_task(classifier_id: int):
-    """Background task wrapper for training.
-
-    Wires a progress callback into run_training so each stage boundary
-    persists a `training_phase` + `training_phase_detail` row update.
-    The /training-status route reads those columns; the UI polls and
-    renders them so the user sees something more informative than a
-    plain "Training..." spinner during the multi-minute pipeline.
-    Phase columns are cleared back to NULL on completion or error so
-    stale text doesn't linger past the run.
-    """
-    import traceback
-    from utils.sqlite_db import execute_query as _eq
-
-    def _on_progress(stage: str, detail: str = ""):
-        label = _TRAINING_PHASE_LABELS.get(stage, stage.replace("_", " ").title())
-        try:
-            _eq(
-                "UPDATE classifiers SET training_phase = %s, training_phase_detail = %s WHERE classifier_id = %s",
-                (label, detail or None, classifier_id),
-            )
-        except Exception:
-            # Progress writes are best-effort; never let a transient DB
-            # blip kill the actual training run.
-            pass
-
-    try:
-        from classifier_engine.trainer import run_training
-        run_training(classifier_id, progress_callback=_on_progress)
-        # Clear the phase signal on the success path. run_training's own
-        # success block flips status to 'active', so by the time we get
-        # here the run is fully done.
-        try:
-            _eq(
-                "UPDATE classifiers SET training_phase = NULL, training_phase_detail = NULL WHERE classifier_id = %s",
-                (classifier_id,),
-            )
-        except Exception:
-            pass
-    except Exception as e:
-        logger.error(f"Background training failed for classifier {classifier_id}: {e}")
-        logger.error(traceback.format_exc())
-        print(traceback.format_exc(), flush=True)
-        # Ensure status is set to 'error' even if trainer didn't handle it,
-        # and clear the phase columns so the UI doesn't keep showing the
-        # last in-flight stage after a failure.
-        try:
-            _eq(
-                "UPDATE classifiers SET status = 'error', training_log = %s, training_phase = NULL, training_phase_detail = NULL "
-                "WHERE classifier_id = %s AND status = 'training'",
-                (f"Training failed: {str(e)[:500]}", classifier_id),
-            )
-        except Exception:
-            pass
+# Training no longer runs inside this process on ANY provider: local runs are a
+# spawned compute_jobs/train_job.py child (LocalProvider), remote runs are the
+# same script on the GPU worker. Both report progress as raw stage keys, mapped
+# to user-facing labels by services/compute/phases.py.
 
 
 def _build_training_inputs(classifier_id: int):
     """Assemble model path + labels + per-CE dataset files + selection
-    calibration dialogues for a training run. Shared by the remote-worker and
-    remote-worker submit paths so they can never drift."""
+    calibration dialogues for a training run. Shared by every provider's submit
+    path (local child and remote worker) so they can never drift."""
     from classifier_engine.trainer import (
         get_classifier_info, get_classifier_ces_with_datasets, get_training_config,
         _extract_training_data, _sanitize_label, fetch_calibration_entries,
@@ -712,17 +638,18 @@ def _build_training_inputs(classifier_id: int):
 def start_training(
     classifier_id: int,
     request: Request,
-    background_tasks: BackgroundTasks,
     target: str = None,   # optional: force a compute target (local | remote_worker)
     user_id: int = Depends(get_current_user),
 ):
     """
     Starts training the RNN guardrail.
 
-    Compute is resolved via services.compute (remote_worker / local —
-    see the provider registry). Off-box providers get the job payload built
-    locally (CE datasets, model path, labels, config) and submitted; LOCAL
-    mode runs training on this machine's GPU in a background task.
+    Compute is resolved via services.compute (remote_worker / local — see the
+    provider registry). Both paths are submit-and-poll: the job payload (CE
+    datasets, model path, labels, config) is built here and handed to the
+    provider, which either posts it to the GPU worker or spawns a local
+    training child process. Nothing trains inside the API process, so a wedged
+    run can't take the app down with it.
 
     Returns immediately; poll /training-status for progress.
     """
@@ -782,53 +709,60 @@ def start_training(
         (classifier_id,),
     )
 
-    # ---- Off-box training (remote GPU worker) via the compute interface ----
-    # The provider resolution accounts for reachability (an unreachable worker
-    # resolves to 'local'), so on any failure we fall through to local training
-    # below. training_log uses the generic {provider, mode, job:{id,raw},
-    # last_contact} shape the status route reconstructs from.
+    # ---- Dispatch through the compute interface ----
+    # Provider resolution accounts for reachability (an unreachable worker
+    # resolves to 'local'), and a remote submit that fails anyway falls through
+    # to local below. Either way the run is recorded as the generic
+    # {provider, mode, job:{id,raw}, last_contact} handle the status route
+    # reconstructs from, so both are polled and finalized by the same code.
     from services import compute
     # If the user explicitly picked a machine, honor it; otherwise auto-resolve.
     # An unknown/unconfigured target falls back to auto-resolution.
     provider = (compute.provider_by_name(target) if target else None) \
         or compute.get_provider(compute.Workload.TRAINING)
+
+    def _submit_through(p):
+        """Build the inputs and hand them to `p`. Identical for every provider —
+        the only difference is where the work physically runs."""
+        model_hf_path, labels, training_config, dataset_files, calibration_entries = \
+            _build_training_inputs(classifier_id)
+        return p.submit_training(compute.TrainingSpec(
+            classifier_id=classifier_id, user_id=user_id, model_hf_path=model_hf_path,
+            labels=labels, training_config=training_config, dataset_files=dataset_files,
+            calibration_entries=calibration_entries,
+        ))
+
+    def _record(p, job):
+        """Persist the durable job handle. Returns False when the guardrail was
+        deleted mid-submit, in which case the caller cancels the job it just
+        made (this closes the submit-window race atomically)."""
+        from utils.sqlite_db import execute_update
+        # Failover ladder for this run (remote_worker -> local GPU; no
+        # CPU tier for training). chain_pos marks the tier we're on; if it dies
+        # mid-run the status poller advances to the next tier (see _failover).
+        chain = compute.failover_providers(compute.Workload.TRAINING)
+        training_log = {"provider": p.name, "mode": p.name,
+                        "job": {"id": job.id, "raw": job.raw},
+                        "chain": chain,
+                        "chain_pos": chain.index(p.name) if p.name in chain else 0,
+                        "user_id": user_id,
+                        # epoch of last confirmed contact; the status poller fails
+                        # (or fails over) the job if this goes stale.
+                        "last_contact": time.time()}
+        return bool(execute_update(
+            "UPDATE classifiers SET training_log = %s "
+            "WHERE classifier_id = %s AND status = 'training'",
+            (json.dumps(training_log), classifier_id)))
+
     if provider.name == "remote_worker":
         try:
-            model_hf_path, labels, training_config, dataset_files, calibration_entries = \
-                _build_training_inputs(classifier_id)
-            spec = compute.TrainingSpec(
-                classifier_id=classifier_id, user_id=user_id, model_hf_path=model_hf_path,
-                labels=labels, training_config=training_config, dataset_files=dataset_files,
-                calibration_entries=calibration_entries,
-            )
-            job = provider.submit_training(spec)
-            mode = "remote_worker"
-            from utils.sqlite_db import execute_update
-            # Failover ladder for this run (remote_worker -> local GPU; no
-            # CPU tier for training). chain_pos marks the tier we're on; if it dies
-            # mid-run the status poller advances to the next tier (see _failover).
-            chain = compute.failover_providers(compute.Workload.TRAINING)
-            training_log = {"provider": provider.name, "mode": mode,
-                            "job": {"id": job.id, "raw": job.raw},
-                            "chain": chain,
-                            "chain_pos": chain.index(provider.name) if provider.name in chain else 0,
-                            "user_id": user_id,
-                            # epoch of last confirmed contact; the status poller fails
-                            # (or fails over) the job if this goes stale.
-                            "last_contact": time.time()}
-            recorded = execute_update(
-                "UPDATE classifiers SET training_log = %s "
-                "WHERE classifier_id = %s AND status = 'training'",
-                (json.dumps(training_log), classifier_id))
-            if not recorded:
-                # Guardrail deleted mid-submit — cancel the job we just made so it
-                # doesn't run orphaned (closes the submit-window race atomically).
+            job = _submit_through(provider)
+            if not _record(provider, job):
                 provider.cancel_training(job)
-                return {"success": False, "mode": mode, "classifier_id": classifier_id,
+                return {"success": False, "mode": "remote_worker", "classifier_id": classifier_id,
                         "message": "Rule Set was removed before training started; the job was cancelled."}
-            where = "the GPU worker"
-            return {"success": True, "mode": mode, "classifier_id": classifier_id,
-                    "ce_count": int(ce_count), "message": f"Training submitted to {where}"}
+            return {"success": True, "mode": "remote_worker", "classifier_id": classifier_id,
+                    "ce_count": int(ce_count), "message": "Training submitted to the GPU worker"}
         except Exception as e:
             print(f"[train] Classifier {classifier_id} | {provider.name} submit failed, falling back to local: {e}")
             import traceback
@@ -837,15 +771,37 @@ def start_training(
                 "UPDATE classifiers SET training_phase = %s, training_phase_detail = %s "
                 "WHERE classifier_id = %s",
                 ("fallback", f"{provider.name} unavailable ({e}). Training locally.", classifier_id))
+            provider = compute.provider_by_name("local") or compute.local_provider()
             # fall through to local
 
-
-    # LOCAL MODE: best available accelerator (CUDA > MPS > CPU).
+    # LOCAL MODE: a child process on the best available accelerator
+    # (CUDA > MPS > CPU). It runs the same train_job.py the GPU worker runs and
+    # outlives this request — and this API process.
     from utils.device import get_torch_device
     device_name = get_torch_device().type.upper()
-    print(f"[train] Running locally on {device_name}")
-    background_tasks.add_task(_run_training_task, classifier_id)
+    try:
+        job = _submit_through(provider)
+    except Exception as e:
+        # Nothing was spawned, so nothing will ever move this row off 'training'.
+        # Fail it here instead of leaving it stuck until the next boot.
+        print(f"[train] Classifier {classifier_id} | local training could not start: {e}")
+        import traceback
+        traceback.print_exc()
+        msg = f"Training could not start: {str(e)[:300]}"
+        execute_query(
+            "UPDATE classifiers SET status = 'error', training_log = %s, "
+            "training_phase = 'failed', training_phase_detail = %s "
+            "WHERE classifier_id = %s AND status = 'training'",
+            (msg, msg, classifier_id))
+        raise HTTPException(status_code=500, detail=msg)
 
+    if not _record(provider, job):
+        provider.cancel_training(job)
+        return {"success": False, "mode": f"local_{device_name.lower()}",
+                "classifier_id": classifier_id,
+                "message": "Rule Set was removed before training started; the job was cancelled."}
+
+    print(f"[train] Classifier {classifier_id} | training locally on {device_name} (pid {job.id})")
     return {
         "success": True,
         "message": f"Training started locally on {device_name}",
@@ -1012,16 +968,36 @@ def bundle_job_download(job_id: int, user_id: int = Depends(get_current_user)):
     return FileResponse(path, media_type="application/zip", filename=art.get("filename") or "bundle.gavel.zip")
 
 
+def _detail_with_percent(detail: str, progress) -> str:
+    """Fold a run's overall completion into the phase-detail line.
+
+    `TrainingStatus.progress` is a 0..1 fraction. The status payload has no
+    separate percentage field and adding one would change the API, so the line
+    the UI already polls carries it: "Extracting embeddings — 35%". Details that
+    already quote a figure of their own (the RNN fit reports its own percentage)
+    are left alone rather than showing the user two numbers.
+    """
+    try:
+        pct = int(round(float(progress) * 100))
+    except (TypeError, ValueError):
+        return detail
+    if not 0 <= pct <= 100 or "%" in (detail or ""):
+        return detail
+    return f"{detail} — {pct}%" if detail else f"{pct}%"
+
+
 @router.get("/{classifier_id}/training-status")
 def get_training_status(classifier_id: int, auth_uid: int = Depends(get_current_user)):
     """
     Returns the current training status of a guardrail.
     Status values: untrained | training | active | error
 
-    For remotely-submitted jobs: polls the worker for real-time status +
-    training log. When the worker reports "completed", updates the local
-    guardrail to 'active'. When it reports "failed"/"oom"/"timeout",
-    updates to 'error' with the message.
+    For a submitted job — a local training child or a remote worker job — this
+    polls the provider for the live phase, and is where the run FINALIZES: it
+    fetches the artifacts, flips the guardrail to 'active', commits the
+    trained-policy snapshot and chains into auto-calibration. On a reported
+    failure it updates to 'error' with the message (or fails over to the next
+    tier of the ladder).
     """
     assert_owns_classifier(auth_uid, classifier_id)
     result = execute_query_dict(
@@ -1042,12 +1018,13 @@ def get_training_status(classifier_id: int, auth_uid: int = Depends(get_current_
         row["status"] = reconcile_classifier_status(classifier_id)
     is_training = row["status"] == "training"
 
-    # ---- Off-box training (remote GPU worker) ----
+    # ---- Submitted training (local child process OR remote GPU worker) ----
     # Driven entirely through the compute provider interface — this route is
-    # transport-agnostic. training_log carries either the new
-    # {provider, mode, job:{id,raw}, last_contact} shape or a legacy
-    # {mode, worker_job_id, ...} shape; we reconstruct a TrainingJob
-    # from either, so in-flight jobs submitted before this change keep working.
+    # transport-agnostic. training_log carries the
+    # {provider, mode, job:{id,raw}, last_contact} handle (or a legacy
+    # {mode, worker_job_id, ...} one); compute.job_from_log reconstructs a
+    # TrainingJob from either, so in-flight jobs submitted before this change
+    # keep working.
     training_log_data = row.get("training_log")
     _lp = training_log_data
     if isinstance(_lp, str):
@@ -1056,30 +1033,17 @@ def get_training_status(classifier_id: int, auth_uid: int = Depends(get_current_
         except (json.JSONDecodeError, TypeError):
             _lp = None
 
-    def _reconstruct_job():
-        from services.compute.base import TrainingJob
-        if not isinstance(_lp, dict):
-            return None
-        prov = _lp.get("provider")
-        if prov == "remote_worker" and isinstance(_lp.get("job"), dict):
-            return prov, TrainingJob(provider=prov, classifier_id=classifier_id,
-                                     id=str(_lp["job"].get("id")), raw=_lp["job"].get("raw") or {})
-        mode = _lp.get("mode")
-        if mode == "remote_worker" and _lp.get("worker_job_id"):
-            return "remote_worker", TrainingJob(
-                provider="remote_worker", classifier_id=classifier_id,
-                id=str(_lp["worker_job_id"]), raw={})
-        return None
-
-    _job_info = _reconstruct_job() if is_training else None
+    from services import compute
+    _job_info = compute.job_from_log(_lp, classifier_id) if is_training else None
     if _job_info:
-        from services import compute
         from services.compute.base import JobState
         from utils.sqlite_db import execute_query
         expected_provider, job = _job_info
-        provider = compute.get_provider(compute.Workload.TRAINING)
-        where = "the GPU worker"
-        phase_label = "Training on GPU worker"
+        is_local_job = expected_provider == "local"
+        provider = (compute.provider_by_name(expected_provider) if is_local_job
+                    else compute.get_provider(compute.Workload.TRAINING))
+        where = "this computer" if is_local_job else "the GPU worker"
+        phase_label = "Training" if is_local_job else "Training on GPU worker"
 
         def _ret(status, *, model_path=None, phase=None, detail=None, training_log=None,
                  is_tr=False, is_trn=True, err=False):
@@ -1120,38 +1084,32 @@ def get_training_status(classifier_id: int, auth_uid: int = Depends(get_current_
             for nxt in range(pos + 1, len(chain)):
                 name = chain[nxt]
                 try:
-                    if name == "local":
-                        import threading
-                        threading.Thread(target=_run_training_task,
-                                         args=(classifier_id,), daemon=True).start()
-                        detail = f"{reason} Retraining on your local GPU."
-                        nl = {"mode": "local", "chain": chain, "chain_pos": nxt, "user_id": uid}
-                        execute_query(
-                            "UPDATE classifiers SET training_phase = %s, "
-                            "training_phase_detail = %s, training_log = %s WHERE classifier_id = %s",
-                            ("Retrying locally", detail, json.dumps(nl), classifier_id))
-                        return _ret("training", phase="Retrying locally", detail=detail,
-                                    training_log=json.dumps(nl))
                     prov2 = compute.provider_by_name(name)
                     if prov2 is None:
                         continue
+                    # Every tier — including 'local' — re-dispatches through the
+                    # provider and lands a durable handle in training_log, so the
+                    # retry is polled and finalized by exactly the same code path
+                    # as the original submit.
                     mhp, labels, tcfg, dfiles, calib = _build_training_inputs(classifier_id)
                     spec2 = compute.TrainingSpec(
                         classifier_id=classifier_id, user_id=uid, model_hf_path=mhp,
                         labels=labels, training_config=tcfg, dataset_files=dfiles,
                         calibration_entries=calib)
                     job2 = prov2.submit_training(spec2)
-                    mode2 = "remote_worker"
-                    detail = f"{reason} Retrying on the GPU worker."
-                    nl = {"provider": name, "mode": mode2,
+                    is_local2 = prov2.name == "local"
+                    phase2 = "Retrying locally" if is_local2 else "Retrying"
+                    detail = (f"{reason} Retraining on this computer." if is_local2
+                              else f"{reason} Retrying on the GPU worker.")
+                    nl = {"provider": prov2.name, "mode": prov2.name,
                           "job": {"id": job2.id, "raw": job2.raw},
                           "chain": chain, "chain_pos": nxt, "user_id": uid,
                           "last_contact": time.time()}
                     execute_query(
                         "UPDATE classifiers SET training_phase = %s, "
                         "training_phase_detail = %s, training_log = %s WHERE classifier_id = %s",
-                        ("Retrying", detail, json.dumps(nl), classifier_id))
-                    return _ret("training", phase="Retrying", detail=detail,
+                        (phase2, detail, json.dumps(nl), classifier_id))
+                    return _ret("training", phase=phase2, detail=detail,
                                 training_log=json.dumps(nl))
                 except Exception as fe:
                     print(f"[train] Classifier {classifier_id} | failover to {name} failed: {fe}")
@@ -1182,29 +1140,64 @@ def get_training_status(classifier_id: int, auth_uid: int = Depends(get_current_
             now = time.time()
 
             if st.state == JobState.DONE:
+                # FINALIZE — every side effect of a finished training run happens
+                # here, in the parent, exactly once. The per-guardrail lock plus
+                # the status re-read above make this branch single-entry, and it
+                # ends by flipping the row off 'training' so a later poll can't
+                # repeat it. None of it can live in the training job itself: the
+                # child has no database and no access to this process's caches.
                 from classifier_engine.trainer import classifier_workdir
                 work_dir = classifier_workdir(classifier_id)
-                provider.fetch_trained_model(job, work_dir)
+                try:
+                    provider.fetch_trained_model(job, work_dir)
+                except Exception as fetch_err:
+                    # The job says it succeeded but we can't get the weights out
+                    # (truncated download, artifacts swept). Retrying forever
+                    # would pin the guardrail in 'training', so fail it.
+                    emsg = f"Training finished but the model could not be collected: {fetch_err}"
+                    print(f"[train] Classifier {classifier_id} | {emsg}")
+                    execute_query(
+                        "UPDATE classifiers SET status = 'error', training_phase = 'failed', "
+                        "training_phase_detail = %s WHERE classifier_id = %s", (emsg, classifier_id))
+                    return _ret("error", phase="failed", detail=emsg, is_trn=False, err=True)
                 model_path = os.path.join(work_dir, "trained_rnn.pth")
+                # Drop the previous (LLM, RNN, meta) trio from the in-memory
+                # model cache, so realtime/evaluation reload the model that was
+                # just trained instead of serving the one it replaced. Routes
+                # that need the model reject while status='training', so evicting
+                # just before we flip to 'active' is the safe moment.
+                try:
+                    from evaluation.model_cache import evict as _evict_cache
+                    _evict_cache(classifier_id)
+                except Exception as evict_err:
+                    print(f"[train] Classifier {classifier_id} | cache evict failed: {evict_err}")
                 detail = f"Trained on {where}"
+                # The handle in training_log has done its job; replace it with
+                # the run's per-step metrics (what the column held before
+                # training moved out of process), when the provider reports them.
+                final_log = (json.dumps(st.log) if isinstance(st.log, list) and st.log
+                             else training_log_data)
                 execute_query(
                     "UPDATE classifiers SET status = 'active', model_path = %s, "
-                    "training_phase = 'complete', training_phase_detail = %s WHERE classifier_id = %s",
-                    (model_path, detail, classifier_id))
+                    "training_log = %s, training_phase = 'complete', "
+                    "training_phase_detail = %s WHERE classifier_id = %s",
+                    (model_path, final_log, detail, classifier_id))
                 try:
                     from sql_scripts.model_scripts import commit_trained_policy_snapshot
                     commit_trained_policy_snapshot(classifier_id)
                 except Exception as snap_err:
                     print(f"[train] Classifier {classifier_id} | snapshot commit failed: {snap_err}")
-                # Same auto-calibration chain as the local path — this is where
-                # a remote-worker run crosses the finish line.
+                # Chain straight into calibration: monitoring an uncalibrated rule
+                # set is meaningless (every CE falls back to a 0.5 threshold) and
+                # the step needs no user input. Idempotent, but the lock above
+                # means it is scheduled once per run anyway.
                 try:
                     from services.auto_calibration import schedule_post_training_calibration
                     schedule_post_training_calibration(classifier_id)
                 except Exception as cal_err:
                     print(f"[train] Classifier {classifier_id} | auto-calibration not scheduled: {cal_err}")
                 return _ret("active", model_path=model_path, phase="complete", detail=detail,
-                            is_tr=True, is_trn=False)
+                            training_log=final_log, is_tr=True, is_trn=False)
 
             if st.state in (JobState.ERROR, JobState.CANCELLED):
                 fo = _failover(f"{where} reported a failure.")
@@ -1237,7 +1230,8 @@ def get_training_status(classifier_id: int, auth_uid: int = Depends(get_current_
                 return _ret("training", phase=phase_label, detail=detail)
 
             # Reachable + running - advance the liveness clock (new-format logs) + show progress.
-            detail = st.detail or st.phase or f"Optimizing rule set on {where}..."
+            detail = _detail_with_percent(
+                st.detail or st.phase or f"Optimizing rule set on {where}...", st.progress)
             tl_out = training_log_data
             if isinstance(_lp, dict) and _lp.get("provider"):
                 new_log = dict(_lp); new_log["last_contact"] = now

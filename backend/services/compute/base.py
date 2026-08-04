@@ -11,6 +11,7 @@ importing it is cheap and side-effect free.
 """
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -135,6 +136,36 @@ class TrainingJob:
     raw: dict = field(default_factory=dict)
 
 
+def job_from_log(training_log, classifier_id: int):
+    """Rebuild `(provider_name, TrainingJob)` from a guardrail's `training_log`
+    column, or None when the row carries no in-flight job.
+
+    Three call sites need this — the status poller, the cancel-on-delete path and
+    boot-time crash recovery — and a drift between them would strand a running
+    job, so the parsing lives here once. Accepts the current
+    `{provider, job:{id, raw}}` shape and the legacy remote-only
+    `{mode: 'remote_worker', worker_job_id}` one, so jobs submitted before this
+    code landed keep working.
+    """
+    if isinstance(training_log, str):
+        try:
+            training_log = json.loads(training_log)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(training_log, dict):
+        return None
+    prov = training_log.get("provider")
+    job = training_log.get("job")
+    if prov in ("local", "remote_worker") and isinstance(job, dict):
+        return prov, TrainingJob(provider=prov, classifier_id=classifier_id,
+                                 id=str(job.get("id")), raw=job.get("raw") or {})
+    if training_log.get("mode") == "remote_worker" and training_log.get("worker_job_id"):
+        return "remote_worker", TrainingJob(
+            provider="remote_worker", classifier_id=classifier_id,
+            id=str(training_log["worker_job_id"]), raw={})
+    return None
+
+
 @dataclass
 class TrainingStatus:
     state: JobState
@@ -192,6 +223,13 @@ class ComputeProvider(ABC):
 
     def cancel_training(self, job: TrainingJob) -> None:
         raise NotImplementedError
+
+    def training_is_alive(self, job: TrainingJob) -> bool:
+        """Is this handle's run still going RIGHT NOW? Boot-time crash recovery
+        asks before deciding whether to adopt a run that outlived the API
+        process. Only providers whose jobs can survive a restart of THIS process
+        answer meaningfully; the default is a conservative False."""
+        return False
 
     # --- inference (calibration + evaluation) -----------------------------
     def run_inference(self, spec: InferenceSpec, on_phase: PhaseCallback = None,

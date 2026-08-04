@@ -2,6 +2,14 @@
 # Orchestrates the full training pipeline for a user's guardrail.
 # Takes a classifier_id, loads CE datasets from DB, extracts LLM embeddings,
 # trains the RNN guardrail, and saves the result.
+#
+# `run_training` is no longer how the app trains. Both tiers — this machine and
+# the remote GPU worker — submit a job through services/compute and are
+# finalized by the poll in routes/classifiers.py; locally that job is
+# compute_jobs/train_job.py running as a child process. run_training stays as
+# the direct, in-process entry point: it is what the GPU parity test runs to
+# check the child produces the same result. Everything below it —
+# classifier_workdir, the dataset/label helpers — is still shared by both.
 import os
 import json
 import re

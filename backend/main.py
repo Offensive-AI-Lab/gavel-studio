@@ -140,7 +140,12 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # --- shutdown: stop the poller, then end warm realtime sessions. ---
+        # --- shutdown: stop the poller, then end warm realtime sessions.
+        # Training children are deliberately NOT touched. They run in their own
+        # process session precisely so a server restart (uvicorn --reload fires
+        # one on every file save) doesn't destroy a run that may be hours in;
+        # boot-time crash recovery re-adopts them. Only an explicit delete
+        # cancels a training job. ---
         if poller is not None:
             try:
                 await poller.stop()

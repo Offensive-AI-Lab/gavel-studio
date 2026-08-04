@@ -29,6 +29,9 @@ The script writes to the same job directory:
     trained_rnn.pth           the trained guardrail weights
     classifier_meta.json      labels, config, metrics, model geometry
     training_log.json         epoch-by-epoch train/val metrics
+    progress.json             {"stage": "extract", "detail": "...", "progress": 0.4}
+                              rewritten at every stage boundary so the backend
+                              polling this directory can show a live phase
     status.json               {"status": "success"|"failed", "error": "...", "elapsed_s": N}
 
 Exit codes:
@@ -49,11 +52,48 @@ import traceback
 # Add the gavel_code directory to sys.path so `classifier_engine` is
 # importable. On the worker, classifier_engine/ lives at
 # ~/gavel_code/classifier_engine/ — the parent dir needs to be on path.
+# Only when it actually exists: run from the Studio backend (local training
+# subprocess) the engine comes off PYTHONPATH, and inserting a phantom or
+# unrelated ~/gavel_code at position 0 could shadow it.
 _code_dir = os.path.expanduser("~/gavel_code")
-if _code_dir not in sys.path:
+if os.path.isdir(_code_dir) and _code_dir not in sys.path:
     sys.path.insert(0, _code_dir)
 
 import torch
+
+# Stage vocabulary shared with the in-process trainer (see
+# services/compute/phases.py, which maps these to user-facing labels). The
+# backend polls progress.json and renders the mapped label, so a run in a
+# subprocess shows the same stages as one that runs in-process.
+_STAGE_WEIGHTS = {
+    "init": 0.02, "data": 0.05, "load_llm": 0.10, "split": 0.15,
+    "extract": 0.20, "train_rnn": 0.60, "save": 0.97, "done": 1.0,
+}
+
+
+def _progress(job_dir, stage, detail="", fraction=None):
+    """Rewrite progress.json so the polling backend can show a live phase.
+
+    `fraction` overrides the coarse per-stage estimate — the RNN loop passes its
+    real 0..1 completion, which is where nearly all the wall-clock goes.
+    Best-effort: a progress write must never take the training run down.
+    """
+    print(f"[train_job] [{stage}] {detail}", flush=True)
+    try:
+        payload = {
+            "stage": stage,
+            "detail": detail or "",
+            "progress": round(float(_STAGE_WEIGHTS.get(stage, 0.0) if fraction is None else fraction), 4),
+            "updated_at": time.time(),
+        }
+        tmp = os.path.join(job_dir, "progress.json.tmp")
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        # Atomic replace: the backend polls this file every few seconds and must
+        # never read a half-written one.
+        os.replace(tmp, os.path.join(job_dir, "progress.json"))
+    except Exception:
+        pass
 
 
 def _status(job_dir, status, error=None, elapsed=None):
@@ -85,6 +125,8 @@ def main():
     # ---- Validate inputs ----
     payload_path = os.path.join(job_dir, "job_payload.json")
     dataset_dir = os.path.join(job_dir, "dataset")
+
+    _progress(job_dir, "init", "Preparing training configuration")
 
     if not os.path.isfile(payload_path):
         _status(job_dir, "failed", f"Missing {payload_path}")
@@ -143,7 +185,7 @@ def main():
 
     try:
         # ---- Step 1: Load LLM ----
-        print(f"[train_job] Loading LLM: {model_hf_path}", flush=True)
+        _progress(job_dir, "load_llm", f"Loading LLM from: {model_hf_path}")
         from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 
         # Left-pad + legacy=False to match the local loader (utils_train.load_model_and_tokenizer)
@@ -157,20 +199,35 @@ def main():
         # MIDDLE band, matching the reference (layers 13..26 of
         # Mistral-7B's 32), NOT the last N — middle layers give much better
         # features for this probe.
+        # CLAMP an explicit range to the model's real depth instead of silently
+        # discarding it — the UI lets the user pick layers up to 100 when the
+        # model's depth isn't known yet, and dropping the whole range would
+        # substitute a completely different band. Byte-for-byte the same rule as
+        # the in-process trainer (classifier_engine/trainer.py), so both training
+        # paths read the same layers for the same config.
         _rng = cfg.get("selected_layers_range")
-        if _rng and 0 <= _rng[0] < _rng[1] <= total_layers:
-            selected_layers = list(range(_rng[0], _rng[1]))
+        if _rng and len(_rng) == 2 and _rng[1] > _rng[0] >= 0:
+            _start = min(_rng[0], total_layers - 1)
+            _end = min(_rng[1], total_layers)
+            if _end <= _start:
+                _end = _start + 1
+            selected_layers = list(range(_start, _end))
         else:
             _start = round(total_layers * 13 / 32)
             _end = max(_start + 1, round(total_layers * 27 / 32))
             selected_layers = list(range(_start, _end))
         n_layers = len(selected_layers)
-        print(f"[train_job] LLM has {total_layers} layers, using middle layers "
-              f"{selected_layers[0]}-{selected_layers[-1]} ({n_layers})", flush=True)
+        _progress(job_dir, "load_llm",
+                  f"Using layers {selected_layers[0]}-{selected_layers[-1]} "
+                  f"({n_layers}) of {total_layers}")
 
-        # Determine device_map for the LLM
+        # Determine device_map for the LLM. It must land on the SAME device the
+        # RNN trains on (mirrors utils/device.get_llm_device_map) — an LLM pinned
+        # to CPU while the readout runs on MPS silently halves Mac throughput.
         if device.type == "cuda":
             device_map = "auto"
+        elif device.type == "mps":
+            device_map = {"": "mps"}
         else:
             device_map = {"": "cpu"}
 
@@ -192,7 +249,7 @@ def main():
 
     try:
         # ---- Step 2: Split dataset into train/val ----
-        print(f"[train_job] Splitting dataset into train/val", flush=True)
+        _progress(job_dir, "split", "Splitting dataset into train/val")
 
         # The classifier_engine utilities expect a specific directory structure.
         # We add the project to sys.path so imports work on the worker.
@@ -208,7 +265,7 @@ def main():
         split_dataset_into_train_val(dataset_root_path=dataset_dir, train_ratio=0.8, random_seed=42)
 
         # ---- Step 3: Create text dataloaders ----
-        print(f"[train_job] Creating text dataloaders", flush=True)
+        _progress(job_dir, "extract", "Creating text dataloaders")
         text_dataloaders = create_dataloaders_from_directory(
             base_directory=dataset_dir,
             tokenizer=tokenizer,
@@ -220,7 +277,7 @@ def main():
         seq_train = os.path.join(job_dir, "sequences", "train")
         seq_val = os.path.join(job_dir, "sequences", "val")
 
-        print(f"[train_job] Extracting LLM representations (train set)...", flush=True)
+        _progress(job_dir, "extract", "Extracting LLM representations for train set")
         extract_per_sequence_reps(
             dataloaders=text_dataloaders["train_dataloaders"],
             model=llm,
@@ -230,7 +287,7 @@ def main():
             dtype=torch.float16,
         )
 
-        print(f"[train_job] Extracting LLM representations (val set)...", flush=True)
+        _progress(job_dir, "extract", "Extracting LLM representations for val set", fraction=0.35)
         extract_per_sequence_reps(
             dataloaders=text_dataloaders["val_dataloaders"],
             model=llm,
@@ -264,6 +321,7 @@ def main():
         print(f"[train_job] LLM freed, starting RNN training", flush=True)
 
         # ---- Step 5: Create sequence dataloaders ----
+        _progress(job_dir, "train_rnn", "Creating sequence dataloaders")
         rnn_seq_config = {"RNN_sequence_length": cfg["rnn_sequence_length"]}
         dataloaders_new, class_counts, used_min = create_dataloaders_for_sequences(
             base_directory=job_dir,
@@ -309,6 +367,10 @@ def main():
         # stdout keeps the detailed view for debugging.
         def _step_callback(step, total_steps, metrics):
             pct = min(99, int(round(100.0 * step / max(1, total_steps))))
+            # The RNN fit dominates the wall clock, so map its 0..100% onto the
+            # train_rnn slice of the overall bar rather than a flat estimate.
+            _progress(job_dir, "train_rnn", f"Optimizing guardrail — {pct}%",
+                      fraction=0.40 + 0.55 * (pct / 100.0))
             entry = {
                 "progress": pct,
                 "train_loss": round(metrics.get("train_loss", 0) or 0, 6),
@@ -323,6 +385,7 @@ def main():
             with open(os.path.join(job_dir, "training_log.json"), "w") as f:
                 json.dump(training_log, f, indent=2)
 
+        _progress(job_dir, "train_rnn", "Optimizing guardrail — 0%", fraction=0.40)
         print(f"[train_job] Training {rounds} candidate(s) (exact-parity fits)", flush=True)
         candidates = train_rnn_candidates(
             _build_rnn,
@@ -345,7 +408,7 @@ def main():
             # in ONE pass over the selection dialogues; keep the model whose
             # weakest CE transfers best (min per-CE ROC-AUC, mean tie-break).
             from classifier_engine.selection import score_candidates_on_calibration, pick_best_candidate
-            print(f"[train_job] Reloading LLM for candidate selection", flush=True)
+            _progress(job_dir, "train_rnn", "Validating guardrail…", fraction=0.95)
             llm = AutoModelForCausalLM.from_pretrained(
                 model_hf_path,
                 device_map=device_map,
@@ -380,6 +443,7 @@ def main():
         final_metrics = training_log[-1] if training_log else {}
 
         # ---- Step 8: Save results ----
+        _progress(job_dir, "save", "Saving trained model")
         model_path = os.path.join(job_dir, "trained_rnn.pth")
         torch.save(trained_rnn.state_dict(), model_path)
         print(f"[train_job] Saved trained model to {model_path}", flush=True)
@@ -414,8 +478,8 @@ def main():
             json.dump(training_log, f, indent=2)
 
         elapsed = time.time() - t0
+        _progress(job_dir, "done", f"Training complete in {elapsed:.1f}s")
         _status(job_dir, "success", elapsed=elapsed)
-        print(f"[train_job] Training complete in {elapsed:.1f}s", flush=True)
 
     except torch.cuda.OutOfMemoryError:
         elapsed = time.time() - t0

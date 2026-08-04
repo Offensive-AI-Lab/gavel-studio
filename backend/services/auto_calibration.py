@@ -13,10 +13,14 @@ without it (an uncalibrated session falls back to 0.5 for every CE). Leaving it
 as a manual click meant it got forgotten, so training now chains straight into
 it.
 
-Two callers, one per training-completion path:
-  * `classifier_engine.trainer.run_training` — the in-process/local provider.
+Callers:
   * `routes.classifiers.get_training_status` — the poll that finalizes a
-    remote-worker job.
+    submitted job. BOTH tiers land here now: a local run is a child process
+    polled through the same provider interface as a remote-worker job, so this
+    is the one place training completion is observed by the app.
+  * `classifier_engine.trainer.run_training` — the direct, in-process trainer.
+    Nothing in the app calls it any more; it stays for direct invocation (the
+    GPU parity test runs it against the child's output).
 Both call `schedule_post_training_calibration`, which is idempotent: a second
 call while a run is in flight (or after one already succeeded) is a no-op, so
 the two paths can't double-submit.
