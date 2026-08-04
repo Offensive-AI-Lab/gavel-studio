@@ -102,7 +102,7 @@ Studio is designed as a single-user application bound to localhost. It has no ac
 
 ## Contributing
 
-Issues and pull requests are welcome. Code changes should include the relevant backend or frontend tests. To contribute a new public rule or CE, follow the contribution instructions in [gavel-rules](https://github.com/Offensive-AI-Lab/gavel-rules#contributing).
+Issues and pull requests are welcome. Code changes should include the relevant backend or frontend tests; these tests run automatically on every pull request. To contribute a new public rule or CE, follow the contribution instructions in [gavel-rules](https://github.com/Offensive-AI-Lab/gavel-rules#contributing).
 
 ## Citation
 

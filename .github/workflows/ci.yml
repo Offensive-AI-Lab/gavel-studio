@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# One run per branch/PR: pushing again cancels the previous, still-running run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      # torch comes from the CPU wheel index first, exactly like backend/Dockerfile:
+      # on linux/amd64 the plain PyPI `torch` is the CUDA build (~5 GB of nvidia-*
+      # deps) that CI has no use for. Installing it up front satisfies the
+      # `torch>=2.0.0` line in requirements.txt so pip never reaches for PyPI.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      # Unit tests only. The unit and integration suites cannot share a single
+      # pytest process (pre-existing transformers import clash), and the unit
+      # suite is the bar this workflow sets; integration coverage is a follow-up.
+      # DB_PATH points outside the checkout so nothing can create backend/db/.
+      # Verified: the unit suite passes with the Hugging Face caches empty and
+      # offline, so there is no model/dataset download to cache here.
+      - name: Run unit tests
+        env:
+          DB_PATH: ${{ runner.temp }}/gavel-ci.sqlite3
+        run: python -m pytest tests/unit
+
+  frontend:
+    name: Frontend tests (vitest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 20, matching frontend/Dockerfile.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npx vitest run
