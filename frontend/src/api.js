@@ -406,6 +406,13 @@ export const updateClassifierConfig = (classifierId, config) =>
 export const getTrainingStatus = (classifierId) =>
     api.get(`/classifiers/${classifierId}/training-status`);
 
+// 11b. Cancel a training run that is in progress. Rejects with 409 when the
+// run is no longer training (already finished, already cancelled, never
+// started) — callers treat that as "somebody beat me to it" and just refetch
+// instead of showing an error.
+export const cancelTraining = (classifierId) =>
+    withNotify(api.post(`/classifiers/${classifierId}/training/cancel`));
+
 // Fetch a URL as a blob and hand it to the browser as a download. Downloads
 // are reads, so none of these are withNotify-wrapped — nothing on the server
 // changes and no library event should fire.

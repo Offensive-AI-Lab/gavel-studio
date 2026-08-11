@@ -115,6 +115,29 @@ describe('api.js — syncLibrary change gate', () => {
     });
 });
 
+describe('api.js — cancelTraining', () => {
+    it('posts to /classifiers/{id}/training/cancel', async () => {
+        await api.cancelTraining(5);
+        expect(mocks.instance.post).toHaveBeenCalledWith('/classifiers/5/training/cancel');
+    });
+
+    it('dispatches gavel:libraryChanged (the row status changed)', async () => {
+        const spy = listenLibraryChanged();
+        await api.cancelTraining(5);
+        expect(spy).toHaveBeenCalledTimes(1);
+        window.removeEventListener('gavel:libraryChanged', spy);
+    });
+
+    it('propagates the 409 (run already over) and fires no change event', async () => {
+        const err = { response: { status: 409, data: { detail: 'Rule set is not training' } } };
+        mocks.instance.post.mockRejectedValue(err);
+        const spy = listenLibraryChanged();
+        await expect(api.cancelTraining(5)).rejects.toBe(err);
+        expect(spy).not.toHaveBeenCalled();
+        window.removeEventListener('gavel:libraryChanged', spy);
+    });
+});
+
 describe('api.js — v2 rule-editor endpoints ({groups, condition})', () => {
     it('createDraftRuleFromBookmarks posts name/groups/condition/categories to /ai/rules/from-bookmarked-ce', async () => {
         await api.createDraftRuleFromBookmarks(

@@ -27,6 +27,7 @@ import {
     trainClassifier,
     getComputeTargets,
     getTrainingStatus,
+    cancelTraining,
     downloadClassifier,
     listLocalDrafts,
     getUserModels,
@@ -39,10 +40,11 @@ import useLibrarySearch from '../hooks/useLibrarySearch';
 import { useTutorialContent } from '../contexts/TutorialContext';
 import { recordRecent } from '../utils/recents';
 import { extractLogic, normalizeGroups, validateEditorState } from '../utils/ruleLogic';
+import { wasTrainingCancelled } from '../utils/errorText';
 
 // Icons & Utils
 import { showAlertDialog, showConfirmDialog } from '../components/ConfirmDialog/confirmDialog';
-import { FiPlus, FiGlobe, FiZap, FiRefreshCw, FiArrowLeft, FiInbox, FiDownload, FiUploadCloud, FiCheckCircle, FiSettings, FiBarChart2, FiRadio, FiAlertTriangle, FiCpu, FiCopy, FiBookmark, FiLayers, FiHome, FiShield, FiChevronRight, FiFileText, FiSearch } from 'react-icons/fi';
+import { FiPlus, FiGlobe, FiZap, FiRefreshCw, FiArrowLeft, FiInbox, FiDownload, FiUploadCloud, FiCheckCircle, FiSettings, FiBarChart2, FiRadio, FiAlertTriangle, FiCpu, FiCopy, FiBookmark, FiLayers, FiHome, FiShield, FiChevronRight, FiFileText, FiSearch, FiXCircle } from 'react-icons/fi';
 
 import '../css/RulesManager.css';
 
@@ -253,6 +255,10 @@ const RulesManager = () => {
     // can't linger past completion.
     const [trainingPhase, setTrainingPhase] = useState(_cachedPhase || null);
     const [trainingPhaseDetail, setTrainingPhaseDetail] = useState(_cachedDetail || null);
+    // The row's `training_log`. Only read for one thing: a stopped run says in
+    // there whether it was cancelled by the user or lost/failed, and the two
+    // get different banners.
+    const [trainingLog, setTrainingLog] = useState(null);
     // The post-training chain — "Calibrating" then "Evaluating" — which runs
     // AFTER status flips to 'active'. Tracked separately from trainingPhase
     // because the training banner is gated on trainingStatus === 'training';
@@ -265,6 +271,12 @@ const RulesManager = () => {
     // submission (payload staging + job submit) can take 10-20s, and without
     // this flag the UI sits silent until the "Training started" dialog pops.
     const [submitting, setSubmitting] = useState(false);
+    // True from the moment the user asks to cancel until the run's new state is
+    // on screen — locks the Cancel button so the run can't be cancelled twice.
+    // Mirrored in a ref because the click handler has to see the lock before
+    // React re-renders (two clicks in one tick).
+    const [cancelling, setCancelling] = useState(false);
+    const cancellingRef = useRef(false);
     // Model-last flow: a guardrail may have no model until the user picks one
     // (at train time). `models` backs both the attach picker and the
     // "Apply to another model" clone picker.
@@ -348,6 +360,7 @@ const RulesManager = () => {
                 // so we just mirror what the route returns.
                 setTrainingPhase(res.data.training_phase || null);
                 setTrainingPhaseDetail(res.data.training_phase_detail || null);
+                setTrainingLog(res.data.training_log ?? null);
                 if (newStatus === 'training') {
                     sessionStorage.setItem(`trainStatus_${classifierId}`, newStatus);
                     sessionStorage.setItem(`trainPhase_${classifierId}`, res.data.training_phase || '');
@@ -401,6 +414,7 @@ const RulesManager = () => {
             setTrainingStatus(res.data.status);
             setTrainingPhase(res.data.training_phase || null);
             setTrainingPhaseDetail(res.data.training_phase_detail || null);
+            setTrainingLog(res.data.training_log ?? null);
             // Picked up on mount too, so landing on the page mid-calibration
             // shows the banner (and starts the poll) instead of looking idle.
             setChainPhase(res.data.post_training_phase || null);
@@ -787,6 +801,51 @@ const RulesManager = () => {
         }
     };
 
+    // Stop the run that's in progress. Confirm first — cancelling throws away
+    // everything the run has done so far. A 409 says the run already ended
+    // (finished on its own, or was cancelled elsewhere); that's not a failure,
+    // so we skip the error dialog and just re-read the status. Re-reading is
+    // also what stops the poll: it flips trainingStatus off 'training'.
+    const handleCancelTraining = async () => {
+        // Locked BEFORE the dialog opens — two clicks in the same tick both
+        // read the pre-render value of `cancelling`, so only the ref can stop
+        // the second one from opening a second dialog. Declining unlocks it.
+        if (cancellingRef.current) return;
+        cancellingRef.current = true;
+        setCancelling(true);
+        const confirmed = await showConfirmDialog({
+            title: 'Cancel training?',
+            messageHtml: 'The run stops now and the work it has done so far is lost.'
+                + '<br/><br/><span style="font-size:0.85rem;color:#6b7280">This rule set will need training again before you can use it.</span>',
+            confirmText: 'Cancel training',
+            cancelText: 'Keep training',
+            variant: 'danger',
+        });
+        if (!confirmed) {
+            cancellingRef.current = false;
+            setCancelling(false);
+            return;
+        }
+        try {
+            await cancelTraining(classifierId);
+        } catch (err) {
+            if (err?.response?.status !== 409) {
+                cancellingRef.current = false;
+                setCancelling(false);
+                await showAlertDialog({
+                    title: 'Error',
+                    message: err?.response?.data?.detail || 'Could not cancel this training run.',
+                    variant: 'error',
+                });
+                return;
+            }
+        }
+        await fetchTrainingStatus();
+        fetchSidebarContext();
+        cancellingRef.current = false;
+        setCancelling(false);
+    };
+
     const refreshData = async () => {
         try {
             const res = await getClassifierRules(classifierId);
@@ -1070,6 +1129,39 @@ const RulesManager = () => {
                                     ? (trainingPhaseDetail || 'Status updating shortly')
                                     : (chainPhaseDetail || 'Status updating shortly'))}
                         </span>
+                    </div>
+                    {/* Only while the training run itself is in flight: the
+                        submit round-trip has nothing to stop yet, and
+                        calibration / evaluation aren't cancellable here. */}
+                    {trainingStatus === 'training' && !submitting && (
+                        <button
+                            type="button"
+                            onClick={handleCancelTraining}
+                            disabled={cancelling}
+                            style={cancelTrainingBtnStyle}
+                            title="Stop this training run"
+                        >
+                            <FiXCircle size={13} /> {cancelling ? 'Cancelling...' : 'Cancel training'}
+                        </button>
+                    )}
+                </div>
+            )}
+
+            {/*
+              * Cancelled-run banner. A run the user stopped is written off like
+              * any other unfinished run — status 'error', phase columns cleared,
+              * reason in training_log — but it did not fail, so it gets its own
+              * plain line instead of the failure banner below. (The two can't
+              * both show: a cancellation clears training_phase_detail, which is
+              * what the failure banner needs.)
+              */}
+            {trainingStatus === 'error' && !trainingPhaseDetail && !submitting
+                && wasTrainingCancelled(trainingLog) && (
+                <div role="status" style={cancelledBannerStyle}>
+                    <FiXCircle size={18} style={{ flexShrink: 0, marginTop: 2 }} />
+                    <div style={{ minWidth: 0 }}>
+                        <strong>Training was cancelled.</strong>{' '}
+                        Train this rule set again whenever you're ready.
                     </div>
                 </div>
             )}
@@ -1697,6 +1789,21 @@ const actionBtnStyle = {
     display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
     borderRadius: 8, border: '1px solid rgba(148, 163, 184, 0.22)', background: 'rgba(15, 23, 42, 0.55)',
     color: '#cbd5e1', fontSize: 13, fontWeight: 500, cursor: 'pointer',
+    transition: 'all 0.15s',
+};
+// The stopped-by-the-user banner. Same shape as the training-failed banner, in
+// neutral slate: nothing went wrong, the user asked for this.
+const cancelledBannerStyle = {
+    background: 'rgba(148, 163, 184, 0.14)', border: '1px solid rgba(148, 163, 184, 0.35)',
+    color: '#cbd5e1', borderRadius: 8, padding: '12px 16px', margin: '12px 0',
+    fontSize: '0.92rem', lineHeight: 1.5, display: 'flex', alignItems: 'flex-start', gap: 12,
+};
+// "Cancel training" inside the in-progress banner — red so it reads as the one
+// destructive control there, but sized down: it sits next to live status text.
+const cancelTrainingBtnStyle = {
+    display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0, padding: '6px 12px',
+    borderRadius: 8, border: '1px solid rgba(248, 113, 113, 0.45)', background: 'rgba(239, 68, 68, 0.18)',
+    color: '#fecaca', fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer',
     transition: 'all 0.15s',
 };
 // Under-Train stack (model tag + Change link + Apply-to-another-model).

@@ -38,3 +38,12 @@ export const detailText = (source) => {
 // exception's own message, then the caller's fallback.
 export const errorText = (source, fallback = 'Something went wrong. Try again.') =>
     detailText(source) || asText(source?.message) || fallback;
+
+// True when a stopped run was stopped BY THE USER. A cancelled run is written
+// off exactly like a run the server lost — status 'error' (or
+// 'needs_retraining' when a previous model survived), phase columns cleared,
+// reason in `training_log` — so `training_log` is the only thing that tells
+// them apart. A cancellation is not a failure, so the banners that read this
+// say what happened in plain words instead of showing failure copy.
+export const wasTrainingCancelled = (trainingLog) =>
+    typeof trainingLog === 'string' && trainingLog.toLowerCase().includes('cancel');

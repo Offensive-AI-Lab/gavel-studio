@@ -19,7 +19,7 @@ Currently registered:
      → Delete files
 """
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 import logging
 import os
 import shutil
@@ -27,6 +27,100 @@ import shutil
 logger = logging.getLogger(__name__)
 
 TRAINED_MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "trained_classifiers")
+
+
+# ---------------------------------------------------------------------------
+# Writing off a training run that stopped without finishing.
+#
+# Two callers need this and MUST leave identical rows behind: boot recovery
+# (a run the server lost) and the cancel route (a run the user stopped). It
+# lives here because recovery is the reference behavior.
+# ---------------------------------------------------------------------------
+
+
+def _training_workdir(classifier_id: int, user_id=None) -> Optional[str]:
+    """`trained_classifiers/<user_id>/classifier_<id>/`, or None when the owner
+    can't be resolved (an unattached guardrail has no workdir).
+
+    Resolved from the guardrail → model → user chain WITHOUT importing
+    classifier_engine.trainer (same path its `classifier_workdir` builds), so
+    this module stays free of transformers and can keep running pre-warmup.
+    """
+    if user_id is None:
+        from utils.sqlite_db import execute_query_dict
+        rows = execute_query_dict(
+            """SELECT tm.user_id FROM classifiers c
+               LEFT JOIN target_models tm ON c.model_id = tm.model_id
+               WHERE c.classifier_id = %s""",
+            (classifier_id,),
+        ) or []
+        user_id = rows[0].get("user_id") if rows else None
+    if user_id is None:
+        return None
+    return os.path.join(TRAINED_MODELS_DIR, str(user_id), f"classifier_{classifier_id}")
+
+
+def write_off_training_run(classifier_id: int, reason: str, *, user_id=None,
+                           kept_reason: Optional[str] = None,
+                           failed_phase: bool = True) -> Optional[str]:
+    """Put a guardrail that is in 'training' into the state a stopped run leaves
+    behind. Returns the new status, or None when the row was no longer
+    'training' and nothing was written.
+
+      * A complete previous model on disk (weights + meta) is kept, and the
+        guardrail goes to 'needs_retraining' so the user decides when to retrain.
+      * Anything else is a partial run: the workdir is deleted and the guardrail
+        goes to 'error' with model_path cleared.
+
+    `reason` is recorded in training_log — it is the one line the UI has to
+    explain the stopped run (`kept_reason` replaces it when a previous model
+    survived, which is a different thing to tell the user). `failed_phase` also
+    writes the reason into the phase columns as a failure: boot recovery does
+    (the run did fail), the cancel route does not (a run the user stopped is not
+    a failed run), which is the only other difference between the two callers.
+
+    The status write is conditional on the row still being 'training', so a poll
+    that finalized the run first wins; the workdir is deleted only once that
+    write has taken ownership of the row, and never out from under a run that
+    just succeeded.
+    """
+    from utils.sqlite_db import execute_update
+
+    work_dir = _training_workdir(classifier_id, user_id)
+    has_model = bool(
+        work_dir
+        and os.path.exists(os.path.join(work_dir, "trained_rnn.pth"))
+        and os.path.exists(os.path.join(work_dir, "classifier_meta.json"))
+    )
+
+    if has_model:
+        applied = execute_update(
+            "UPDATE classifiers SET status = 'needs_retraining', training_log = %s, "
+            "training_phase = NULL, training_phase_detail = NULL "
+            "WHERE classifier_id = %s AND status = 'training'",
+            (kept_reason or reason, classifier_id),
+        )
+        if not applied:
+            return None
+        logger.info(f"[Recovery] Classifier {classifier_id}: previous model found, set to 'needs_retraining'")
+        return "needs_retraining"
+
+    applied = execute_update(
+        "UPDATE classifiers SET status = 'error', model_path = NULL, training_log = %s, "
+        "training_phase = %s, training_phase_detail = %s "
+        "WHERE classifier_id = %s AND status = 'training'",
+        (reason, "failed" if failed_phase else None,
+         reason if failed_phase else None, classifier_id),
+    )
+    if not applied:
+        return None
+    if work_dir and os.path.isdir(work_dir):
+        try:
+            shutil.rmtree(work_dir)
+            logger.info(f"[Recovery] Deleted partial training dir: {work_dir}")
+        except Exception as e:
+            logger.error(f"[Recovery] Failed to delete {work_dir}: {e}")
+    return "error"
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +225,7 @@ class StuckTrainingRecovery(RecoveryStrategy):
             return False
 
     def run(self) -> None:
-        from utils.sqlite_db import execute_query, execute_query_dict
+        from utils.sqlite_db import execute_query_dict
 
         # Join target_models for user_id so the on-disk workdir
         # (trained_classifiers/<user_id>/classifier_<id>/) is locatable WITHOUT
@@ -155,44 +249,14 @@ class StuckTrainingRecovery(RecoveryStrategy):
             self._cancel_stale(cid, row.get("training_log"))
             logger.warning(f"[Recovery] Classifier {cid} stuck in 'training' — resetting to 'error'")
 
-            user_id = row.get("user_id")
-            work_dir = (
-                os.path.join(TRAINED_MODELS_DIR, str(user_id), f"classifier_{cid}")
-                if user_id is not None else None
+            # Same write-off the cancel route uses — keeps a lost run and a
+            # cancelled one from leaving two different-looking rows behind.
+            write_off_training_run(
+                cid,
+                "Training interrupted by server restart. Please retrain.",
+                user_id=row.get("user_id"),
+                kept_reason="Server restarted during training. Previous model preserved.",
             )
-
-            if work_dir and os.path.isdir(work_dir):
-                # If there's a valid trained model on disk, preserve it and let
-                # the user decide whether to retrain.
-                rnn_path = os.path.join(work_dir, "trained_rnn.pth")
-                meta_path = os.path.join(work_dir, "classifier_meta.json")
-                if os.path.exists(rnn_path) and os.path.exists(meta_path):
-                    execute_query(
-                        "UPDATE classifiers SET status = 'needs_retraining', training_log = %s, "
-                        "training_phase = NULL, training_phase_detail = NULL WHERE classifier_id = %s",
-                        ("Server restarted during training. Previous model preserved.", cid),
-                    )
-                    logger.info(f"[Recovery] Classifier {cid}: previous model found, set to 'needs_retraining'")
-                else:
-                    try:
-                        shutil.rmtree(work_dir)
-                        logger.info(f"[Recovery] Deleted partial training dir: {work_dir}")
-                    except Exception as e:
-                        logger.error(f"[Recovery] Failed to delete {work_dir}: {e}")
-
-                    execute_query(
-                        "UPDATE classifiers SET status = 'error', model_path = NULL, training_log = %s, "
-                        "training_phase = 'failed', training_phase_detail = %s WHERE classifier_id = %s",
-                        ("Training interrupted by server restart. Please retrain.",
-                         "Training interrupted by server restart. Please retrain.", cid),
-                    )
-            else:
-                execute_query(
-                    "UPDATE classifiers SET status = 'error', model_path = NULL, training_log = %s, "
-                    "training_phase = 'failed', training_phase_detail = %s WHERE classifier_id = %s",
-                    ("Training interrupted by server restart. Please retrain.",
-                     "Training interrupted by server restart. Please retrain.", cid),
-                )
 
         if len(stuck) - adopted:
             logger.info(f"[Recovery] Recovered {len(stuck) - adopted} stuck training classifier(s)")

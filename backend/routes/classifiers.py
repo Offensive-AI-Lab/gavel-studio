@@ -51,12 +51,35 @@ def _get_download_lock(classifier_id: int) -> threading.Lock:
         return _download_locks[classifier_id]
 
 
+def _cancel_training_job(classifier_id: int, training_log) -> None:
+    """Stop the training job described by `training_log` — a LOCAL child process
+    or a job on the remote worker. Best-effort: a missing, corrupt or already
+    dead handle is a no-op, and every failure is swallowed so the caller's own
+    work (a DB delete, a cancel write-off) still completes.
+
+    Takes the handle as an argument rather than re-reading it, because the
+    cancel route reads it BEFORE it flips the row off 'training' and must still
+    be able to kill the job afterwards.
+    """
+    try:
+        # Reconstruct (provider, job) from the training_log, then cancel
+        # through the compute interface — no transport-specific code here.
+        from services import compute
+        info = compute.job_from_log(training_log, classifier_id)
+        if not info:
+            return
+        prov, job = info
+        p = compute.provider_by_name(prov)
+        if p is not None:
+            p.cancel_training(job)
+    except Exception as e:
+        print(f"[train] Cancelling the training job for classifier {classifier_id} failed: {e}")
+
+
 def _cancel_remote_training_for_classifier(classifier_id: int) -> None:
-    """If the guardrail has an in-flight training job — a LOCAL child process or
-    a job on the remote worker — cancel it. Called from delete paths so a user
-    removing a guardrail mid-training doesn't leave a GPU busy and a job
-    directory orphaned. Best-effort: every failure is swallowed so the DB delete
-    still proceeds.
+    """If the guardrail has an in-flight training job, cancel it. Called from
+    delete paths so a user removing a guardrail mid-training doesn't leave a GPU
+    busy and a job directory orphaned.
 
     Local runs need this as much as remote ones do. The child is DB-free, so it
     cannot notice that the guardrail row went away the way the old in-process
@@ -75,16 +98,7 @@ def _cancel_remote_training_for_classifier(classifier_id: int) -> None:
         # (status='active') already had its job dir cleaned up at finalize.
         if row["status"] != "training":
             return
-        # Reconstruct (provider, job) from the training_log, then cancel
-        # through the compute interface — no transport-specific code here.
-        from services import compute
-        info = compute.job_from_log(row.get("training_log"), classifier_id)
-        if not info:
-            return
-        prov, job = info
-        p = compute.provider_by_name(prov)
-        if p is not None:
-            p.cancel_training(job)
+        _cancel_training_job(classifier_id, row.get("training_log"))
     except Exception as e:
         print(f"[train] Cancel-on-delete for classifier {classifier_id} failed: {e}")
 
@@ -811,6 +825,78 @@ def start_training(
     }
 
 
+@router.post("/{classifier_id}/training/cancel", dependencies=[Depends(require_classifier_owner)])
+def cancel_training(classifier_id: int, _: int = Depends(get_current_user)):
+    """Stop a training run the user no longer wants.
+
+    Everything happens under the SAME per-guardrail lock the status poll
+    finalizes a finished run under (`_get_download_lock`), because cancelling
+    and finalizing are the two ways a run leaves 'training' and only one of them
+    may win:
+
+      1. Take the lock. A poll that is mid-finalize (fetching artifacts,
+         committing the policy snapshot, scheduling calibration) holds it, so we
+         wait for that run to be fully finished rather than cutting into it.
+      2. Read the job handle, then WRITE THE ROW OFF — before anything is
+         killed. The write is conditional on the row still being 'training'
+         (shared implementation with crash recovery), so it is what claims the
+         run: if a poll finalized it while we waited, the write applies to
+         nothing and this is a 409. Claiming the row first also means no later
+         poll can finalize what we are about to kill — it re-reads the status
+         under this lock and sees a run that is over.
+      3. Only then stop the actual work through the compute provider named in
+         the handle — the local child process or the remote worker job.
+         Best-effort, so a missing or corrupt handle is a no-op instead of an
+         error, and neither transport is special cased here.
+
+    The kill is deliberately inside the lock: a local child gets up to an ~8s
+    SIGTERM grace period, and a poll arriving in that window must not be able to
+    start finalizing the run we are killing. Polls never block on it — they take
+    the lock non-blockingly and report from the row.
+
+    The row is left exactly where crash recovery leaves a run that stopped
+    without finishing: 'needs_retraining' when a previous model survives on
+    disk, otherwise 'error' with the partial workdir deleted. The phase columns
+    are cleared rather than marked 'failed' — the run was cancelled, not failed
+    — and the reason lands in training_log for the UI to show.
+
+    Nothing that belongs to a SUCCESSFUL run happens here: no artifact fetch, no
+    policy snapshot, no calibration.
+
+    409 (plain-string detail) when the guardrail isn't training — already
+    finished, already cancelled, or never started. That also covers a second
+    call and the race where a status poll finalizes the run first, so cancelling
+    twice can never 500.
+    """
+    not_training = "This rule set is not training right now."
+    rows = execute_query_dict(
+        "SELECT status FROM classifiers WHERE classifier_id = %s", (classifier_id,)
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Rule Set not found")
+    if rows[0]["status"] != "training":
+        raise HTTPException(status_code=409, detail=not_training)
+
+    from utils.crash_recovery import write_off_training_run
+    with _get_download_lock(classifier_id):
+        # Re-read the handle INSIDE the lock: a poll that ran while we waited
+        # may have failed the run over to another tier and stored a new one.
+        fresh = execute_query_dict(
+            "SELECT training_log FROM classifiers WHERE classifier_id = %s", (classifier_id,)
+        )
+        new_status = write_off_training_run(
+            classifier_id, "Training was cancelled.", failed_phase=False)
+        if new_status is None:
+            # The run finished (or was cancelled elsewhere) while we waited for
+            # the lock. Same answer as any other "not training" call — and we
+            # touch nothing, so a run that just succeeded is left alone.
+            raise HTTPException(status_code=409, detail=not_training)
+        _cancel_training_job(classifier_id, fresh[0].get("training_log") if fresh else None)
+
+    logger.info(f"[train] Classifier {classifier_id} | training cancelled by the user")
+    return {"success": True, "status": new_status}
+
+
 @router.get("/{classifier_id}/download", dependencies=[Depends(require_classifier_owner)])
 def download_classifier(classifier_id: int, _: int = Depends(get_current_user)):
     """
@@ -1123,8 +1209,23 @@ def get_training_status(classifier_id: int, auth_uid: int = Depends(get_current_
             return _ret("training", phase=phase_label, detail="Waiting - GPU provider changed since submit.")
 
         # Serialize per-guardrail so two polls don't race the download/finalize.
+        # The cancel route takes this same lock (it may hold it for a few
+        # seconds while a local child is killed), so "busy" no longer implies
+        # "still training": read the row before answering, and report the real
+        # state if the run has already been written off. Only a genuinely
+        # in-flight finalize falls through to the progress line — we never
+        # block the poll, which keeps the 5s polling loop responsive.
         cls_lock = _get_download_lock(classifier_id)
         if not cls_lock.acquire(blocking=False):
+            busy = execute_query_dict(
+                "SELECT status, model_path, training_phase, training_phase_detail, training_log "
+                "FROM classifiers WHERE classifier_id = %s", (classifier_id,))
+            if busy and busy[0]["status"] != "training":
+                b = busy[0]
+                return _ret(b["status"], model_path=b["model_path"], phase=b["training_phase"],
+                            detail=b["training_phase_detail"], training_log=b["training_log"],
+                            is_tr=b["status"] == "active", is_trn=False,
+                            err=b["status"] == "error")
             return _ret("training", phase="Processing", detail="Downloading trained model...")
         try:
             fresh = execute_query_dict(

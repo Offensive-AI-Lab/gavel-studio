@@ -11,19 +11,20 @@ import AddModelModal from '../components/AddModelModal/AddModelModal';
 import Breadcrumb from '../components/Breadcrumb/Breadcrumb';
 
 // Icons & Utils
-import { FiPlus, FiInbox, FiHome, FiShield, FiCpu, FiLayers, FiZap, FiCheckCircle, FiAlertCircle, FiRefreshCw, FiUploadCloud, FiDownload, FiCopy, FiFolder, FiFolderPlus, FiEdit2, FiTrash2, FiMove, FiChevronDown, FiChevronRight, FiGitBranch } from 'react-icons/fi';
+import { FiPlus, FiInbox, FiHome, FiShield, FiCpu, FiLayers, FiZap, FiCheckCircle, FiAlertCircle, FiRefreshCw, FiUploadCloud, FiDownload, FiCopy, FiFolder, FiFolderPlus, FiEdit2, FiTrash2, FiMove, FiChevronDown, FiChevronRight, FiGitBranch, FiXCircle } from 'react-icons/fi';
 import ExportToRegistryModal from '../components/ExportToRegistry/ExportToRegistryModal';
 import { FaRocket } from 'react-icons/fa';
 import Swal from 'sweetalert2';
 import { showAlertDialog, showConfirmDialog, showLoadingDialog } from '../components/ConfirmDialog/confirmDialog';
 import {
     getUserGuardrails, createGuardrail, cloneClassifierToModel, getUserModels,
-    deleteClassifier, getTrainingStatus, startImport, getBundleJob,
+    deleteClassifier, getTrainingStatus, cancelTraining, startImport, getBundleJob,
     getGuardrailFolders, createGuardrailFolder, renameGuardrailFolder,
     deleteGuardrailFolder, assignGuardrailFolder,
     getRuleSetBookmarks, forkPublicRuleSet, getPublicRuleSets,
 } from '../api';
 import { forgetRecent, getRecents } from '../utils/recents';
+import { wasTrainingCancelled } from '../utils/errorText';
 import { useTutorialContent } from '../contexts/TutorialContext';
 import InlineHelp from '../components/InlineHelp/InlineHelp';
 import { manualRuleConfig } from '../components/InlineHelp/instructorHelp';
@@ -55,6 +56,23 @@ const Guardrails = () => {
     const [user, setUser] = useState(null);
     const [loading, setLoading] = useState(true);
     const [trainingIds, setTrainingIds] = useState(new Set());
+    // Cancel requests in flight, so a card's button can't be clicked twice.
+    const [cancellingIds, setCancellingIds] = useState(() => new Set());
+    // The same set, as a ref: two clicks in one tick both read the state Set
+    // before React re-renders it, so only a ref can stop the second one from
+    // opening a second confirm dialog.
+    const cancellingRef = useRef(new Set());
+    // Bumped every time a cancel starts. A status poll that was already in
+    // flight at that moment describes the run as it was BEFORE the cancel, so
+    // its answer is dropped instead of putting the card back into 'training'.
+    const cancelGenRef = useRef(0);
+
+    const markCancelling = (classifierId, on) => {
+        const next = new Set(cancellingRef.current);
+        if (on) next.add(classifierId); else next.delete(classifierId);
+        cancellingRef.current = next;
+        setCancellingIds(next);
+    };
 
     // Create (name only — model is chosen later, at train time)
     const [isModalOpen, setIsModalOpen] = useState(false);
@@ -191,17 +209,29 @@ const Guardrails = () => {
     useEffect(() => {
         if (trainingIds.size === 0) return;
         const interval = setInterval(async () => {
-            const ids = [...trainingIds];
+            // Skip cards whose cancel is in flight, and drop the whole batch if
+            // a cancel started while it was out — either way the answer is
+            // about a run the user has already stopped, and applying it would
+            // flip the card back to 'training' for the next 5 seconds.
+            const generation = cancelGenRef.current;
+            const ids = [...trainingIds].filter(id => !cancellingRef.current.has(id));
+            if (ids.length === 0) return;
             const updated = await Promise.all(
                 ids.map(id => getTrainingStatus(id).then(r => r.data).catch(() => null))
             );
+            if (generation !== cancelGenRef.current) return;
             setGuardrails(prev => prev.map(c => {
                 const upd = updated.find(u => u && u.classifier_id === c.classifier_id);
                 return upd ? { ...c, status: upd.status, model_path: upd.model_path, training_log: upd.training_log, training_phase_detail: upd.training_phase_detail, has_error: upd.has_error } : c;
             }));
-            const stillTraining = new Set(
-                ids.filter((id, i) => updated[i] === null || updated[i].is_training)
-            );
+            const stillTraining = new Set([
+                ...ids.filter((id, i) => updated[i] === null || updated[i].is_training),
+                // Cards we skipped were not answered, so nothing here says they
+                // are done: keep polling them. A cancel that fails leaves its
+                // run going, and the cancel itself removes the card when it
+                // succeeds.
+                ...[...trainingIds].filter(id => cancellingRef.current.has(id)),
+            ]);
             setTrainingIds(stillTraining);
         }, 5000);
         return () => clearInterval(interval);
@@ -236,6 +266,46 @@ const Guardrails = () => {
             close();
             await showAlertDialog({ title: 'Error', message: 'Failed to delete rule set.', variant: 'error' });
         }
+    };
+
+    // Stop a run that is in progress. Confirm first — everything the run has
+    // done so far is thrown away. A 409 means the run already ended (finished,
+    // or cancelled from somewhere else): that isn't an error, so we skip the
+    // dialog and just refetch so the card shows where things really stand.
+    const handleCancelTraining = async (classifierId) => {
+        // Marked BEFORE the dialog opens: without this, two clicks in the same
+        // tick both get past the guard and the user gets two dialogs stacked on
+        // top of each other. Declining puts the card straight back.
+        if (cancellingRef.current.has(classifierId)) return;
+        markCancelling(classifierId, true);
+        const ok = await showConfirmDialog({
+            title: 'Cancel training?',
+            message: 'The run stops now and the work it has done so far is lost. This rule set will need training again before you can use it.',
+            confirmText: 'Cancel training',
+            cancelText: 'Keep training',
+            variant: 'danger',
+        });
+        if (!ok) { markCancelling(classifierId, false); return; }
+        cancelGenRef.current += 1;   // any poll already out is now stale
+        try {
+            await cancelTraining(classifierId);
+        } catch (err) {
+            if (err?.response?.status !== 409) {
+                markCancelling(classifierId, false);
+                await showAlertDialog({
+                    title: 'Error',
+                    message: err?.response?.data?.detail || 'Could not cancel this training run.',
+                    variant: 'error',
+                });
+                return;
+            }
+        }
+        // Show the new state, then stop polling this card (in that order: the
+        // refetch re-seeds trainingIds from the list it just read).
+        await fetchGuardrails();
+        cancelGenRef.current += 1;   // and so is anything issued while we waited
+        setTrainingIds(prev => { const next = new Set(prev); next.delete(classifierId); return next; });
+        markCancelling(classifierId, false);
     };
 
     const handleCreate = async () => {
@@ -587,9 +657,27 @@ const Guardrails = () => {
                     <span style={{ fontSize: '0.78rem', color: '#fcd34d', display: 'flex', alignItems: 'center', gap: '4px' }}>
                         <FiRefreshCw size={12} style={{ animation: 'spin 1s linear infinite' }} /> {c.training_phase_detail || 'Training...'}
                     </span>
+                    <button
+                        onClick={(e) => { e.stopPropagation(); handleCancelTraining(c.classifier_id); }}
+                        style={{ ...cancelBtnStyle, marginLeft: 'auto' }}
+                        disabled={cancellingIds.has(c.classifier_id)}
+                        title="Stop this training run"
+                    >
+                        <FiXCircle size={12} /> {cancellingIds.has(c.classifier_id) ? 'Cancelling...' : 'Cancel training'}
+                    </button>
                 </div>
             )}
             {c.status === 'error' && (c.training_phase_detail || c.training_log) && (() => {
+                // A run the user stopped lands here too (same write-off as a
+                // lost run), but it is not a failure — say so plainly, in the
+                // calm palette, instead of a red "something went wrong".
+                if (wasTrainingCancelled(c.training_log) && !c.training_phase_detail) {
+                    return (
+                        <div style={cancelledBannerStyle} title="Training was cancelled.">
+                            <FiXCircle size={12} /> Training was cancelled.
+                        </div>
+                    );
+                }
                 const msg = c.training_phase_detail || (typeof c.training_log === 'string' ? c.training_log : 'Training failed');
                 return (
                     <div style={errorBannerStyle} title={msg}>
@@ -934,8 +1022,12 @@ const Guardrails = () => {
 const cardWrapStyle = { display: 'flex', flexDirection: 'column' };
 const cardFooterStyle = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap', padding: '8px 12px', background: 'rgba(2, 6, 23, 0.40)', borderRadius: '0 0 12px 12px', borderTop: '1px solid rgba(148, 163, 184, 0.10)', marginTop: '-4px' };
 const cloneBtnStyle = { display: 'flex', alignItems: 'center', gap: '4px', padding: '4px 10px', borderRadius: '8px', border: '1px solid rgba(96, 165, 250, 0.40)', background: 'rgba(59, 130, 246, 0.18)', color: '#bfdbfe', cursor: 'pointer', fontSize: '0.74rem', fontWeight: '600', transition: 'all 0.15s' };
+const cancelBtnStyle = { display: 'flex', alignItems: 'center', gap: '4px', padding: '4px 10px', borderRadius: '8px', border: '1px solid rgba(248, 113, 113, 0.40)', background: 'rgba(239, 68, 68, 0.18)', color: '#fecaca', cursor: 'pointer', fontSize: '0.74rem', fontWeight: '600', transition: 'all 0.15s' };
 const importBtnStyle = { display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', borderRadius: '10px', border: '1px solid rgba(96, 165, 250, 0.45)', background: 'rgba(59, 130, 246, 0.18)', color: '#bfdbfe', cursor: 'pointer', fontSize: '0.9rem', fontWeight: '600', transition: 'all 0.15s' };
 const errorBannerStyle = { display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 12px', background: 'rgba(239, 68, 68, 0.18)', color: '#fecaca', fontSize: '0.75rem', borderRadius: '0 0 12px 12px', borderTop: '1px solid rgba(248, 113, 113, 0.30)' };
+// Same strip, neutral slate: the run was stopped on purpose, so it reads as
+// information rather than as the failure banner above.
+const cancelledBannerStyle = { display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 12px', background: 'rgba(148, 163, 184, 0.16)', color: '#cbd5e1', fontSize: '0.75rem', borderRadius: '0 0 12px 12px', borderTop: '1px solid rgba(148, 163, 184, 0.28)' };
 const sectionStyle = { borderRadius: '14px', padding: '10px 12px', border: '1px solid transparent', transition: 'background 0.12s, border-color 0.12s' };
 const sectionDropActiveStyle = { background: 'rgba(59, 130, 246, 0.10)', border: '1px dashed rgba(96, 165, 250, 0.6)' };
 const gridStyle = { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '24px' };

@@ -41,6 +41,7 @@ vi.mock('../../src/api', () => ({
     getCEBookmarks: vi.fn(() => ok({ bookmarks: [] })),
     trainClassifier: vi.fn(() => ok()),
     getTrainingStatus: vi.fn(() => ok({ status: 'untrained', is_training: false, training_phase: null, training_phase_detail: null })),
+    cancelTraining: vi.fn(() => ok({ success: true, status: 'needs_retraining' })),
     downloadClassifier: vi.fn(() => Promise.resolve()),
     listLocalDrafts: vi.fn(() => ok({ rules: [] })),
     // The "Add a Rule" picker searches the public library inline.
@@ -126,6 +127,7 @@ beforeEach(() => {
     api.getClassifierRules.mockResolvedValue({ data: { rules: [] } });
     api.getClassifierDetails.mockResolvedValue({ data: { model_id: 1, model_name: 'M', name: 'C', trained_rule_setup_ids: [], trained_rule_names: [] } });
     api.getTrainingStatus.mockResolvedValue({ data: { status: 'untrained', is_training: false, training_phase: null, training_phase_detail: null } });
+    api.cancelTraining.mockResolvedValue({ data: { success: true, status: 'needs_retraining' } });
     api.getRuleBookmarks.mockResolvedValue({ data: { bookmarks: [] } });
     api.getCEBookmarks.mockResolvedValue({ data: { bookmarks: [] } });
     api.listLocalDrafts.mockResolvedValue({ data: { rules: [] } });
@@ -408,6 +410,179 @@ describe('RulesManager — training status (in-flight)', () => {
         renderPage();
         expect(await screen.findByText('Cached Phase')).toBeInTheDocument();
         expect(screen.getByText(/Cached Detail/)).toBeInTheDocument();
+    });
+});
+
+describe('RulesManager — cancel training', () => {
+    const training = (over = {}) => ({
+        data: {
+            status: 'training', is_training: true,
+            training_phase: 'Training RNN', training_phase_detail: 'Epoch 3 of 10',
+            ...over,
+        },
+    });
+    // Mount mid-training and wait for the cancel action in the banner.
+    const renderTraining = async () => {
+        api.getTrainingStatus.mockResolvedValue(training());
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture()] } });
+        renderPage();
+        return screen.findByText('Cancel training');
+    };
+
+    it('offers the cancel action while a run is in progress', async () => {
+        await renderTraining();
+        expect(screen.getByTitle('Stop this training run')).toBeInTheDocument();
+    });
+
+    it('does not offer it when nothing is running', async () => {
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture()] } });
+        renderPage();
+        expect(await screen.findByText('Train Rule Set')).toBeInTheDocument();
+        expect(screen.queryByText('Cancel training')).not.toBeInTheDocument();
+    });
+
+    it('does not offer it during the submit round-trip (nothing to stop yet)', async () => {
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture()] } });
+        mockConfirm.mockReturnValue(new Promise(() => {}));   // hold the train confirm open
+        renderPage();
+        fireEvent.click(await screen.findByText('Train Rule Set'));
+        expect(await screen.findByText('Looking for a GPU')).toBeInTheDocument();
+        expect(screen.queryByText('Cancel training')).not.toBeInTheDocument();
+    });
+
+    it('does not offer it for the post-training chain (calibration is not cancellable here)', async () => {
+        api.getTrainingStatus.mockResolvedValue({
+            data: {
+                status: 'active', is_training: false,
+                training_phase: null, training_phase_detail: null,
+                post_training_phase: 'Calibrating', post_training_phase_detail: 'Loading datasets…',
+            },
+        });
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture()] } });
+        renderPage();
+        expect(await screen.findByText('Calibrating')).toBeInTheDocument();
+        expect(screen.queryByText('Cancel training')).not.toBeInTheDocument();
+    });
+
+    it('confirms first, then cancels and re-reads the status', async () => {
+        const btn = await renderTraining();
+        // The next status read reports the row as crash recovery leaves it.
+        api.getTrainingStatus.mockResolvedValue({
+            data: { status: 'needs_retraining', is_training: false, training_phase: null, training_phase_detail: null },
+        });
+        fireEvent.click(btn);
+        await waitFor(() => expect(mockConfirm).toHaveBeenCalledWith(
+            expect.objectContaining({ title: 'Cancel training?', variant: 'danger' }),
+        ));
+        await waitFor(() => expect(api.cancelTraining).toHaveBeenCalledWith('5'));
+        // Banner (and the run) gone; the train button is live again.
+        expect(await screen.findByText('Train Rule Set')).toBeInTheDocument();
+        expect(screen.queryByText('Cancel training')).not.toBeInTheDocument();
+        expect(mockAlert).not.toHaveBeenCalled();
+    });
+
+    it('does not cancel when the confirm dialog is dismissed', async () => {
+        const btn = await renderTraining();
+        mockConfirm.mockResolvedValue(false);
+        fireEvent.click(btn);
+        await waitFor(() => expect(mockConfirm).toHaveBeenCalled());
+        expect(api.cancelTraining).not.toHaveBeenCalled();
+        expect(screen.getByText('Cancel training')).toBeInTheDocument();
+    });
+
+    it('treats a 409 as "already over": re-reads the status, no error dialog', async () => {
+        const btn = await renderTraining();
+        api.cancelTraining.mockRejectedValue({ response: { status: 409, data: { detail: 'Not training' } } });
+        const readsBefore = api.getTrainingStatus.mock.calls.length;
+        api.getTrainingStatus.mockResolvedValue({
+            data: { status: 'active', is_training: false, training_phase: null, training_phase_detail: null },
+        });
+        fireEvent.click(btn);
+        await waitFor(() => expect(api.getTrainingStatus.mock.calls.length).toBeGreaterThan(readsBefore));
+        await waitFor(() => expect(screen.queryByText('Cancel training')).not.toBeInTheDocument());
+        expect(mockAlert).not.toHaveBeenCalled();
+    });
+
+    it('alerts with the server detail when the cancel fails for another reason', async () => {
+        const btn = await renderTraining();
+        api.cancelTraining.mockRejectedValue({ response: { status: 500, data: { detail: 'Could not reach the worker' } } });
+        fireEvent.click(btn);
+        await waitFor(() => expect(mockAlert).toHaveBeenCalledWith(
+            expect.objectContaining({ title: 'Error', message: 'Could not reach the worker', variant: 'error' }),
+        ));
+        // The run is still going, so the action stays available.
+        expect(screen.getByText('Cancel training')).toBeInTheDocument();
+    });
+
+    it('locks the button while the cancel is in flight (no double submit)', async () => {
+        const btn = await renderTraining();
+        let resolveCancel;
+        api.cancelTraining.mockReturnValue(new Promise((res) => { resolveCancel = res; }));
+        fireEvent.click(btn);
+        expect(await screen.findByText('Cancelling...')).toBeInTheDocument();
+        fireEvent.click(screen.getByTitle('Stop this training run'));
+        expect(api.cancelTraining).toHaveBeenCalledTimes(1);
+        resolveCancel({ data: { success: true, status: 'needs_retraining' } });
+        await waitFor(() => expect(screen.queryByText('Cancelling...')).not.toBeInTheDocument());
+    });
+
+    it('two clicks in the same tick open ONE confirm dialog', async () => {
+        // The lock goes on before the dialog: a second click in the same tick
+        // still sees the pre-render state, so only a ref can stop it stacking
+        // a second dialog on the first.
+        const btn = await renderTraining();
+        let resolveConfirm;
+        mockConfirm.mockReturnValue(new Promise((res) => { resolveConfirm = res; }));
+        fireEvent.click(btn);
+        fireEvent.click(btn);
+        expect(mockConfirm).toHaveBeenCalledTimes(1);
+        resolveConfirm(true);
+        await waitFor(() => expect(api.cancelTraining).toHaveBeenCalledTimes(1));
+    });
+
+    it('re-arms the button when the confirm is declined', async () => {
+        const btn = await renderTraining();
+        mockConfirm.mockResolvedValue(false);
+        fireEvent.click(btn);
+        await waitFor(() => expect(mockConfirm).toHaveBeenCalledTimes(1));
+        await waitFor(() => expect(screen.getByTitle('Stop this training run')).not.toBeDisabled());
+        mockConfirm.mockResolvedValue(true);
+        fireEvent.click(screen.getByTitle('Stop this training run'));
+        await waitFor(() => expect(api.cancelTraining).toHaveBeenCalledTimes(1));
+    });
+});
+
+describe('RulesManager — how a stopped run reads', () => {
+    // A cancelled run and a failed run leave the same status ('error'); only
+    // the reason in training_log tells them apart, and they must not read the
+    // same to the user.
+    it('says a cancelled run was cancelled, without the failure banner', async () => {
+        api.getTrainingStatus.mockResolvedValue({
+            data: {
+                status: 'error', is_training: false, has_error: true,
+                training_phase: null, training_phase_detail: null,
+                training_log: 'Training was cancelled.',
+            },
+        });
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture()] } });
+        renderPage();
+        expect(await screen.findByText('Training was cancelled.')).toBeInTheDocument();
+        expect(screen.queryByText('Training failed.')).not.toBeInTheDocument();
+    });
+
+    it('still shows the failure banner for a run that actually failed', async () => {
+        api.getTrainingStatus.mockResolvedValue({
+            data: {
+                status: 'error', is_training: false, has_error: true,
+                training_phase: 'failed',
+                training_phase_detail: 'GPU worker unreachable for 900s',
+                training_log: null,
+            },
+        });
+        api.getClassifierRules.mockResolvedValue({ data: { rules: [ruleFixture()] } });
+        renderPage();
+        expect(await screen.findByText('Training failed.')).toBeInTheDocument();
+        expect(screen.queryByText('Training was cancelled.')).not.toBeInTheDocument();
     });
 });
 
