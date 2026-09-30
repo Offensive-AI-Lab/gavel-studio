@@ -34,14 +34,21 @@ vi.mock('../../../src/components/OpenAiKeyModal/openAiKeyPrompt', async (importO
     return { ...actual, promptForOpenAiKey: vi.fn() };
 });
 
+// Same for its local-model counterpart ("Set local LLM").
+vi.mock('../../../src/components/LocalLlmModal/localLlmPrompt', async (importOriginal) => {
+    const actual = await importOriginal();
+    return { ...actual, promptForLocalLlm: vi.fn() };
+});
+
 import Swal from 'sweetalert2';
 import { promptForOpenAiKey } from '../../../src/components/OpenAiKeyModal/openAiKeyPrompt';
+import { promptForLocalLlm } from '../../../src/components/LocalLlmModal/localLlmPrompt';
 
-// The backend's contract error for a missing/refused key.
+// The backend's contract error for missing/refused AI access.
 const keyMissingError = () => ({
     response: {
         status: 503,
-        data: { detail: { code: 'OPENAI_KEY_MISSING', message: 'This feature needs an OpenAI key. Add yours to continue.' } },
+        data: { detail: { code: 'OPENAI_KEY_MISSING', message: 'This feature needs an OpenAI key or a local model. Add one to continue.' } },
     },
 });
 import RuleDefaultsStep from '../../../src/components/RuleDefaults/RuleDefaultsStep';
@@ -161,13 +168,13 @@ describe('RuleDefaultsStep — initial render & derive', () => {
         expect(screen.queryByText(/Analyzing the rule/i)).toBeNull();
     });
 
-    it('names the missing OpenAI key when derive fails with the backend 503 key error', async () => {
+    it('names the missing key/local model when derive fails with the backend 503 error', async () => {
         deriveScenario.mockRejectedValue(keyMissingError());
 
         renderStep();
 
         const warning = await screen.findByText(/Could not auto-write a scenario/i);
-        expect(warning).toHaveTextContent(/no OpenAI key is set/i);
+        expect(warning).toHaveTextContent(/no OpenAI key or local model is set/i);
         // The whole point of the feature: never send the user to a file.
         expect(warning).not.toHaveTextContent(/\.env/);
         expect(warning).not.toHaveTextContent(/restart/i);
@@ -192,6 +199,25 @@ describe('RuleDefaultsStep — initial render & derive', () => {
         expect(await screen.findByDisplayValue('second try')).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /Set API key/i })).toBeNull();
         expect(screen.queryByText(/Could not auto-write a scenario/i)).toBeNull();
+    });
+
+    it('also offers "Set local LLM", and re-derives once a local model is saved', async () => {
+        deriveScenario.mockRejectedValueOnce(keyMissingError());
+
+        renderStep({ ruleId: 12 });
+
+        const btn = await screen.findByRole('button', { name: /Set local LLM/i });
+        expect(promptForLocalLlm).not.toHaveBeenCalled();
+
+        deriveScenario.mockResolvedValue({ data: { scenario: 'via local model' } });
+        await act(async () => { fireEvent.click(btn); });
+        expect(promptForLocalLlm).toHaveBeenCalledTimes(1);
+        // It's the local modal, not the OpenAI key one.
+        expect(promptForOpenAiKey).not.toHaveBeenCalled();
+
+        await act(async () => { promptForLocalLlm.mock.calls[0][0].onSaved(); });
+        expect(await screen.findByDisplayValue('via local model')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /Set local LLM/i })).toBeNull();
     });
 
     it('keeps a scenario the user already typed when the derive is replayed', async () => {

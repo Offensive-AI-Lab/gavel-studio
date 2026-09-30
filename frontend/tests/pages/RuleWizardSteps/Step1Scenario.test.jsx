@@ -13,10 +13,12 @@ import userEvent from '@testing-library/user-event';
 const startScenarioChat = vi.fn();
 const sendScenarioChatMessage = vi.fn();
 const getOpenAiKeyStatus = vi.fn();
+const getLocalLlmStatus = vi.fn();
 vi.mock('../../../src/api', () => ({
     startScenarioChat: (...a) => startScenarioChat(...a),
     sendScenarioChatMessage: (...a) => sendScenarioChatMessage(...a),
     getOpenAiKeyStatus: (...a) => getOpenAiKeyStatus(...a),
+    getLocalLlmStatus: (...a) => getLocalLlmStatus(...a),
 }));
 
 import Step1Scenario from '../../../src/pages/RuleWizardSteps/Step1Scenario';
@@ -24,14 +26,20 @@ import {
     notifyOpenAiKeySaved,
     subscribeOpenAiKeyPrompt,
 } from '../../../src/components/OpenAiKeyModal/openAiKeyPrompt';
+import {
+    notifyLocalLlmSaved,
+    subscribeLocalLlmPrompt,
+} from '../../../src/components/LocalLlmModal/localLlmPrompt';
 
-// The step's own wording for a missing key (KEY_MISSING_TEXT in the component).
-const KEY_MISSING_TEXT = 'This step needs an OpenAI key. Add yours to continue.';
+// The step's own wording for missing AI access (KEY_MISSING_TEXT in the component).
+const KEY_MISSING_TEXT = 'This step needs an OpenAI key or a local model. Add one to continue.';
 
 // The real prompt channel — every test can assert whether the modal was asked
 // for, without mocking the module the component imports.
 let prompted;
 let unsubscribePrompt;
+let promptedLocal;
+let unsubscribeLocalPrompt;
 
 // Default benign responses; individual tests override as needed.
 beforeEach(() => {
@@ -39,11 +47,16 @@ beforeEach(() => {
     startScenarioChat.mockResolvedValue({ data: { session_id: 'sess-1', message: 'Hi, describe your scenario' } });
     sendScenarioChatMessage.mockResolvedValue({ data: { message: 'Tell me more', is_final: false } });
     getOpenAiKeyStatus.mockResolvedValue({ data: { configured: true } });
+    // No local model by default: the "missing" note needs BOTH the key and the
+    // local model unset, so tests that set the key to false get the note.
+    getLocalLlmStatus.mockResolvedValue({ data: { configured: false } });
     prompted = vi.fn();
     unsubscribePrompt = subscribeOpenAiKeyPrompt(prompted);
+    promptedLocal = vi.fn();
+    unsubscribeLocalPrompt = subscribeLocalLlmPrompt(promptedLocal);
 });
 
-afterEach(() => { unsubscribePrompt(); });
+afterEach(() => { unsubscribePrompt(); unsubscribeLocalPrompt(); });
 
 // Helper: render with a run object + a captured onPatchStep spy.
 function setup(run = { steps: {} }, onPatchStep = vi.fn(() => Promise.resolve()), onAdvance = vi.fn(() => Promise.resolve())) {
@@ -447,6 +460,39 @@ describe('Step1Scenario — missing OpenAI key', () => {
         await waitFor(() => expect(getOpenAiKeyStatus).toHaveBeenCalled());
         expect(screen.queryByText(KEY_MISSING_TEXT)).toBeNull();
         expect(screen.queryByRole('button', { name: /Set API key/i })).toBeNull();
+    });
+
+    it('shows nothing when only a local model is configured (no key)', async () => {
+        getOpenAiKeyStatus.mockResolvedValue({ data: { configured: false } });
+        getLocalLlmStatus.mockResolvedValue({ data: { configured: true } });
+        setup();
+        await screen.findByText('Hi, describe your scenario');
+        await waitFor(() => expect(getLocalLlmStatus).toHaveBeenCalled());
+        expect(screen.queryByText(KEY_MISSING_TEXT)).toBeNull();
+        expect(screen.queryByRole('button', { name: /Set local LLM/i })).toBeNull();
+    });
+
+    it('offers Set local LLM next to Set API key, and pressing it asks for the local model', async () => {
+        getOpenAiKeyStatus.mockResolvedValue({ data: { configured: false } });
+        setup();
+        await screen.findByText(KEY_MISSING_TEXT);
+        expect(screen.getByRole('button', { name: /Set API key/i })).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: /Set local LLM/i }));
+        expect(promptedLocal).toHaveBeenCalledTimes(1);
+        // It's the local modal that opens, not the OpenAI key one.
+        expect(prompted).not.toHaveBeenCalled();
+    });
+
+    it('clears the note once a local model is saved', async () => {
+        getOpenAiKeyStatus.mockResolvedValue({ data: { configured: false } });
+        setup();
+        await screen.findByText(KEY_MISSING_TEXT);
+
+        getLocalLlmStatus.mockResolvedValue({ data: { configured: true } });
+        await act(async () => { notifyLocalLlmSaved(); });
+
+        await waitFor(() => expect(screen.queryByText(KEY_MISSING_TEXT)).toBeNull());
     });
 
     it('stays quiet when the status call itself fails', async () => {

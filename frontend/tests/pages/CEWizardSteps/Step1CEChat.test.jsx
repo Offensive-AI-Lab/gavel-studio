@@ -6,11 +6,12 @@ import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 
-const { generateCe, getOpenAiKeyStatus } = vi.hoisted(() => ({
+const { generateCe, getOpenAiKeyStatus, getLocalLlmStatus } = vi.hoisted(() => ({
     generateCe: vi.fn(),
     getOpenAiKeyStatus: vi.fn(),
+    getLocalLlmStatus: vi.fn(),
 }));
-vi.mock('../../../src/api', () => ({ generateCe, getOpenAiKeyStatus }));
+vi.mock('../../../src/api', () => ({ generateCe, getOpenAiKeyStatus, getLocalLlmStatus }));
 
 // The shared key-modal opener — stubbed so we can assert when it is asked to
 // open and drive its onSaved callback without mounting the modal.
@@ -18,17 +19,26 @@ vi.mock('../../../src/components/OpenAiKeyModal/openAiKeyPrompt', async (importO
     const actual = await importOriginal();
     return { ...actual, promptForOpenAiKey: vi.fn() };
 });
+// Same for its local-model counterpart.
+vi.mock('../../../src/components/LocalLlmModal/localLlmPrompt', async (importOriginal) => {
+    const actual = await importOriginal();
+    return { ...actual, promptForLocalLlm: vi.fn() };
+});
 
 import Step1CEChat from '../../../src/pages/CEWizardSteps/Step1CEChat';
 import {
     notifyOpenAiKeySaved,
     promptForOpenAiKey,
 } from '../../../src/components/OpenAiKeyModal/openAiKeyPrompt';
+import {
+    notifyLocalLlmSaved,
+    promptForLocalLlm,
+} from '../../../src/components/LocalLlmModal/localLlmPrompt';
 
-// The backend's contract error for a missing/refused key.
-const KEY_MESSAGE = 'This feature needs an OpenAI key. Add yours to continue.';
-// The step's own wording, shown upfront when no key is set at all.
-const KEY_MISSING_TEXT = 'This step needs an OpenAI key. Add yours to continue.';
+// The backend's contract error for missing/refused AI access.
+const KEY_MESSAGE = 'This feature needs an OpenAI key or a local model. Add one to continue.';
+// The step's own wording, shown upfront when neither a key nor a local model is set.
+const KEY_MISSING_TEXT = 'This step needs an OpenAI key or a local model. Add one to continue.';
 const keyMissingError = () => ({
     response: { status: 503, data: { detail: { code: 'OPENAI_KEY_MISSING', message: KEY_MESSAGE } } },
 });
@@ -49,6 +59,9 @@ const typeAndSend = (text) => {
 beforeEach(() => {
     vi.clearAllMocks();
     getOpenAiKeyStatus.mockResolvedValue({ data: { configured: true } });
+    // No local model by default: the "missing" note needs BOTH the key and the
+    // local model unset, so tests that set the key to false get the note.
+    getLocalLlmStatus.mockResolvedValue({ data: { configured: false } });
 });
 
 describe('Step1CEChat', () => {
@@ -202,6 +215,38 @@ describe('Step1CEChat — missing OpenAI key', () => {
         renderChat();
         await waitFor(() => expect(getOpenAiKeyStatus).toHaveBeenCalled());
         expect(screen.queryByText(KEY_MISSING_TEXT)).toBeNull();
+    });
+
+    it('shows nothing when only a local model is configured (no key)', async () => {
+        getOpenAiKeyStatus.mockResolvedValue({ data: { configured: false } });
+        getLocalLlmStatus.mockResolvedValue({ data: { configured: true } });
+        renderChat();
+        await waitFor(() => expect(getLocalLlmStatus).toHaveBeenCalled());
+        expect(screen.queryByText(KEY_MISSING_TEXT)).toBeNull();
+        expect(screen.queryByRole('button', { name: /Set local LLM/i })).toBeNull();
+    });
+
+    it('offers Set local LLM next to Set API key, and pressing it asks for the local model', async () => {
+        getOpenAiKeyStatus.mockResolvedValue({ data: { configured: false } });
+        renderChat();
+        await screen.findByText(KEY_MISSING_TEXT);
+        expect(screen.getByRole('button', { name: /Set API key/i })).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: /Set local LLM/i }));
+        expect(promptForLocalLlm).toHaveBeenCalledTimes(1);
+        // It's the local modal that opens, not the OpenAI key one.
+        expect(promptForOpenAiKey).not.toHaveBeenCalled();
+    });
+
+    it('clears the note once a local model is saved', async () => {
+        getOpenAiKeyStatus.mockResolvedValue({ data: { configured: false } });
+        renderChat();
+        await screen.findByText(KEY_MISSING_TEXT);
+
+        getLocalLlmStatus.mockResolvedValue({ data: { configured: true } });
+        await act(async () => { notifyLocalLlmSaved(); });
+
+        await waitFor(() => expect(screen.queryByText(KEY_MISSING_TEXT)).toBeNull());
     });
 
     it('asks for the key when the user presses Set API key', async () => {
