@@ -12,6 +12,7 @@ import { step2aRuleGeneration } from '../../components/InlineHelp/instructorHelp
 import {
     isOpenAiKeyMissing, openAiKeyMissingMessage, promptForOpenAiKey,
 } from '../../components/OpenAiKeyModal/openAiKeyPrompt';
+import { promptForLocalLlm } from '../../components/LocalLlmModal/localLlmPrompt';
 import { errorText } from '../../utils/errorText';
 import {
     getStepState, startStep, completeStep, errorStep,
@@ -44,6 +45,7 @@ export default function Step2ARule({ run, classifierId, onPatchStep, setRun, onA
     const [needsKey, setNeedsKey] = useState(false);
 
     const askForKey = () => promptForOpenAiKey({ onSaved: () => generate() });
+    const askForLocalLlm = () => promptForLocalLlm({ onSaved: () => generate() });
 
     // Approve → hand off to the wizard's onFinish, which runs CE training,
     // CE calibration, the test/calibration set and finalization as ONE
@@ -163,9 +165,14 @@ export default function Step2ARule({ run, classifierId, onPatchStep, setRun, onA
                 <div style={card}>
                     <div style={errorBanner}><FiAlertTriangle /> {error}</div>
                     {needsKey && (
-                        <button onClick={askForKey} style={{ ...primaryBtn, marginTop: 10 }}>
-                            <FiKey /> Set API key
-                        </button>
+                        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                            <button onClick={askForKey} style={primaryBtn}>
+                                <FiKey /> Set API key
+                            </button>
+                            <button onClick={askForLocalLlm} style={secondaryBtn}>
+                                <FiCpu /> Set local LLM
+                            </button>
+                        </div>
                     )}
                 </div>
             )}

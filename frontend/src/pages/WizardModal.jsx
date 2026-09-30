@@ -7,10 +7,12 @@
 // onFinish (the background build) and closes the modal. So there's no sidebar
 // or Prev/Next footer here — just the active step.
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { FiSettings } from 'react-icons/fi';
 import GlassModal from '../components/GlassModal/GlassModal';
 import { showConfirmDialog } from '../components/ConfirmDialog/confirmDialog';
 import { updatePipelineStep } from '../api';
 import { errorText } from '../utils/errorText';
+import { promptForLocalLlm } from '../components/LocalLlmModal/localLlmPrompt';
 
 export default function WizardModal({
     open,
@@ -51,9 +53,15 @@ export default function WizardModal({
         }
         finishedRef.current = false;
         let cancelled = false;
-        (async () => {
+        setLoading(true); setError(null); setRun(null);
+        // Deferred a tick so a TRANSIENT mount — React StrictMode's dev
+        // double-invoke (mount→unmount→mount) — cancels BEFORE bootstrap()
+        // creates a real pipeline run. Without this the throwaway mount POSTs
+        // a duplicate run that nothing ever uses or cleans up. Same pattern as
+        // RealtimeViewer's deferred session start.
+        const timer = setTimeout(async () => {
+            if (cancelled) return;
             try {
-                setLoading(true); setError(null); setRun(null);
                 const r = await bootstrap();
                 if (!cancelled && r) setRun(r);
             } catch (e) {
@@ -61,8 +69,8 @@ export default function WizardModal({
             } finally {
                 if (!cancelled) setLoading(false);
             }
-        })();
-        return () => { cancelled = true; };
+        }, 150);
+        return () => { cancelled = true; clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open]);
 
@@ -159,6 +167,18 @@ export default function WizardModal({
 
     return (
         <GlassModal isOpen={open} onClose={requestClose} title={title} size="wide">
+            {/* Always reachable, not just when a step is blocked on a missing
+                key/model — lets the user swap providers or the local model
+                mid-flow without having to hit a failure first. */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4 }}>
+                <button
+                    type="button"
+                    onClick={() => promptForLocalLlm()}
+                    style={aiSettingsBtnStyle}
+                >
+                    <FiSettings size={12} /> AI provider
+                </button>
+            </div>
             {loading && <div style={{ padding: 20, color: '#cbd5e1' }}>Loading…</div>}
             {error && <div style={{ padding: 20, color: '#fca5a5' }}>{error}</div>}
             {!loading && !error && ActiveStep && (
@@ -175,3 +195,10 @@ export default function WizardModal({
         </GlassModal>
     );
 }
+
+const aiSettingsBtnStyle = {
+    display: 'inline-flex', alignItems: 'center', gap: 5,
+    padding: '5px 10px', borderRadius: 8, cursor: 'pointer',
+    border: '1px solid rgba(148, 163, 184, 0.20)', background: 'rgba(15, 23, 42, 0.45)',
+    color: '#94a3b8', fontSize: '0.76rem', fontWeight: 600, fontFamily: 'inherit',
+};

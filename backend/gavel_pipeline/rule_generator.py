@@ -14,8 +14,7 @@ unreferenced ("supporting") groups are rejected, matching the library CI.
 import json
 import re
 
-import litellm
-
+from gavel_pipeline import llm_client
 from utils.rule_condition import (
     GROUP_NAME_RE,
     KEYWORDS,
@@ -43,9 +42,17 @@ def call_thinking_model(messages, model=THINKING_MODEL):
             else:
                 formatted_messages.append(msg)
 
-        response = litellm.completion(
+        response = llm_client.complete(
             model=model,
-            messages=formatted_messages
+            messages=formatted_messages,
+            # rule_generator_prompt.md demands a long "reasoning" section
+            # (systematic per-CE review, gap analysis, boundary check) BEFORE
+            # groups/condition/new_ces even appear — on the local path this
+            # overrides llm_client's default token budget, which otherwise
+            # truncates that reasoning before new_ces is ever reached
+            # (surfaces later as "rule references unknown CE(s)"). Local-only:
+            # llm_client never forwards it to OpenAI.
+            local_max_tokens=8192,
         )
         return response.choices[0].message.content, None
     except Exception as e:
@@ -55,7 +62,7 @@ def call_thinking_model(messages, model=THINKING_MODEL):
 def call_llm(messages, model=VALIDATION_MODEL, temperature=0.7):
     """Calls standard LLM."""
     try:
-        response = litellm.completion(
+        response = llm_client.complete(
             model=model,
             messages=messages,
             temperature=temperature

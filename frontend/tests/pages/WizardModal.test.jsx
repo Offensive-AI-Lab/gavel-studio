@@ -91,6 +91,27 @@ describe('WizardModal', () => {
         expect(screen.getByTestId('glass-title')).toHaveTextContent('Test Wizard');
     });
 
+    it('bootstraps exactly once under React StrictMode (no duplicate pipeline run)', async () => {
+        // StrictMode's dev double-invoke (mount→unmount→mount) used to fire
+        // bootstrap() twice, POSTing a second pipeline run nothing ever used.
+        const bootstrap = vi.fn(() => Promise.resolve({ run_id: 5, current_step: '1', steps: {} }));
+        render(
+            <React.StrictMode>
+                <WizardModal
+                    open
+                    onClose={vi.fn()}
+                    title="Test Wizard"
+                    steps={STEPS}
+                    stepComponents={STEP_COMPONENTS}
+                    bootstrap={bootstrap}
+                    onFinish={vi.fn()}
+                />
+            </React.StrictMode>,
+        );
+        await screen.findByTestId('s1');
+        expect(bootstrap).toHaveBeenCalledTimes(1);
+    });
+
     it('advances from step 1 to step 2A', async () => {
         renderModal();
         await screen.findByTestId('s1');

@@ -81,6 +81,24 @@ export const getBackendHealth = async () => api.get('/health', { timeout: 30000 
 export const getOpenAiKeyStatus = async () => api.get('/settings/openai-key');
 export const saveOpenAiKey = async (key) => api.put('/settings/openai-key', { api_key: key });
 
+// --- Local LLM ---
+// Alternative to the OpenAI key: a Hugging Face model path run on this
+// machine's own GPU (see backend/gavel_pipeline/llm_client.py). Unlike the
+// OpenAI key this isn't a secret, so the status call returns the model path
+// itself and the modal prefills it.
+export const getLocalLlmStatus = async () => api.get('/settings/local-llm');
+export const saveLocalLlm = async (model) => api.put('/settings/local-llm', { model });
+export const clearLocalLlm = async () => api.delete('/settings/local-llm');
+// Load progress (separate from "is a path SET" above): 'not_configured' |
+// 'not_loaded' | 'loading' | 'ready' | 'error'. warmUpLocalLlm starts a
+// background load without waiting for it, so the caller polls status.
+export const getLocalLlmLoadStatus = async () => api.get('/settings/local-llm/status');
+export const warmUpLocalLlm = async () => api.post('/settings/local-llm/warmup');
+
+// --- AI provider (which one runs generation when both are configured) ---
+export const getAiProviderStatus = async () => api.get('/settings/ai-provider');
+export const saveAiProvider = async (provider) => api.put('/settings/ai-provider', { provider });
+
 // --- Onboarding ---
 // Flip the `tutorial_seen` flag to TRUE so the first-run onboarding modal
 // doesn't re-fire on the next /workspace mount. The caller updates the cached

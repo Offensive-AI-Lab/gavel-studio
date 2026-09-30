@@ -8,7 +8,7 @@
 // generateCe(description, preferType, history) is stateless — `description` is
 // the first user message; each clarification Q&A goes into `history`.
 import { useState, useEffect, useRef } from 'react';
-import { FiSend, FiRefreshCw, FiCheckCircle, FiAlertTriangle, FiKey } from 'react-icons/fi';
+import { FiSend, FiRefreshCw, FiCheckCircle, FiAlertTriangle, FiKey, FiCpu } from 'react-icons/fi';
 import { generateCe } from '../../api';
 import {
     getStepState, startStep, completeStep,
@@ -19,9 +19,11 @@ import {
     openAiKeyMissingMessage,
     promptForOpenAiKey,
 } from '../../components/OpenAiKeyModal/openAiKeyPrompt';
+import { promptForLocalLlm } from '../../components/LocalLlmModal/localLlmPrompt';
 import useOpenAiKeyStatus from '../../hooks/useOpenAiKeyStatus';
+import useLocalLlmStatus from '../../hooks/useLocalLlmStatus';
 
-const KEY_MISSING_TEXT = 'This step needs an OpenAI key. Add yours to continue.';
+const KEY_MISSING_TEXT = 'This step needs an OpenAI key or a local model. Add one to continue.';
 
 const GREETING = "Describe the Cognitive Element you want to capture — one CONTEXT (a domain/setting) or one ACTION (a behaviour). Be specific about what's in and out of scope.";
 
@@ -91,6 +93,7 @@ export default function Step1CEChat({ run, onPatchStep, onAdvance }) {
     // Asked once on mount: is a key set at all? This opens nothing — the note
     // below goes up straight away, the modal still waits to be asked for.
     const { configured: keyConfigured, checked: keyChecked } = useOpenAiKeyStatus();
+    const { configured: localConfigured, checked: localChecked } = useLocalLlmStatus();
 
     useEffect(() => {
         if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -105,6 +108,7 @@ export default function Step1CEChat({ run, onPatchStep, onAdvance }) {
 
     // Open the key modal; once the key is saved, replay the turn that failed.
     const askForKey = () => promptForOpenAiKey({ onSaved: () => retryRef.current?.() });
+    const askForLocalLlm = () => promptForLocalLlm({ onSaved: () => retryRef.current?.() });
 
     const showKeyPrompt = (message, openNow) => {
         setError(message);
@@ -190,11 +194,14 @@ export default function Step1CEChat({ run, onPatchStep, onAdvance }) {
         catch (e) { setApproving(false); setNeedsKey(false); setError(e?.message || 'Could not start the build.'); }
     };
 
-    // Two ways we know the key is missing: a generate came back with the
+    // Two ways we know access is missing: a generate came back with the
     // marker, or the upfront status check said so before the user typed
-    // anything. Both get the same note + button; once a CE is proposed there
-    // is nothing left to call, so it stays quiet. Typing is never blocked.
-    const keyMissing = needsKey || (keyChecked && !keyConfigured && !ceData);
+    // anything — once BOTH the key and the local model have reported in,
+    // and NEITHER is set. Both get the same note + two buttons; once a CE is
+    // proposed there is nothing left to call, so it stays quiet. Typing is
+    // never blocked.
+    const keyMissing = needsKey
+        || (keyChecked && localChecked && !keyConfigured && !localConfigured && !ceData);
     const banner = error || (keyMissing ? KEY_MISSING_TEXT : null);
 
     return (
@@ -251,9 +258,14 @@ export default function Step1CEChat({ run, onPatchStep, onAdvance }) {
                 <div style={card}>
                     <div style={errorBanner}><FiAlertTriangle /> {banner}</div>
                     {keyMissing && (
-                        <button onClick={askForKey} style={{ ...primaryBtn, marginTop: 10 }}>
-                            <FiKey /> Set API key
-                        </button>
+                        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                            <button onClick={askForKey} style={primaryBtn}>
+                                <FiKey /> Set API key
+                            </button>
+                            <button onClick={askForLocalLlm} style={secondaryBtn}>
+                                <FiCpu /> Set local LLM
+                            </button>
+                        </div>
                     )}
                 </div>
             )}

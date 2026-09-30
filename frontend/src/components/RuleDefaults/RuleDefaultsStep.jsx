@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { FiArrowRight, FiLoader, FiAlertTriangle, FiKey } from 'react-icons/fi';
+import { FiArrowRight, FiLoader, FiAlertTriangle, FiKey, FiCpu } from 'react-icons/fi';
 import ReactiveButton from '../ReactiveButton/ReactiveButton';
 import { deriveScenario, generateRuleDefaults, getRuleDefaultsStatus } from '../../api';
 import { useTaskTray } from '../../contexts/TaskTrayContext';
 import { runInTray, sleep } from '../../hooks/runInTray';
 import { showConfirmDialog, escapeHtml } from '../ConfirmDialog/confirmDialog';
 import { isOpenAiKeyMissing, promptForOpenAiKey } from '../OpenAiKeyModal/openAiKeyPrompt';
+import { promptForLocalLlm } from '../LocalLlmModal/localLlmPrompt';
 
 // Final step for a freshly-created rule: derive a misuse scenario from the
 // rule's CEs/roles, let the user review/edit it, then kick off generation of
@@ -30,8 +31,8 @@ function describeDeriveError(err) {
     // The missing/refused key has its own marker in the body — key on that,
     // never on the wording, and offer the "Set API key" button next to it.
     if (isOpenAiKeyMissing(err)) {
-        return 'Could not auto-write a scenario — no OpenAI key is set yet. '
-            + 'Add your key, or describe the misuse this rule should catch below.';
+        return 'Could not auto-write a scenario — no OpenAI key or local model is set yet. '
+            + 'Add one, or describe the misuse this rule should catch below.';
     }
     const raw = err?.response?.data?.detail;
     const detail = (typeof raw === 'string' && raw) || raw?.message || '';
@@ -226,13 +227,22 @@ export default function RuleDefaultsStep({ ruleId, onDone, finalize }) {
                     <FiAlertTriangle size={13} style={{ flexShrink: 0 }} />
                     <span style={{ flex: 1 }}>{deriveError}</span>
                     {deriveNeedsKey && (
-                        <button
-                            type="button"
-                            onClick={() => promptForOpenAiKey({ onSaved: derive })}
-                            style={warnActionStyle}
-                        >
-                            <FiKey size={12} /> Set API key
-                        </button>
+                        <>
+                            <button
+                                type="button"
+                                onClick={() => promptForOpenAiKey({ onSaved: derive })}
+                                style={warnActionStyle}
+                            >
+                                <FiKey size={12} /> Set API key
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => promptForLocalLlm({ onSaved: derive })}
+                                style={warnActionStyle}
+                            >
+                                <FiCpu size={12} /> Set local LLM
+                            </button>
+                        </>
                     )}
                 </div>
             )}

@@ -17,8 +17,7 @@ import re
 import warnings
 from typing import Dict, Optional, Tuple
 
-import litellm
-
+from gavel_pipeline import llm_client
 from gavel_pipeline.db_access import fetch_categories_dict
 from utils.sqlite_db import execute_query_dict
 
@@ -104,7 +103,7 @@ def categorize_ce_with_llm(ce_name: str, definition: str) -> Dict:
         )
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", "Pydantic serializer warnings", UserWarning)
-            resp = litellm.completion(
+            resp = llm_client.complete(
                 model=CE_GENERATOR_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -219,7 +218,7 @@ def generate_ce(
     try:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", "Pydantic serializer warnings", UserWarning)
-            resp = litellm.completion(
+            resp = llm_client.complete(
                 model=CE_GENERATOR_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,

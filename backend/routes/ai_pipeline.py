@@ -13,11 +13,13 @@ warnings.filterwarnings(
 )
 
 
-def _get_litellm():
-    """Lazy-import litellm. Saves ~3.5s on backend startup since AI pipeline
-    routes are rarely the first ones hit by a user."""
-    import litellm
-    return litellm
+def _get_llm_client():
+    """Lazy-import the unified LLM client (routes to the configured local GPU
+    model, or falls through to litellm). Saves ~3.5s on backend startup since
+    AI pipeline routes are rarely the first ones hit by a user — litellm
+    itself only gets imported inside this if no local model is configured."""
+    from gavel_pipeline import llm_client
+    return llm_client
 
 
 # Lazy accessors for gavel_pipeline modules — these all transitively import
@@ -47,7 +49,7 @@ from utils.embedding_utils import trigger_embedding
 from utils.auth import get_current_user
 from utils.ownership import require_classifier_owner
 from utils.text_safety import clean_text
-from utils import openai_key
+from utils import llm_access, openai_key
 
 router = APIRouter()
 
@@ -136,7 +138,7 @@ def _repair_rule_json(raw_response: str, ces_dict: Dict[str, Dict]):
     }
 
     try:
-        resp = _get_litellm().completion(
+        resp = _get_llm_client().complete(
             model="gpt-4.1",
             messages=[system_msg, user_msg],
             temperature=0,
@@ -264,7 +266,7 @@ def _derive_scenario_name(description: str) -> str:
         ]
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", "Pydantic serializer warnings", UserWarning)
-            resp = _get_litellm().completion(model="gpt-4.1", messages=prompt, temperature=0.2)
+            resp = _get_llm_client().complete(model="gpt-4.1", messages=prompt, temperature=0.2)
         raw = (resp.choices[0].message.content or "").strip().lower()
         name = re.sub(r"[^a-z0-9_]", "", raw.replace(" ", "_")).strip("_")
         if name:
@@ -290,7 +292,7 @@ def _send_ideation_message(session_id: str, user_message: str):
     try:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", "Pydantic serializer warnings", UserWarning)
-            resp = _get_litellm().completion(model="gpt-4.1", messages=session["history"], temperature=0.7)
+            resp = _get_llm_client().complete(model="gpt-4.1", messages=session["history"], temperature=0.7)
         reply = resp.choices[0].message.content
     except Exception as e:
         return {"success": False, "error": f"LLM error: {e}"}
@@ -378,7 +380,7 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
     4. Creates new CEs in database if o3 identifies gaps
     5. Identifies which new CEs need excitation datasets
     """
-    openai_key.require_key()
+    llm_access.require_llm()
     # Initialized BEFORE the try so the rollback handlers below can always
     # reference it — a failure raised before any CE is created must surface
     # its real detail, not an UnboundLocalError from the except block.
@@ -776,7 +778,7 @@ async def embed_resources(req: EmbedResourcesRequest):
             from services.default_datasets import rule_defaults_status
             defaults_state = (rule_defaults_status(req.rule_id) or {}).get("state")
             if defaults_state == "missing":
-                openai_key.require_key()
+                llm_access.require_llm()
 
         embedded_ces = 0
         if req.ce_ids:
@@ -938,7 +940,7 @@ async def send_scenario_message(request: ScenarioChatRequest):
         if not request.session_id:
             raise HTTPException(status_code=400, detail="session_id is required")
 
-        openai_key.require_key()
+        llm_access.require_llm()
 
         result = _send_ideation_message(
             session_id=request.session_id,
@@ -1011,7 +1013,7 @@ class CeGenerateResponse(BaseModel):
 @router.post("/ce-generate", response_model=CeGenerateResponse)
 def generate_ce_single_shot(request: CeGenerateRequest, _: int = Depends(get_current_user)):
     """CE generation with optional clarification flow. See module comment."""
-    openai_key.require_key()
+    llm_access.require_llm()
     try:
         from gavel_pipeline.ce_generator import generate_ce
         ce_data, err = generate_ce(
@@ -1112,7 +1114,7 @@ def generate_ce_training_dataset(request: CETrainingRequest, current_user_id: in
     """
     # Before the CE row is created: without a key every generator call below
     # returns nothing, which used to save a CE with an empty training set.
-    openai_key.require_key()
+    llm_access.require_llm()
     try:
         # Get or create CE in database (taxonomy categories are separate from ACTION/CONTEXT)
         # Filter out empty/garbage entries that can slip through from LLM output
@@ -1457,7 +1459,7 @@ def generate_ce_calibration_data(
 
     ce_name = ce_row[0]["name"]
 
-    openai_key.require_key()
+    llm_access.require_llm()
 
     try:
         conversations = _generate_calibration_conversations(
@@ -1585,7 +1587,7 @@ def _generate_ce_calibration_config(
         current_rule=current_rule_str,
     )
 
-    response = _get_litellm().completion(
+    response = _get_llm_client().complete(
         model="gpt-4.1",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
@@ -1729,7 +1731,7 @@ def build_negative_config(positive_config: dict) -> tuple[dict, str]:
         # Hard negatives are boundary cases, so the reference uses a REASONING
         # model here (gpt-5.2 at temperature=1), not the gpt-4.1 used for the
         # positive config. Matches negative_config_generator.call_llm_for_negative_config.
-        response = _get_litellm().completion(
+        response = _get_llm_client().complete(
             model="gpt-5.2",
             messages=[{"role": "user", "content": prompt}],
             temperature=1,
@@ -1756,7 +1758,7 @@ def build_negative_config(positive_config: dict) -> tuple[dict, str]:
 @router.post("/test-config/generate")
 def generate_test_config(req: TestConfigRequest, user_id: int = Depends(get_current_user)):
     """Generate a test set configuration from a free-text description using LLM."""
-    openai_key.require_key()
+    llm_access.require_llm()
     try:
         config_dict = build_positive_config(req.description)
     except RuntimeError as e:
@@ -1778,7 +1780,7 @@ def generate_negative_config(req: NegativeConfigRequest, _: int = Depends(get_cu
     Asks the LLM to reason through the polar context ("does this misuse
     have a legitimate counterpart?") before emitting the negative
     scenario JSON. Surfaces the reasoning section alongside the config."""
-    openai_key.require_key()
+    llm_access.require_llm()
     try:
         neg_config, reasoning = build_negative_config(req.positive_config)
     except RuntimeError as e:
@@ -1869,7 +1871,7 @@ def _derive_scenario_from_rule(rule_context: dict) -> str:
         cognitive_elements=ce_lines,
     )
     try:
-        response = _get_litellm().completion(
+        response = _get_llm_client().complete(
             model="gpt-4.1",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
@@ -1894,7 +1896,7 @@ def derive_scenario(req: DeriveScenarioRequest, _: int = Depends(get_current_use
     # Fail fast with the REAL cause when the LLM key is absent — litellm would
     # otherwise bury it inside an opaque 500 "Scenario derivation failed: ...".
     # Checked after the rule lookup so a missing rule still 404s first.
-    openai_key.require_key()
+    llm_access.require_llm()
     # A missing key is only ONE way this fails — an invalid key, a rate limit,
     # a provider outage, a timeout, a model that no longer exists all raise
     # here too. Uncaught, FastAPI turns every one of them into a bare 500
@@ -1934,7 +1936,7 @@ def generate_rule_default_sets(
 
     # Before the thread starts: its failure would otherwise only show up
     # minutes later as a default set that never arrives.
-    openai_key.require_key()
+    llm_access.require_llm()
 
     try:
         result = generate_rule_defaults(
@@ -2321,7 +2323,7 @@ def _judge_dialogue(conversation: list, config: dict, judge_model: str) -> tuple
             sufficient_labels_text=_format_labels_for_prompt(config.get("sufficient_labels", {})),
             conversation_json_string=json.dumps(conversation, indent=2),
         )
-        response = _get_litellm().completion(
+        response = _get_llm_client().complete(
             model=judge_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
@@ -2356,7 +2358,7 @@ def _generate_new_personas(
             existing_examples_json=json.dumps(existing_list, indent=2),
             ideas_per_component=ideas_per,
         )
-        response = _get_litellm().completion(
+        response = _get_llm_client().complete(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.8,
@@ -2551,7 +2553,7 @@ Return a JSON object with:
             user_persona, asst_persona, style = _pop_combination()
 
             try:
-                response = _get_litellm().completion(
+                response = _get_llm_client().complete(
                     model=gen_model,
                     messages=[{"role": "user", "content": _build_prompt(user_persona, asst_persona, style)}],
                     temperature=0.9,
@@ -2698,7 +2700,7 @@ def generate_test_set(req: TestGenerateRequest, user_id: int = Depends(get_curre
 
     # Last check before the row exists: a 'generating' dataset whose thread
     # dies on the first LLM call is worse than no dataset at all.
-    openai_key.require_key()
+    llm_access.require_llm()
 
     result = execute_query_dict(
         """INSERT INTO test_datasets

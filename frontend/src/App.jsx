@@ -21,6 +21,7 @@ import { SyncStatusProvider } from './contexts/SyncStatusContext';
 import TaskTray from './components/TaskTray/TaskTray';
 import LibrarySyncStream from './components/LibrarySyncStream/LibrarySyncStream';
 import OpenAiKeyModal from './components/OpenAiKeyModal/OpenAiKeyModal';
+import LocalLlmModal from './components/LocalLlmModal/LocalLlmModal';
 import ComparePolicy from './pages/ComparePolicy';
 import Tutorial from './components/Tutorial/Tutorial';
 import HelpButton from './components/Tutorial/HelpButton';
@@ -112,6 +113,9 @@ function App() {
           {/* One shared "set your OpenAI key" modal for the whole app: any AI
               feature that fails for a missing key opens this one. */}
           <OpenAiKeyModal />
+          {/* Its "run on this machine's GPU instead" counterpart — either
+              modal can satisfy the same backend gate (utils/llm_access.py). */}
+          <LocalLlmModal />
           <Router>
             <TaskTray />
             {/* Tutorial reads navigate() and the open flag, so it has to

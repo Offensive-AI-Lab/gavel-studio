@@ -1,11 +1,11 @@
 import atexit
 import os
 import json
-import litellm
 from datetime import datetime
 import re
 import tiktoken
 import concurrent.futures
+from gavel_pipeline import llm_client
 from gavel_pipeline.db_access import fetch_reference_datasets
 
 # --- Configuration ---
@@ -198,7 +198,7 @@ def load_file(filepath):
 def call_llm(messages, model="gpt-4.1", temperature=0.7):
     """Calls LLM."""
     try:
-        response = litellm.completion(
+        response = llm_client.complete(
             model=model,
             messages=messages,
             temperature=temperature
@@ -210,7 +210,7 @@ def call_llm(messages, model="gpt-4.1", temperature=0.7):
 def call_llm_json(messages, model="gpt-4.1", temperature=0.7):
     """Calls LLM with JSON response format."""
     try:
-        response = litellm.completion(
+        response = llm_client.complete(
             model=model,
             messages=messages,
             temperature=temperature,
@@ -592,7 +592,7 @@ Return JSON list for all seeds:
                 "point of the safety classifier. Refusing here would mean "
                 "the classifier never learns to flag this behavior."
             )
-            response = litellm.completion(
+            response = llm_client.complete(
                 model=SEED_EXPANSION_MODEL,
                 messages=[
                     {"role": "system", "content": framing_system},

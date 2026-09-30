@@ -9,7 +9,7 @@
 // On `is_final` the wizard saves description + name to step.data and
 // the user can advance. Step 2A reads description from this step's data.
 import { useState, useEffect, useRef } from 'react';
-import { FiSend, FiCheckCircle, FiRefreshCw, FiAlertTriangle, FiKey } from 'react-icons/fi';
+import { FiSend, FiCheckCircle, FiRefreshCw, FiAlertTriangle, FiKey, FiCpu } from 'react-icons/fi';
 import { startScenarioChat, sendScenarioChatMessage } from '../../api';
 import InlineHelp from '../../components/InlineHelp/InlineHelp';
 import { automatedPipeline } from '../../components/InlineHelp/instructorHelp';
@@ -18,14 +18,16 @@ import {
     openAiKeyMissingMessage,
     promptForOpenAiKey,
 } from '../../components/OpenAiKeyModal/openAiKeyPrompt';
+import { promptForLocalLlm } from '../../components/LocalLlmModal/localLlmPrompt';
 import useOpenAiKeyStatus from '../../hooks/useOpenAiKeyStatus';
+import useLocalLlmStatus from '../../hooks/useLocalLlmStatus';
 import { errorText } from '../../utils/errorText';
 import {
     getStepState, startStep, completeStep,
     card, primaryBtn, secondaryBtn, fieldStyle, successBanner, errorBanner, muted,
 } from './wizardShared';
 
-const KEY_MISSING_TEXT = 'This step needs an OpenAI key. Add yours to continue.';
+const KEY_MISSING_TEXT = 'This step needs an OpenAI key or a local model. Add one to continue.';
 
 
 export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
@@ -48,8 +50,10 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
     // Asked once on mount: is a key set at all? Nothing opens here — the note
     // below goes up straight away, the modal still waits to be asked for.
     const { configured: keyConfigured, checked: keyChecked } = useOpenAiKeyStatus();
+    const { configured: localConfigured, checked: localChecked } = useLocalLlmStatus();
 
     const askForKey = () => promptForOpenAiKey({ onSaved: () => retryRef.current?.() });
+    const askForLocalLlm = () => promptForLocalLlm({ onSaved: () => retryRef.current?.() });
 
     // Every failure lands here so the banner always holds a STRING — the
     // backend's `detail` is an object for the missing-key error.
@@ -196,11 +200,14 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
         }
     };
 
-    // Two ways we know the key is missing: a call came back with the marker,
-    // or the upfront status check said so before the user did anything. Both
-    // get the same note + button; a finalized step needs no more AI calls, so
-    // it stays quiet. Typing is never blocked either way.
-    const keyMissing = needsKey || (keyChecked && !keyConfigured && !finalized);
+    // Two ways we know access is missing: a call came back with the marker,
+    // or the upfront status check said so before the user did anything —
+    // and that upfront check only fires once BOTH the key and the local
+    // model have reported in, and NEITHER is set. Both get the same note +
+    // two buttons; a finalized step needs no more AI calls, so it stays
+    // quiet. Typing is never blocked either way.
+    const keyMissing = needsKey
+        || (keyChecked && localChecked && !keyConfigured && !localConfigured && !finalized);
     const banner = error || (keyMissing ? KEY_MISSING_TEXT : null);
 
     return (
@@ -272,9 +279,14 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
                 <div style={card}>
                     <div style={errorBanner}><FiAlertTriangle /> {banner}</div>
                     {keyMissing && (
-                        <button onClick={askForKey} style={{ ...primaryBtn, marginTop: 10 }}>
-                            <FiKey /> Set API key
-                        </button>
+                        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                            <button onClick={askForKey} style={primaryBtn}>
+                                <FiKey /> Set API key
+                            </button>
+                            <button onClick={askForLocalLlm} style={secondaryBtn}>
+                                <FiCpu /> Set local LLM
+                            </button>
+                        </div>
                     )}
                 </div>
             )}

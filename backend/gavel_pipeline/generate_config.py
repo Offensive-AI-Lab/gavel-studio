@@ -1,7 +1,8 @@
 # Helpers for LLM-generated synthetic-data configurations. Used by
 # routes/ai_pipeline.py; not a standalone tool.
 import json
-import litellm
+
+from gavel_pipeline import llm_client
 
 
 def load_prompt_template(filepath):
@@ -20,7 +21,7 @@ def call_llm_for_config(prompt, model="gpt-4.1", temperature=0.7):
     """
     try:
         print(f"[*] Calling {model} to generate configuration...")
-        response = litellm.completion(
+        response = llm_client.complete(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=temperature,

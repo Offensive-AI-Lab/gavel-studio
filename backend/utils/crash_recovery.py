@@ -537,6 +537,10 @@ RECOVERY_STRATEGIES: List[RecoveryStrategy] = [
     BundleJobRecovery(),
 ]
 
+# Names of strategies run_early_recovery() has already completed this process;
+# run_all_recovery() skips them (see its docstring for why).
+_ran_early: set = set()
+
 
 # ---------------------------------------------------------------------------
 # Orchestrator
@@ -560,6 +564,7 @@ def run_early_recovery() -> None:
     for strategy in early:
         try:
             strategy.run()
+            _ran_early.add(strategy.name)
         except Exception as e:
             logger.error(f"[Recovery] early {strategy.name} recovery failed: {e}")
     logger.info("[Recovery] Early crash recovery complete")
@@ -569,11 +574,19 @@ def run_all_recovery() -> None:
     """Run every registered recovery strategy. Called once on server startup.
 
     A strategy raising is logged and skipped — the next strategy still runs.
-    The `safe_before_warmup` strategies may already have run via
-    run_early_recovery(); re-running them here is a harmless no-op.
+
+    Strategies that already SUCCEEDED in run_early_recovery() are skipped
+    here, not re-run. Re-running is only a "no-op" if nothing new started in
+    between — but HTTP serving begins immediately while this pass waits for
+    the ~30s model warmup, so anything the operator opened in that window
+    (e.g. an in-progress rule/CE wizard run, or its pending draft CEs) would
+    be wiped as if it were left over from a crash. Only rows that existed at
+    boot are crash leftovers.
     """
     logger.info("[Recovery] Running crash recovery checks...")
     for strategy in RECOVERY_STRATEGIES:
+        if strategy.name in _ran_early:
+            continue
         try:
             strategy.run()
         except Exception as e:
