@@ -150,6 +150,127 @@ def _repair_rule_json(raw_response: str, ces_dict: Dict[str, Dict]):
         return None, f"Repair failed: {e}"
 
 
+def _map_rule_categories(rule_data: dict, categories_list: list) -> list:
+    """Category IDs the model returned -> names (the frontend and the legacy
+    DB column expect names), plus the name of any new category it proposed."""
+    mapped_categories = []
+    if "assigned_categories" in rule_data and isinstance(rule_data["assigned_categories"], list):
+        id_to_name = {c["id"]: c["name"] for c in categories_list}
+        for cat_item in rule_data["assigned_categories"]:
+            # If AI returned ID (int, or str that is digit)
+            if isinstance(cat_item, int) or (isinstance(cat_item, str) and cat_item.isdigit()):
+                cat_id = int(cat_item)
+                if cat_id in id_to_name:
+                    mapped_categories.append(id_to_name[cat_id])
+            # If AI hallucinated and returned a name directly, keep it
+            elif isinstance(cat_item, str):
+                mapped_categories.append(cat_item)
+
+    if "new_category" in rule_data and rule_data["new_category"]:
+        nc = rule_data["new_category"]
+        if isinstance(nc, dict) and "name" in nc:
+            mapped_categories.append(nc["name"])
+    return mapped_categories
+
+
+# How many times a local model may be asked to correct its own rule JSON.
+_RULE_FIX_ATTEMPTS = 3
+
+
+def _rule_fix_feedback(issues: list, rule_data: dict) -> str:
+    """The follow-up message that tells the model exactly what's wrong."""
+    new_ces = rule_data.get("new_ces")
+    defined = sorted(new_ces.keys()) if isinstance(new_ces, dict) else []
+    lines = ["Your JSON failed validation:"] + [f"- {i}" for i in issues]
+    if any("unknown ce" in i.lower() for i in issues):
+        lines.append(
+            "\nEvery CE name used in \"groups\" must be EITHER an existing CE from the "
+            "\"Available Cognitive Elements\" list OR defined as a key in \"new_ces\". "
+            "Fix each unknown name in ONE of these ways:\n"
+            "  (a) add a \"new_ces\" entry whose key is EXACTLY that name, with its "
+            "definition, assigned_categories and examples;\n"
+            "  (b) replace it in \"groups\" with an existing CE name;\n"
+            "  (c) if you already defined a new CE for it under a different key, use "
+            "that exact key in \"groups\"."
+        )
+        lines.append(
+            f"New CEs you defined so far: {', '.join(defined) if defined else '(none)'}."
+        )
+    if any(k in i.lower() for i in issues for k in ("condition", "quantifier", "group")):
+        # Quoting the parser's error wasn't enough: the model repeated a bare
+        # group name with no `all of` / `1 of`. Restate the grammar and give a
+        # ready-made valid condition built from THIS rule's own group names.
+        groups = rule_data.get("groups")
+        names = [g for g in groups if isinstance(g, str)] if isinstance(groups, dict) else []
+        lines.append(
+            "\nThe \"condition\" must use ONLY this grammar: `all of <group>`, `1 of <group>` "
+            "or `<K> of <group>` (K = a number no larger than the group's size), joined by "
+            "`and` / `or` (parentheses allowed). `not` is forbidden. Every group in \"groups\" "
+            "must appear in the condition, and every name in the condition must be a group "
+            "name. A bare group name without `all of` / `1 of` is INVALID."
+        )
+        if names:
+            example = " and ".join(
+                ("all of " if n == 0 else "1 of ") + g for n, g in enumerate(names))
+            lines.append(f"For your groups, a valid condition is: {example}")
+    lines.append("Respond with the COMPLETE corrected JSON object in the same format, and nothing else.")
+    return "\n".join(lines)
+
+
+def _unknown_ce_count(rule_data: dict, ces_dict: dict) -> int:
+    """How many distinct CE names `groups` uses that are neither an existing CE
+    nor defined in `new_ces`."""
+    groups = rule_data.get("groups")
+    if not isinstance(groups, dict):
+        return 0
+    new_ces = rule_data.get("new_ces")
+    known = set(ces_dict) | (set(new_ces) if isinstance(new_ces, dict) else set())
+    used = {m for ms in groups.values() if isinstance(ms, list) for m in ms if isinstance(m, str)}
+    return len(used - known)
+
+
+def _correct_rule_with_feedback(rg, prompt: str, response: str, rule_data: dict,
+                                issues: list, ces_dict: dict):
+    """Ask the model to fix a rule whose JSON failed validation (unknown CE
+    names, bad groups/condition...). Returns (rule_data, response, issues) for
+    the best candidate seen: the original if no retry improved on it.
+
+    A 7B local model reliably slips on cross-references inside one long JSON
+    (a group member named `tech_support` while the CE it defined is called
+    `tech_support_impersonation`), but fixes a specifically-named mistake
+    well. Called only for the local provider — OpenAI's behavior is untouched.
+    """
+    def score(data, found):
+        # validate_rule reports ALL unknown CEs as ONE message, so the issue
+        # count alone can't tell "5 unknown names" from "1" — count them too.
+        return len(found) + _unknown_ce_count(data, ces_dict)
+
+    best = (rule_data, response, issues)
+    best_score = score(rule_data, issues)
+    cur_data, cur_response, cur_issues = rule_data, response, issues
+    for _ in range(_RULE_FIX_ATTEMPTS):
+        if not cur_issues:
+            break
+        fixed_response, err = rg.call_thinking_model([
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": json.dumps(cur_data)},
+            {"role": "user", "content": _rule_fix_feedback(cur_issues, cur_data)},
+        ])
+        if err:
+            break
+        fixed, parse_err = rg.extract_json_from_response(fixed_response)
+        if parse_err:
+            fixed, parse_err = _extract_json_fallback(fixed_response)
+        if parse_err or not isinstance(fixed, dict):
+            continue
+        fixed_issues = rg.validate_rule(fixed, ces_dict)
+        cur_data, cur_response, cur_issues = fixed, fixed_response, fixed_issues
+        fixed_score = score(fixed, fixed_issues)
+        if fixed_score < best_score:
+            best, best_score = (fixed, fixed_response, fixed_issues), fixed_score
+    return best
+
+
 def _generate_rule_from_scenario(scenario_description: str):
     ces_dict = fetch_ces_dict()
     rules_dict = fetch_rules_dict()
@@ -179,34 +300,31 @@ def _generate_rule_from_scenario(scenario_description: str):
     rule_data, parse_err = rg.extract_json_from_response(response)
     if parse_err:
         rule_data, parse_err = _extract_json_fallback(response)
+        if parse_err and _get_llm_client().using_local():
+            # Free first: a local model's usual slip is a missing closing brace,
+            # which needs no model call to fix. Only accept something that
+            # looks like a rule, never an unrelated JSON snippet.
+            lenient = _get_llm_client().extract_json(response)
+            if isinstance(lenient, dict) and ("groups" in lenient or "rule_name" in lenient):
+                rule_data, parse_err = lenient, None
         if parse_err:
             rule_data, parse_err = _repair_rule_json(response, ces_dict)
             if parse_err:
                 return {"success": False, "error": parse_err, "reasoning": response}
 
     # === Post-process categories (ID -> Name) for Frontend/Legacy DB compatibility ===
-    mapped_categories = []
-    if "assigned_categories" in rule_data and isinstance(rule_data["assigned_categories"], list):
-        id_to_name = {c["id"]: c["name"] for c in categories_list}
-        for cat_item in rule_data["assigned_categories"]:
-            # If AI returned ID (int, or str that is digit)
-            if isinstance(cat_item, int) or (isinstance(cat_item, str) and cat_item.isdigit()):
-                cat_id = int(cat_item)
-                if cat_id in id_to_name:
-                    mapped_categories.append(id_to_name[cat_id])
-            # If AI hallucinated and returned a name directly, keep it
-            elif isinstance(cat_item, str):
-                mapped_categories.append(cat_item)
-
-    if "new_category" in rule_data and rule_data["new_category"]:
-        nc = rule_data["new_category"]
-        if isinstance(nc, dict) and "name" in nc:
-            mapped_categories.append(nc["name"])
-    
     # Assign to 'categories' so frontend receives Names as expected
-    rule_data["categories"] = mapped_categories
+    rule_data["categories"] = _map_rule_categories(rule_data, categories_list)
 
     validation_issues = rg.validate_rule(rule_data, ces_dict)
+
+    if validation_issues and _get_llm_client().using_local():
+        corrected, response, validation_issues = _correct_rule_with_feedback(
+            rg, prompt, response, rule_data, validation_issues, ces_dict)
+        if corrected is not rule_data:
+            rule_data = corrected
+            # Categories were mapped (ID -> name) on the ORIGINAL; redo for the fix.
+            rule_data["categories"] = _map_rule_categories(rule_data, categories_list)
 
     return {
         "success": True,
@@ -1684,6 +1802,66 @@ def build_positive_config(description: str) -> dict:
     return config_dict
 
 
+# How many times a local model may be asked to redo its negative-set config.
+_NEG_CONFIG_FIX_ATTEMPTS = 3
+
+
+def _split_negative_config(raw: str):
+    """(reasoning, json_text) from the "REASONING, then a ```json fence" reply;
+    the whole body is treated as the JSON if there is no fence."""
+    m = re.search(r"```json\s*(.*?)```", raw, re.DOTALL)
+    if m:
+        return raw[: m.start()].strip(), m.group(1).strip()
+    return "", raw
+
+
+def _neg_config_feedback(error, raw: str) -> str:
+    from gavel_pipeline.llm_client import describe_json_error
+    if isinstance(error, json.JSONDecodeError):
+        error = describe_json_error(_split_negative_config(raw)[1], error)
+    placeholder = "..." in raw or "remaining fields" in raw.lower()
+    note = (
+        "It contains a placeholder (`...` or \"the remaining fields follow…\") instead of the "
+        "real fields — write every one of them out in full. "
+        if placeholder else ""
+    )
+    return (
+        f"Your JSON configuration could not be parsed ({error}). {note}"
+        "Copy your previous configuration and change ONLY what is wrong. Reply with the "
+        "COMPLETE configuration inside a ```json fence: every field filled in with real "
+        "content, valid JSON only — no `...`, no comments, no text after the fence."
+    )
+
+
+def _correct_negative_config(prompt: str, raw: str, error):
+    """Local model only. The negative-set config is a long structured answer,
+    and a weaker model sometimes abbreviates it ("... the remaining fields
+    follow the same structure") or slips on the JSON; tell it exactly what was
+    wrong and ask for the complete version. Raises json.JSONDecodeError if every
+    attempt still fails, so the caller reports it exactly as it always did."""
+    client = _get_llm_client()
+    last = error
+    for _ in range(_NEG_CONFIG_FIX_ATTEMPTS):
+        fixed = client.complete(
+            model="gpt-5.2",
+            messages=[
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": raw},
+                {"role": "user", "content": _neg_config_feedback(last, raw)},
+            ],
+            temperature=0.5,
+        ).choices[0].message.content or ""
+        reasoning, json_text = _split_negative_config(fixed)
+        try:
+            return json.loads(json_text), reasoning
+        except json.JSONDecodeError as e:
+            last, raw = e, fixed
+            obj = client.extract_json(fixed)      # tolerant: closes a missing brace
+            if obj is not None:
+                return obj, reasoning
+    raise last
+
+
 def build_negative_config(positive_config: dict) -> tuple[dict, str]:
     """Generate a hard-negative config from a positive config (reference
     parity — the "polar context" reasoning prompt). Returns
@@ -1741,13 +1919,16 @@ def build_negative_config(positive_config: dict) -> tuple[dict, str]:
         # the reference prompt asks for two sections: REASONING then
         # JSON CONFIGURATION (in a ```json fence). Pull both out; fall
         # back to whole-body parse if the fence is missing.
-        reasoning = ""
-        json_text = raw
-        m = re.search(r"```json\s*(.*?)```", raw, re.DOTALL)
-        if m:
-            json_text = m.group(1).strip()
-            reasoning = raw[: m.start()].strip()
-        neg_config = json.loads(json_text)
+        reasoning, json_text = _split_negative_config(raw)
+        try:
+            neg_config = json.loads(json_text)
+        except json.JSONDecodeError as first_error:
+            if not _get_llm_client().using_local():
+                raise
+            # Free first: a missing closing brace needs no model call.
+            neg_config = _get_llm_client().extract_json(json_text)
+            if neg_config is None:
+                neg_config, reasoning = _correct_negative_config(prompt, raw, first_error)
         return neg_config, reasoning
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Negative config LLM output was not valid JSON: {e}")

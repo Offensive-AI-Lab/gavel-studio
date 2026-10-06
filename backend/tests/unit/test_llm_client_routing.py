@@ -3,6 +3,7 @@
 Does not exercise real model loading or generation — that needs a real model
 on a GPU, covered by manual smoke testing, not this suite.
 """
+import json
 import threading
 
 import pytest
@@ -73,6 +74,100 @@ class TestUseLocal:
 
 
 # ---------------------------------------------------------------------------
+# System-prompt placement — Mistral-style templates glue it to the LAST user turn
+# ---------------------------------------------------------------------------
+
+class _FakeTokenizer:
+    """Renders messages the way a given template family would, as text."""
+    def __init__(self, style, name="fake/model"):
+        self.style, self.name_or_path, self.chat_template = style, name, "x"
+
+    def apply_chat_template(self, msgs, tokenize=False, add_generation_prompt=True):
+        if self.style == "raises":
+            raise ValueError("template does not support the system role")
+        system = next((m["content"] for m in msgs if m["role"] == "system"), None)
+        rest = [m for m in msgs if m["role"] != "system"]
+        out = []
+        for i, m in enumerate(rest):
+            last_user = m["role"] == "user" and i == len(rest) - 1
+            if self.style == "mistral" and last_user and system:
+                out.append(f"[INST] {system}\n\n{m['content']} [/INST]")  # system next to NEWEST user text
+            elif m["role"] == "user":
+                out.append(f"[INST] {m['content']} [/INST]")
+            else:
+                out.append(m["content"])
+        head = f"<<SYS>>{system}<</SYS>>" if (self.style == "native" and system) else ""
+        return head + "".join(out)
+
+
+class TestTemplateKeepsSystemFirst:
+    def test_native_system_at_the_top(self):
+        assert llm_client._template_keeps_system_first(_FakeTokenizer("native", "a")) is True
+
+    def test_mistral_style_glues_system_to_the_last_user_turn(self):
+        assert llm_client._template_keeps_system_first(_FakeTokenizer("mistral", "b")) is False
+
+    def test_a_template_that_drops_the_system_role_counts_as_not_keeping_it(self):
+        assert llm_client._template_keeps_system_first(_FakeTokenizer("drops", "c")) is False
+
+    def test_a_template_that_raises_counts_as_not_keeping_it(self):
+        assert llm_client._template_keeps_system_first(_FakeTokenizer("raises", "d")) is False
+
+
+class TestFoldSystem:
+    def test_folds_into_the_first_user_turn(self):
+        msgs = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+        ]
+        assert llm_client._normalize_messages(msgs, fold_system=True) == [
+            {"role": "user", "content": "SYS\n\nu1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+        ]
+
+    def test_default_leaves_the_system_message_alone(self):
+        msgs = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "u1"}]
+        assert llm_client._normalize_messages(msgs) == msgs
+
+    def test_a_lone_system_message_becomes_a_user_turn(self):
+        assert llm_client._normalize_messages([{"role": "system", "content": "SYS"}], fold_system=True) == [
+            {"role": "user", "content": "SYS"},
+        ]
+
+    def test_no_system_message_is_a_noop(self):
+        msgs = [{"role": "user", "content": "u1"}]
+        assert llm_client._normalize_messages(msgs, fold_system=True) == msgs
+
+
+class TestBuildPromptKeepsTheInstructionsAtTheStart:
+    """The reported bug: on a Mistral-style template every scenario-chat turn
+    re-greeted, because the system prompt ('...greet the user!') was rendered
+    right next to the user's newest message."""
+
+    HISTORY = [
+        {"role": "system", "content": "SYS: ... Now, greet the user!"},
+        {"role": "assistant", "content": "scripted greeting"},
+        {"role": "user", "content": "my scenario"},
+        {"role": "assistant", "content": "a clarifying question"},
+        {"role": "user", "content": "my answer"},
+    ]
+
+    def test_mistral_style_puts_the_system_prompt_before_the_conversation(self):
+        text = llm_client._build_prompt(_FakeTokenizer("mistral", "m1"), self.HISTORY, want_json=False)
+        assert text.index("greet the user") < text.index("my scenario")
+        # ...and NOT next to the newest message
+        assert "greet the user!\n\nmy answer" not in text
+        assert text.rstrip().endswith("my answer [/INST]")
+
+    def test_native_templates_still_get_a_real_system_message(self):
+        text = llm_client._build_prompt(_FakeTokenizer("native", "n1"), self.HISTORY, want_json=False)
+        assert text.startswith("<<SYS>>SYS: ... Now, greet the user!<</SYS>>")
+
+
+# ---------------------------------------------------------------------------
 # JSON mode on a local model — extraction + regenerate-until-valid
 # ---------------------------------------------------------------------------
 
@@ -104,9 +199,11 @@ class TestExtractJsonObject:
 class TestGenerateValidJson:
     def _gen(self, outputs):
         calls = []
+        feedbacks = self.feedbacks = []
 
-        def generate(temp):
+        def generate(temp, feedback=None):
             calls.append(temp)
+            feedbacks.append(feedback)
             return outputs[min(len(calls), len(outputs)) - 1]
         return generate, calls
 
@@ -128,6 +225,197 @@ class TestGenerateValidJson:
         gen, calls = self._gen(["not json at all"])
         assert llm_client._generate_valid_json(gen, 0.7) == "not json at all"
         assert len(calls) == llm_client._JSON_ATTEMPTS
+
+
+class TestCloseUnbalancedJson:
+    """A local model's most common JSON slip is forgetting a closing brace."""
+
+    @pytest.mark.parametrize("broken,expected", [
+        ('{"a": {"b": [1, 2]}', {"a": {"b": [1, 2]}}),           # missing final }
+        ('{"a": [1, {"b": 2}', {"a": [1, {"b": 2}]}),            # missing ] and }
+        ('{"a": "hello', {"a": "hello"}),                        # cut mid-string
+        ('{"a": [1, 2,', {"a": [1, 2]}),                         # dangling comma
+        ('{"a": 1, "b":', {"a": 1, "b": None}),                  # dangling colon
+        ('{"a": "he said \\"hi\\" and', {"a": 'he said "hi" and'}),  # escaped quote
+    ])
+    def test_repairs_truncation(self, broken, expected):
+        assert json.loads(llm_client._close_unbalanced_json(broken)) == expected
+
+    @pytest.mark.parametrize("not_a_truncation", [
+        '{"a": 1}',                 # already balanced: nothing to close
+        '{"a": [1}',                # mismatched closer: not a simple truncation
+        '{"a": 1 "b": 2}',          # error in the MIDDLE: out of scope
+        "no json at all",
+    ])
+    def test_leaves_everything_else_alone(self, not_a_truncation):
+        assert llm_client._close_unbalanced_json(not_a_truncation) is None
+
+    def test_extraction_uses_it_for_a_fenced_answer_missing_its_last_brace(self):
+        text = 'Here you go:\n```json\n{"rule_name": "r", "groups": {"g": ["a"]}\n```'
+        assert llm_client._extract_json_object(text) == {"rule_name": "r", "groups": {"g": ["a"]}}
+
+    def test_extraction_still_never_returns_a_nested_fragment(self):
+        # outer object is broken in the middle (not repairable) -> None, not the inner dict
+        assert llm_client._extract_json_object('{"x": {"y": 1} "z": 2}') is None
+
+
+class TestJsonErrorHint:
+    def test_names_the_parse_problem_and_position(self):
+        assert "line 1" in llm_client._json_error_hint('{"a": 1 "b": 2}')
+
+    def test_no_object(self):
+        assert llm_client._json_error_hint("sorry") == "no JSON object found"
+
+
+class TestDescribeJsonError:
+    """The correction retry used to quote only 'Invalid control character at:
+    line 22 column 121'; the model could not locate that in a 5,000-character
+    answer and returned the SAME text twice. Locating + explaining it is the fix."""
+
+    # The real pass-6 slip: a string closed with  '}  instead of  "}
+    BAD = ('{\n  "a": "fine",\n  "b": "Example benign response 2: '
+           "'I see the updates tab. Which updates should I focus on?'}\n  ,\"c\": 1\n}")
+
+    def _err(self, blob):
+        with pytest.raises(json.JSONDecodeError) as e:
+            json.loads(blob)
+        return e.value
+
+    def test_quotes_the_offending_line_and_names_the_usual_cause(self):
+        text = llm_client.describe_json_error(self.BAD, self._err(self.BAD))
+        assert "line 3" in text
+        assert "focus on?'}" in text                    # shows WHERE
+        assert "not closed with a double quote" in text  # says WHY
+        assert " at at " not in text
+
+    @pytest.mark.parametrize("blob,expected", [
+        ('{"a": 1,}', "trailing comma"),
+        ('{"a": 1 "b": 2}', "comma is missing"),
+        ('{"a": }', "value is missing"),
+    ])
+    def test_other_common_slips_get_a_plain_hint(self, blob, expected):
+        assert expected in llm_client.describe_json_error(blob, self._err(blob))
+
+    def test_works_for_errors_without_a_position(self):
+        assert llm_client.describe_json_error("x", ValueError("boom")) == "boom"
+
+    def test_regeneration_feedback_now_carries_the_location(self):
+        hint = llm_client._json_error_hint(self.BAD)
+        assert "line 3" in hint and "double quote" in hint
+
+
+
+
+class TestRawControlCharsInsideStrings:
+    """Reported from the UI: CE calibration died with
+    `Invalid control character at: line 2 column 298` — the model wrote a
+    multi-sentence string value across lines (a raw newline inside the string),
+    failed all 3 regeneration attempts the same way, and the raw text reached
+    the caller's strict json.loads."""
+
+    RAW = '{\n  "scenario_instructions": "First sentence.\nSecond sentence.\tTabbed.",\n  "n": 2\n}'
+
+    def test_strict_json_really_does_reject_it(self):
+        with pytest.raises(json.JSONDecodeError, match="control character"):
+            json.loads(self.RAW)
+
+    def test_extraction_accepts_it_and_keeps_the_text(self):
+        obj = llm_client._extract_json_object(self.RAW)
+        assert obj == {"scenario_instructions": "First sentence.\nSecond sentence.\tTabbed.", "n": 2}
+
+    def test_the_output_the_caller_gets_is_strictly_valid_json(self):
+        out = llm_client._generate_valid_json(lambda temp, feedback=None: self.RAW, 0.7)
+        assert json.loads(out)["n"] == 2                    # the caller's json.loads works
+        assert "\n" in json.loads(out)["scenario_instructions"]   # text preserved, now escaped
+
+    def test_no_model_regeneration_is_spent_on_it(self):
+        calls = []
+
+        def generate(temp, feedback=None):
+            calls.append(feedback)
+            return self.RAW
+
+        llm_client._generate_valid_json(generate, 0.7)
+        assert calls == [None]                              # one generation, no retry
+
+    def test_a_fenced_answer_with_a_raw_newline_is_accepted_too(self):
+        assert llm_client._extract_json_object("```json\n" + self.RAW + "\n```")["n"] == 2
+
+    def test_an_unclosed_string_is_still_rejected_not_swallowed(self):
+        # strict=False must not turn a broken quote into a "valid" object
+        unclosed = '{"a": "he said \'x\'}\n  ,"b": 1}'
+        assert llm_client._extract_json_object(unclosed) is None
+
+    def test_the_retry_hint_names_the_real_problem_not_the_tolerated_one(self):
+        both = '{"a": "line one\nline two", "b": 1 "c": 2}'     # raw newline AND a missing comma
+        hint = llm_client._json_error_hint(both)
+        # the REAL remaining problem comes first; the tolerated line break is only a footnote
+        assert "delimiter" in hint
+        assert hint.index("delimiter") < hint.index("control character")
+
+    def test_an_unclosed_string_still_gets_its_located_clue(self):
+        # the pass-6 slip: closed with  '}  instead of  "}  -> the strict error (earlier
+        # than where the lenient parse gives up) must still reach the model
+        bad = ('{\n  "a": "fine",\n  "b": "Example 2: \'Which updates should I focus on?\'}\n'
+               '  ,"c": 1\n}')
+        hint = llm_client._json_error_hint(bad)
+        assert "line 3" in hint and "not closed with a double quote" in hint
+
+
+class TestRetryTemperatures:
+    """Reported: all regeneration attempts failed the same way and the raw text
+    reached the caller's json.loads (a 500). The last try is now greedy."""
+
+    def test_four_attempts_and_the_last_one_is_greedy(self):
+        temps = []
+
+        def generate(temp, feedback=None):
+            temps.append(temp)
+            return "never valid"
+
+        llm_client._generate_valid_json(generate, 0.7)
+        assert llm_client._JSON_ATTEMPTS == 4
+        assert temps == [0.7, 0.3, 0.3, 0.0]
+
+    def test_a_greedy_final_attempt_can_still_rescue_it(self):
+        def generate(temp, feedback=None):
+            return '{"ok": true}' if temp == 0.0 else "no json here at all"
+
+        assert llm_client._generate_valid_json(generate, 0.7) == '{"ok": true}'
+
+    def test_already_cool_temperatures_are_never_raised(self):
+        temps = []
+
+        def generate(temp, feedback=None):
+            temps.append(temp)
+            return "never valid"
+
+        llm_client._generate_valid_json(generate, 0.1)
+        assert temps == [0.1, 0.1, 0.1, 0.0]
+
+
+class TestRegenerationShowsTheModelItsMistake:
+    def test_the_retry_receives_the_bad_output_and_the_parse_error(self):
+        seen = []
+
+        def generate(temp, feedback=None):
+            seen.append(feedback)
+            return '{"a": 1 "b": 2}' if feedback is None else '{"a": 1, "b": 2}'
+
+        assert llm_client._generate_valid_json(generate, 0.7) == '{"a": 1, "b": 2}'
+        assert seen[0] is None
+        bad, hint = seen[1]
+        assert bad == '{"a": 1 "b": 2}' and "Expecting" in hint
+
+    def test_a_repairable_answer_needs_no_second_model_call(self):
+        calls = []
+
+        def generate(temp, feedback=None):
+            calls.append(feedback)
+            return '{"a": {"b": 1}'          # missing the final brace
+
+        assert json.loads(llm_client._generate_valid_json(generate, 0.7)) == {"a": {"b": 1}}
+        assert len(calls) == 1
 
 
 # ---------------------------------------------------------------------------
