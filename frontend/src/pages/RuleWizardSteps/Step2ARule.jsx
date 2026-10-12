@@ -1,9 +1,11 @@
 // Step 2A — Rule Generation.
 //
 // Reads scenario.description from step 1's data, calls
-// /ai/generate-pipeline (gpt-5.2 thinking model), shows the rule +
-// new CEs the model proposed. Accepting links rule_id
-// onto the pipeline_run row so downstream steps can find them.
+// /ai/generate-pipeline (gpt-5.2 thinking model), shows the rule(s) +
+// new CEs the model proposed (one rule in almost every case; several only when
+// the scenario holds separate misuses). Accepting links rule_id (the first
+// rule's) onto the pipeline_run row so downstream steps can find them; every
+// rule's id is kept in the step data as rule_ids.
 import { useState, useMemo } from 'react';
 import { FiCpu, FiCheckCircle, FiAlertTriangle, FiPlay, FiKey } from 'react-icons/fi';
 import { generateGavelPipeline, updatePipelineLinks, discardPipelineResources } from '../../api';
@@ -29,6 +31,18 @@ function readUser() {
     } catch {
         return null;
     }
+}
+
+
+// Every rule of a proposal. An older single-rule response has no `rules` list.
+export function proposalRules(proposal) {
+    if (!proposal) return [];
+    if (Array.isArray(proposal.rules) && proposal.rules.length) return proposal.rules;
+    return [{
+        rule_id: proposal.rule_id, name: proposal.name, description: proposal.description,
+        groups: proposal.groups, condition: proposal.condition, predicate: proposal.predicate,
+        categories: proposal.categories,
+    }];
 }
 
 
@@ -59,6 +73,8 @@ export default function Step2ARule({ run, classifierId, onPatchStep, setRun, onA
             setError(err?.message || 'Could not start the build.');
         }
     };
+
+    const rules = useMemo(() => proposalRules(proposal), [proposal]);
 
     const canGenerate = useMemo(
         () => Boolean(step1.description?.trim()),
@@ -100,6 +116,7 @@ export default function Step2ARule({ run, classifierId, onPatchStep, setRun, onA
             await completeStep(onPatchStep, '2A', {
                 proposal: r,
                 rule_id: r.rule_id,
+                rule_ids: proposalRules(r).map(x => x.rule_id).filter(Boolean),
                 ce_ids: (r.new_ces || []).map(ce => ce.ce_id),
                 new_ces: r.new_ces || [],
             });
@@ -122,6 +139,7 @@ export default function Step2ARule({ run, classifierId, onPatchStep, setRun, onA
             await discardPipelineResources(
                 (proposal.new_ces || []).map(ce => ce.ce_id),
                 proposal.rule_id || null,
+                proposalRules(proposal).map(x => x.rule_id).filter(Boolean),
             );
         } catch {}
         setProposal(null);
@@ -181,52 +199,20 @@ export default function Step2ARule({ run, classifierId, onPatchStep, setRun, onA
                 <>
                     <div style={card}>
                         <div style={successBanner}>
-                            <FiCheckCircle /> Rule proposal generated. Review it below, then <strong>Approve &amp; Build</strong> — the CE training, calibration and test sets all generate automatically in the background (watch the task tray, top-right).
+                            <FiCheckCircle />{' '}
+                            {rules.length > 1
+                                ? <>{rules.length} rules proposed — your scenario describes separate misuses, so each gets its own rule. Review them below, then <strong>Approve &amp; Build</strong> — the CE training, calibration and test sets for every rule all generate automatically in the background (watch the task tray, top-right).</>
+                                : <>Rule proposal generated. Review it below, then <strong>Approve &amp; Build</strong> — the CE training, calibration and test sets all generate automatically in the background (watch the task tray, top-right).</>}
                         </div>
                     </div>
 
-                    <div style={card}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                            <h3 style={{ margin: 0 }}>{proposal.name}</h3>
-                            {proposal.categories?.length > 0 && (
-                                <div style={{ display: 'flex', gap: 6 }}>
-                                    {proposal.categories.map(c => (
-                                        <span key={c} style={categoryPill}>{c}</span>
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-                        {proposal.description && (
-                            <>
-                                <div style={{ marginTop: 10, ...muted, fontSize: 12 }}>What this rule detects</div>
-                                <div style={{ marginTop: 4, fontSize: 13, color: '#f1f5f9', lineHeight: 1.55 }}>
-                                    {proposal.description}
-                                </div>
-                            </>
-                        )}
-
-                        {(proposal.groups && Object.keys(proposal.groups).length > 0) ? (
-                            <>
-                                <div style={{ marginTop: 12, ...muted, fontSize: 12 }}>CE Groups</div>
-                                <div style={{ display: 'grid', gap: 6 }}>
-                                    {Object.entries(proposal.groups).map(([gname, members]) => (
-                                        <div key={gname}>
-                                            <strong style={{ fontFamily: 'monospace' }}>{gname}:</strong>{' '}
-                                            {(members || []).join(', ')}
-                                        </div>
-                                    ))}
-                                </div>
-                                <div style={{ marginTop: 10, ...muted, fontSize: 12 }}>Firing condition</div>
-                                <pre style={preStyle}>{proposal.condition || proposal.predicate}</pre>
-                            </>
-                        ) : (
-                            <>
-                                {/* Fallback for older responses without groups */}
-                                <div style={{ marginTop: 10, ...muted, fontSize: 12 }}>Predicate</div>
-                                <pre style={preStyle}>{proposal.predicate}</pre>
-                            </>
-                        )}
-                    </div>
+                    {rules.map((rule, idx) => (
+                        <RuleProposalCard
+                            key={rule.rule_id || rule.name || idx}
+                            rule={rule}
+                            label={rules.length > 1 ? `Rule ${idx + 1} of ${rules.length}` : null}
+                        />
+                    ))}
 
                     {(proposal.new_ces || []).length > 0 && (
                         <div style={card}>
@@ -251,6 +237,55 @@ export default function Step2ARule({ run, classifierId, onPatchStep, setRun, onA
                             {approving ? <><FiCpu /> Starting…</> : <><FiCheckCircle /> Approve &amp; Build</>}
                         </button>
                     </div>
+                </>
+            )}
+        </div>
+    );
+}
+
+// One rule of the proposal: name, description, CE groups and firing condition.
+function RuleProposalCard({ rule, label }) {
+    return (
+        <div style={card}>
+            {label && <div style={{ ...muted, fontSize: 12, marginBottom: 4 }}>{label}</div>}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <h3 style={{ margin: 0 }}>{rule.name}</h3>
+                {rule.categories?.length > 0 && (
+                    <div style={{ display: 'flex', gap: 6 }}>
+                        {rule.categories.map(c => (
+                            <span key={c} style={categoryPill}>{c}</span>
+                        ))}
+                    </div>
+                )}
+            </div>
+            {rule.description && (
+                <>
+                    <div style={{ marginTop: 10, ...muted, fontSize: 12 }}>What this rule detects</div>
+                    <div style={{ marginTop: 4, fontSize: 13, color: '#f1f5f9', lineHeight: 1.55 }}>
+                        {rule.description}
+                    </div>
+                </>
+            )}
+
+            {(rule.groups && Object.keys(rule.groups).length > 0) ? (
+                <>
+                    <div style={{ marginTop: 12, ...muted, fontSize: 12 }}>CE Groups</div>
+                    <div style={{ display: 'grid', gap: 6 }}>
+                        {Object.entries(rule.groups).map(([gname, members]) => (
+                            <div key={gname}>
+                                <strong style={{ fontFamily: 'monospace' }}>{gname}:</strong>{' '}
+                                {(members || []).join(', ')}
+                            </div>
+                        ))}
+                    </div>
+                    <div style={{ marginTop: 10, ...muted, fontSize: 12 }}>Firing condition</div>
+                    <pre style={preStyle}>{rule.condition || rule.predicate}</pre>
+                </>
+            ) : (
+                <>
+                    {/* Fallback for older responses without groups */}
+                    <div style={{ marginTop: 10, ...muted, fontSize: 12 }}>Predicate</div>
+                    <pre style={preStyle}>{rule.predicate}</pre>
                 </>
             )}
         </div>

@@ -406,7 +406,8 @@ describe('Step2ARule — discard flow', () => {
         fireEvent.click(screen.getByText(/Discard \+ Re-generate/i));
 
         await waitFor(() =>
-            expect(discardPipelineResources).toHaveBeenCalledWith([1, 2], 55),
+            // third argument: every rule id of the proposal (one here)
+            expect(discardPipelineResources).toHaveBeenCalledWith([1, 2], 55, [55]),
         );
         await waitFor(() =>
             expect(onPatchStep).toHaveBeenCalledWith('2A', {
@@ -446,7 +447,7 @@ describe('Step2ARule — discard flow', () => {
         renderStep({ run });
         fireEvent.click(screen.getByText(/Discard \+ Re-generate/i));
         await waitFor(() =>
-            expect(discardPipelineResources).toHaveBeenCalledWith([], null),
+            expect(discardPipelineResources).toHaveBeenCalledWith([], null, []),
         );
     });
 });

@@ -36,8 +36,10 @@ export default function RuleGenerationModal({ open, onClose }) {
         const stepData = run?.steps?.['2A']?.data || {};
         const ruleId = run?.rule_id || stepData.rule_id || null;
         const ceIds = stepData.ce_ids || (stepData.new_ces || []).map(c => c.ce_id);
-        if (ruleId || (ceIds && ceIds.length)) {
-            discardPipelineResources(ceIds || [], ruleId).catch(() => {});
+        // A proposal can hold several rules; the run row only links the first.
+        const ruleIds = stepData.rule_ids || [];
+        if (ruleId || ruleIds.length || (ceIds && ceIds.length)) {
+            discardPipelineResources(ceIds || [], ruleId, ruleIds).catch(() => {});
         }
         if (run?.run_id) abandonPipelineRun(run.run_id).catch(() => {});
     };

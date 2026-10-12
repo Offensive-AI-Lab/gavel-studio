@@ -23,8 +23,31 @@ function ceCategories(ce) {
     return cats;
 }
 
+// The rules a build covers. A proposal holds one rule (the original shape) or
+// several; each rule is built with only the new CEs it uses and, when there are
+// several, its own scenario (a single rule keeps the user's scenario).
+function rulesToBuild({ stepData, ruleId, newCes, ceIds, scenario, ruleName }) {
+    const proposed = stepData.proposal?.rules;
+    if (Array.isArray(proposed) && proposed.length > 1) {
+        // A new CE that no rule ended up using is still finalized (as a single-
+        // rule build always did) — with the first rule — so it never stays hidden.
+        const used = new Set(proposed.flatMap(r => r.new_ce_names || []));
+        const unused = newCes.filter(ce => !used.has(ce.ce_name)).map(ce => ce.ce_id);
+        return proposed.map((r, i) => ({
+            ruleId: r.rule_id,
+            name: r.name || 'rule',
+            scenario: r.scenario || scenario,
+            ceIds: [
+                ...newCes.filter(ce => (r.new_ce_names || []).includes(ce.ce_name)).map(ce => ce.ce_id),
+                ...(i === 0 ? unused : []),
+            ],
+        }));
+    }
+    return [{ ruleId, name: ruleName, scenario, ceIds }];
+}
+
 // Rule pipeline (A): CE training -> CE calibration -> test/calibration set +
-// embed/flip is_ready -> complete the run. Returns true if a job was started.
+// embed/flip is_ready (per rule) -> complete the run. Returns true if a job was started.
 export function buildRuleInBackground(tray, { run, userId }) {
     const stepData = run?.steps?.['2A']?.data || {};
     const ruleId = run?.rule_id || stepData.rule_id;
@@ -34,14 +57,18 @@ export function buildRuleInBackground(tray, { run, userId }) {
     const ruleName = stepData.proposal?.name || 'rule';
     if (!ruleId) return false;
 
+    const rules = rulesToBuild({ stepData, ruleId, newCes, ceIds, scenario, ruleName });
+    const many = rules.length > 1;
     const total = newCes.length;
     runInTray(tray, {
         kind: 'rule',
-        title: `Building “${ruleName}”`,
+        title: many ? `Building “${rules[0].name}” +${rules.length - 1} more` : `Building “${ruleName}”`,
         runningSubtitle: 'Starting…',
         // "Drafts" is not a place in this app — drafts live in Your Library →
         // Rules, tagged with a Draft badge. Name the real destination.
-        successSubtitle: 'Rule ready. Find it in Your Library → Rules.',
+        successSubtitle: many
+            ? 'Rules ready. Find them in Your Library → Rules.'
+            : 'Rule ready. Find it in Your Library → Rules.',
         job: async (update) => {
             for (let i = 0; i < newCes.length; i += 1) {
                 const ce = newCes[i];
@@ -63,27 +90,45 @@ export function buildRuleInBackground(tray, { run, userId }) {
             // background; the backend flips the rule + its CEs to is_ready only
             // when that set is done (so the rule never shows half-built). Wait
             // for it here so the tray "ready" matches when the rule appears.
-            update({ subtitle: 'Generating the rule’s test & calibration set…' });
-            await embedResources({ ruleId, ceIds, userId, classifierId: null, scenario });
-            let setFailure = null;
-            for (let i = 0; i < 900; i += 1) { // ~30 min ceiling
-                let data;
-                try { data = (await getRuleDefaultsStatus(ruleId)).data; }
-                catch { break; } // status unavailable → don't hang the tray
-                if (data?.state === 'ready') break;
-                if (data?.state === 'error') {
-                    // Per-bucket failure reason reported by the status endpoint.
-                    // The backend reveals the failed rule, so it IS in Drafts.
-                    setFailure = data?.error || 'Generation failed for one or more sets.';
-                    break;
+            // Several rules are built one after the other (one model, one GPU).
+            const failures = [];
+            for (let r = 0; r < rules.length; r += 1) {
+                const rule = rules[r];
+                update({
+                    subtitle: many
+                        ? `Generating test & calibration set for rule ${r + 1}/${rules.length}…`
+                        : 'Generating the rule’s test & calibration set…',
+                });
+                await embedResources({
+                    ruleId: rule.ruleId, ceIds: rule.ceIds, userId, classifierId: null, scenario: rule.scenario,
+                });
+                for (let i = 0; i < 900; i += 1) { // ~30 min ceiling per rule
+                    let data;
+                    try { data = (await getRuleDefaultsStatus(rule.ruleId)).data; }
+                    catch { break; } // status unavailable → don't hang the tray
+                    if (data?.state === 'ready') break;
+                    if (data?.state === 'error') {
+                        // Per-bucket failure reason reported by the status endpoint.
+                        // The backend reveals the failed rule, so it IS in Drafts.
+                        failures.push({
+                            name: rule.name,
+                            reason: data?.error || 'Generation failed for one or more sets.',
+                        });
+                        break;
+                    }
+                    await sleep(2000);
                 }
-                await sleep(2000);
             }
             update({ subtitle: 'Finalizing…' });
             try { await completePipelineRun(run.run_id); } catch { /* best-effort */ }
-            if (setFailure) {
+            if (failures.length) {
+                if (!many) {
+                    throw new Error(
+                        `Test & calibration set failed: ${failures[0].reason} The rule was still saved to Your Library → Rules; open it and use Edit to rebuild it with fresh sets.`,
+                    );
+                }
                 throw new Error(
-                    `Test & calibration set failed: ${setFailure} The rule was still saved to Your Library → Rules; open it and use Edit to rebuild it with fresh sets.`,
+                    `Test & calibration set failed for ${failures.map(f => `“${f.name}” (${f.reason})`).join('; ')}. The rules were still saved to Your Library → Rules; open them and use Edit to rebuild their sets.`,
                 );
             }
         },
