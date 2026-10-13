@@ -1126,12 +1126,12 @@ describe('RulesManager — export & test-set entry points', () => {
         await screen.findByText('Rule Alpha');
         fireEvent.click(screen.getByRole('button', { name: "Edit this rule's groups and condition in place" }));
         // Modal shows the group editor prefilled with the rule's condition.
-        const conditionInput = await screen.findByLabelText('Firing condition');
-        expect(conditionInput).toHaveValue('all of required');
-        // The condition is generated now — choose "any 1" instead of typing.
-        expect(conditionInput).toHaveAttribute('readonly');
-        fireEvent.change(screen.getByLabelText('How much of required must match'),
-            { target: { value: '1' } });
+        const conditionText = await screen.findByLabelText('Condition text');
+        expect(conditionText).toHaveTextContent('all of required');
+        // The condition is built from pieces — swap "all of" for "1 of".
+        fireEvent.click(screen.getByRole('button', { name: 'Remove piece 1 ("all of required")' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Add "1 of required"' }));
+        expect(conditionText).toHaveTextContent('1 of required');
         fireEvent.click(screen.getByRole('button', { name: /Save logic/ }));
         await waitFor(() => expect(api.saveEditedRule).toHaveBeenCalledTimes(1));
         expect(api.saveEditedRule).toHaveBeenCalledWith(1, {
@@ -1164,7 +1164,7 @@ describe('RulesManager — export & test-set entry points', () => {
         renderPage();
         await screen.findByText('Rule Alpha');
         fireEvent.click(screen.getByRole('button', { name: "Edit this rule's groups and condition in place" }));
-        await screen.findByLabelText('Firing condition');
+        await screen.findByLabelText('Condition text');
         fireEvent.click(screen.getByRole('button', { name: /Save logic/ }));
         await waitFor(() => expect(mockAlert).toHaveBeenCalledWith(expect.objectContaining({
             message: 'name already taken',

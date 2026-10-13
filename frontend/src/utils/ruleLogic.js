@@ -11,6 +11,8 @@
 //
 // The old role vocabulary (necessary / fallback / sufficient) is gone.
 
+import { checkCondition } from './conditionBuilder';
+
 // Group names: [a-z][a-z0-9_]*, not a grammar keyword.
 export const CONDITION_KEYWORDS = ['all', 'of', 'and', 'or', 'not'];
 export const GROUP_NAME_RE = /^[a-z][a-z0-9_]*$/;
@@ -89,17 +91,6 @@ export function groupProgressLabel(gname, info) {
     return `${hits.length}/${need} of ${gname}`;
 }
 
-// Group names a condition selects: "all of aggression" -> aggression. Kept to
-// a scan rather than a parse so nested / parenthesized conditions (which the
-// flat picker model cannot represent) are read too.
-function referencedGroups(condition) {
-    const names = new Set();
-    for (const m of String(condition || '').matchAll(/\bof\s+([a-z][a-z0-9_]*)/g)) {
-        names.add(m[1]);
-    }
-    return names;
-}
-
 // Client-side sanity check for the group/condition editor. Server-side
 // validation (utils/rule_condition.validate_condition) is authoritative —
 // this only catches the obvious mistakes before a round-trip. Mirrors the
@@ -125,18 +116,8 @@ export function validateEditorState(groupList, condition) {
             return `Group "${name}" has no cognitive elements — add some or delete the group.`;
         }
     }
-    if (!String(condition || '').trim()) {
-        return 'Nothing would make this rule fire — set each group to "Needs all of them" or "Needs any N".';
-    }
-    // The pickers write every group into the condition, so this only catches a
-    // stored rule from before that was required. The backend rejects the same
-    // shape (a group the condition never mentions), so it can never be saved.
-    const referenced = referencedGroups(condition);
-    for (const g of groupList) {
-        const name = (g.name || '').trim();
-        if (!referenced.has(name)) {
-            return `Group "${name}" is not used by the condition — every group has to be part of it. Set its quantifier again or delete the group.`;
-        }
-    }
-    return null;
+    // The firing condition itself: the same GAVEL rules the editor checks live
+    // (grammar, no `not`, satisfiable quantifiers, every group used).
+    const { problems } = checkCondition(groupList, condition);
+    return problems.length ? problems[0] : null;
 }

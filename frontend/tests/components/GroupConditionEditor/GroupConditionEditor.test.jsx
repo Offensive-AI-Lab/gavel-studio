@@ -1,11 +1,12 @@
 // Behavior tests for the groups + condition editor.
 //
-// The point of the rework: the firing condition is no longer typed. It is
-// generated from per-group pickers and shown read-only, so the user cannot
-// write logic referencing groups that do not exist. These tests pin that the
-// pickers produce the right condition text, that the text field is locked, and
-// that conditions the pickers cannot model stay editable instead of being
-// silently rewritten.
+// The firing condition is built from PIECES: a bank offers "all of them" /
+// "K of them" per group plus "and", "or" and brackets (GAVEL rules have no
+// "not"); clicking a piece adds it to the end of the condition, dragging puts
+// it where it is dropped. These tests pin that the pieces write the right
+// condition text, that the live check explains what is wrong in plain words,
+// that group edits carry the condition along, and that a condition the pieces
+// cannot show stays editable as text.
 
 import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
@@ -17,6 +18,7 @@ const POOL = [
     { ce_id: 1, name: 'being_conspiratorial' },
     { ce_id: 2, name: 'being_sycophantic' },
     { ce_id: 3, name: 'trust_seeding' },
+    { ce_id: 4, name: 'urgency_pressure' },
 ];
 
 // The component is controlled; this harness holds the state the real pages hold
@@ -35,200 +37,229 @@ function Harness({ groupList: initialGroups, condition: initialCondition, onChan
     );
 }
 
-const renderEditor = ({ groupList, condition = '', onChange } = {}) => render(
-    <Harness
-        groupList={groupList ?? [{ name: 'required', ceIds: [1, 2] }]}
-        condition={condition}
-        onChange={onChange}
-    />,
+const THREE = [
+    { name: 'scam_context', ceIds: [1, 2] },
+    { name: 'pressure_tactics', ceIds: [2, 3, 4] },
+    { name: 'payment_request', ceIds: [3] },
+];
+
+const renderEditor = ({ groupList = THREE, condition = '', onChange } = {}) => render(
+    <Harness groupList={groupList} condition={condition} onChange={onChange} />,
 );
 
-const conditionField = () => screen.getByLabelText('Firing condition');
-const quantPicker = (groupName) =>
-    screen.getByLabelText(`How much of ${groupName} must match`);
+const conditionText = () => screen.getByLabelText('Condition text').textContent;
+const rowPieces = () => within(screen.getByRole('list', { name: 'Firing condition pieces' }))
+    .queryAllByRole('listitem').map((li) => li.textContent);
+const add = (label) => fireEvent.click(screen.getByRole('button', { name: `Add "${label}"` }));
+const problems = () => within(screen.getByRole('list', { name: 'Condition problems' }))
+    .getAllByRole('listitem').map((li) => li.textContent);
 
-describe('GroupConditionEditor — the condition is generated, not typed', () => {
-    it('locks the condition field', () => {
-        renderEditor({ condition: 'all of required' });
-        expect(conditionField()).toHaveAttribute('readonly');
+describe('GroupConditionEditor — the bank of pieces', () => {
+    it('offers each group "all of them" and every count below its size', () => {
+        renderEditor();
+        const pressure = within(screen.getByRole('group', { name: 'Pieces for pressure_tactics' }));
+        expect(pressure.getAllByRole('button').map((b) => b.textContent)).toEqual(['all of them', '1 of them', '2 of them']);
+        const payment = within(screen.getByRole('group', { name: 'Pieces for payment_request' }));
+        expect(payment.getAllByRole('button').map((b) => b.textContent)).toEqual(['all of them']);
     });
 
-    it('explains that the text is written from the pickers', () => {
-        renderEditor({ condition: 'all of required' });
-        expect(screen.getByText(/Written for you from the choices above/i)).toBeInTheDocument();
+    it('offers and, or and brackets — but no "not"', () => {
+        renderEditor();
+        const ops = within(screen.getByRole('group', { name: 'Operators' }));
+        expect(ops.getAllByRole('button').map((b) => b.textContent)).toEqual(['and', 'or', '(', ')']);
+        expect(screen.queryByRole('button', { name: 'Add "not"' })).toBeNull();
     });
 
-    it('rewrites the condition when a quantifier changes', () => {
-        renderEditor({ condition: 'all of required' });
-        fireEvent.change(quantPicker('required'), { target: { value: '1' } });
-        expect(conditionField()).toHaveValue('1 of required');
+    it('asks for CEs before a group offers pieces', () => {
+        renderEditor({ groupList: [...THREE, { name: 'extra_context', ceIds: [] }] });
+        const extra = within(screen.getByRole('group', { name: 'Pieces for extra_context' }));
+        expect(extra.getByText(/Add CEs to this group first/)).toBeInTheDocument();
+        expect(extra.queryAllByRole('button')).toHaveLength(0);
     });
 
-    it('offers a quantifier per member, capped at the group size', () => {
-        renderEditor({ groupList: [{ name: 'required', ceIds: [1, 2] }], condition: 'all of required' });
-        const options = within(quantPicker('required')).getAllByRole('option')
-            .map((o) => o.textContent);
-        // 2 members -> "all" and "any 1". "any 2" would just mean "all", and
-        // the library's validator rejects k == group size.
-        expect(options).toEqual(['Needs all of them', 'Needs any 1']);
-    });
-
-    it('has no way to leave a group out of the condition', () => {
-        // The backend rejects a group the condition never names, so every
-        // option keeps the group in the text.
-        renderEditor({
-            groupList: [{ name: 'required', ceIds: [1] }, { name: 'extra', ceIds: [2] }],
-            condition: 'all of required and all of extra',
-        });
-        const options = within(quantPicker('extra')).getAllByRole('option')
-            .map((o) => o.getAttribute('value'));
-        expect(options).toEqual(['all']);
-    });
-
-    it('writes a legacy unreferenced group back into the condition', () => {
-        renderEditor({
-            groupList: [{ name: 'required', ceIds: [1, 2] }, { name: 'extra', ceIds: [3] }],
-            condition: 'all of required',
-        });
-        fireEvent.change(quantPicker('required'), { target: { value: '1' } });
-        expect(conditionField()).toHaveValue('1 of required and all of extra');
+    it('leaves a group with an invalid name out of the bank', () => {
+        renderEditor({ groupList: [{ name: 'Bad Name', ceIds: [1] }] });
+        expect(screen.queryByRole('group', { name: /Pieces for/ })).toBeNull();
     });
 });
 
-describe('GroupConditionEditor — editing groups keeps the condition true', () => {
-    it('adds a new group to the condition', () => {
-        renderEditor({ condition: 'all of required' });
-        fireEvent.click(screen.getByRole('button', { name: /Add group/i }));
-        expect(conditionField()).toHaveValue('all of required and all of option_1');
+describe('GroupConditionEditor — building the condition', () => {
+    it('clicking pieces adds them to the end of the condition', () => {
+        renderEditor();
+        add('all of scam_context');
+        add('and');
+        add('1 of pressure_tactics');
+        add('and');
+        add('all of payment_request');
+        expect(rowPieces()).toEqual(['all of scam_context', 'and', '1 of pressure_tactics', 'and', 'all of payment_request']);
+        expect(conditionText()).toBe('all of scam_context and 1 of pressure_tactics and all of payment_request');
+        expect(screen.getByText(/Fires when: all of scam_context AND at least 1 of pressure_tactics AND all of payment_request/))
+            .toBeInTheDocument();
     });
 
-    it('removes a deleted group from the condition', () => {
-        renderEditor({
-            groupList: [{ name: 'required', ceIds: [1] }, { name: 'extra', ceIds: [2] }],
-            condition: 'all of required and 1 of extra',
-        });
-        fireEvent.click(screen.getByRole('button', { name: /Delete group extra/i }));
-        expect(conditionField()).toHaveValue('all of required');
+    it('builds mixed and/or with brackets and shows the grouping in words', () => {
+        renderEditor();
+        ['(', 'all of scam_context', 'and', '1 of pressure_tactics', ')', 'or', 'all of payment_request'].forEach(add);
+        expect(conditionText()).toBe('(all of scam_context and 1 of pressure_tactics) or all of payment_request');
+        expect(screen.getByText(/Fires when: \(all of scam_context AND at least 1 of pressure_tactics\) OR all of payment_request/))
+            .toBeInTheDocument();
     });
 
-    it('carries a quantifier across a rename', () => {
-        renderEditor({
-            groupList: [{ name: 'required', ceIds: [1, 2] }],
-            condition: '1 of required',
-        });
-        fireEvent.change(screen.getByLabelText('Group 1 name'), { target: { value: 'aggression' } });
-        // The requirement follows the new name instead of vanishing.
-        expect(conditionField()).toHaveValue('1 of aggression');
+    it('explains what is wrong while building', () => {
+        renderEditor();
+        add('all of scam_context');
+        add('all of pressure_tactics');
+        expect(problems()).toContain('Put "and" or "or" between "all of scam_context" and "all of pressure_tactics".');
+        expect(problems()).toContain('Group "payment_request" is not used by the condition — add one of its pieces or delete the group.');
     });
 
-    it('clamps "at least k" when the group shrinks to k members', () => {
-        renderEditor({
-            groupList: [{ name: 'required', ceIds: [1, 2, 3] }],
-            condition: '2 of required',
-        });
-        fireEvent.click(screen.getByRole('button', { name: /Remove trust_seeding from required/i }));
-        // "2 of a 2-member group" has to be written "all of" — the validator
-        // rejects k == group size.
-        expect(conditionField()).toHaveValue('all of required');
+    it('says nothing fires yet when the condition is empty', () => {
+        renderEditor();
+        expect(problems()[0]).toMatch(/Nothing would make this rule fire yet/);
+        expect(screen.getByText('Click or drag pieces here.')).toBeInTheDocument();
     });
 
-    it('keeps the condition in the order the groups are shown', () => {
-        renderEditor({
-            groupList: [{ name: 'first', ceIds: [1] }, { name: 'second', ceIds: [2] }],
-            condition: 'all of second and all of first',
-        });
-        fireEvent.change(quantPicker('first'), { target: { value: 'all' } });
-        expect(conditionField()).toHaveValue('all of first and all of second');
-    });
-});
-
-describe('GroupConditionEditor — combining groups', () => {
-    it('hides the and/or control until a second group is required', () => {
-        renderEditor({ condition: 'all of required' });
-        expect(screen.queryByLabelText(/Combine the groups/i)).toBeNull();
+    it('removes a single piece with its ×', () => {
+        renderEditor({ condition: 'all of scam_context and all of pressure_tactics and all of payment_request' });
+        fireEvent.click(screen.getByRole('button', { name: 'Remove piece 2 ("and")' }));
+        expect(conditionText()).toBe('all of scam_context all of pressure_tactics and all of payment_request');
     });
 
-    it('shows the and/or control once two groups are required', () => {
-        renderEditor({
-            groupList: [{ name: 'a', ceIds: [1] }, { name: 'b', ceIds: [2] }],
-            condition: 'all of a and all of b',
-        });
-        expect(screen.getByLabelText(/Combine the groups/i)).toBeInTheDocument();
+    it('"Remove last" and "Clear"', () => {
+        renderEditor({ condition: 'all of scam_context and all of pressure_tactics' });
+        fireEvent.click(screen.getByRole('button', { name: 'Remove last' }));
+        expect(conditionText()).toBe('all of scam_context and');
+        fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+        expect(rowPieces()).toEqual([]);
+        expect(conditionText()).toBe('—');
     });
 
-    it('switches the whole condition to or', () => {
-        renderEditor({
-            groupList: [{ name: 'a', ceIds: [1] }, { name: 'b', ceIds: [2] }],
-            condition: 'all of a and 1 of b',
-        });
-        fireEvent.change(screen.getByLabelText(/Combine the groups/i), { target: { value: 'or' } });
-        expect(conditionField()).toHaveValue('all of a or 1 of b');
-    });
-
-    it('describes what the condition means in words', () => {
-        renderEditor({
-            groupList: [{ name: 'a', ceIds: [1] }, { name: 'b', ceIds: [2] }],
-            condition: 'all of a and 1 of b',
-        });
-        expect(screen.getByText(/fires when ALL of these groups/i)).toBeInTheDocument();
+    it('the condition text is shown, not typed', () => {
+        renderEditor({ condition: 'all of scam_context' });
+        expect(screen.getByLabelText('Condition text').tagName).toBe('CODE');
     });
 });
 
-describe('GroupConditionEditor — advanced conditions are not rewritten', () => {
-    const advanced = {
-        groupList: [{ name: 'a', ceIds: [1] }, { name: 'b', ceIds: [2] }, { name: 'c', ceIds: [3] }],
-        condition: '(all of a or 1 of b) and 1 of c',
-    };
+describe('GroupConditionEditor — drag and drop', () => {
+    const piece = (i) => within(screen.getByRole('list', { name: 'Firing condition pieces' })).getAllByRole('listitem')[i];
 
-    it('leaves the field editable', () => {
-        renderEditor(advanced);
-        expect(conditionField()).not.toHaveAttribute('readonly');
+    it('a bank piece dropped on a piece goes in front of it', () => {
+        renderEditor({ condition: 'all of scam_context or all of payment_request' });
+        fireEvent.dragStart(screen.getByRole('button', { name: 'Add "("' }));
+        fireEvent.dragOver(piece(0));
+        fireEvent.drop(piece(0));
+        expect(conditionText()).toBe('(all of scam_context or all of payment_request');
     });
 
-    it('says why the pickers are unavailable', () => {
-        renderEditor(advanced);
-        expect(screen.getByText(/advanced logic/i)).toBeInTheDocument();
+    it('a bank piece dropped on the empty part of the row goes at the end', () => {
+        renderEditor({ condition: 'all of scam_context' });
+        fireEvent.dragStart(screen.getByRole('button', { name: 'Add "and"' }));
+        const row = screen.getByRole('list', { name: 'Firing condition pieces' });
+        fireEvent.dragOver(row);
+        fireEvent.drop(row);
+        expect(conditionText()).toBe('all of scam_context and');
     });
 
-    it('hides the quantifier pickers rather than showing wrong values', () => {
-        renderEditor(advanced);
-        expect(screen.queryByLabelText(/How much of a must match/i)).toBeNull();
+    it('pieces are reordered by dragging them', () => {
+        renderEditor({ condition: 'all of scam_context and 1 of pressure_tactics' });
+        fireEvent.dragStart(piece(2));
+        fireEvent.dragOver(piece(0));
+        fireEvent.drop(piece(0));
+        expect(conditionText()).toBe('1 of pressure_tactics all of scam_context and');
     });
 
-    it('preserves the original text when an unrelated edit happens', () => {
+    it('a drop with nothing being dragged changes nothing', () => {
         const onChange = vi.fn();
-        renderEditor({ ...advanced, onChange });
-        fireEvent.click(screen.getByRole('button', { name: /Add group/i }));
-        expect(onChange).toHaveBeenCalledWith(
-            expect.objectContaining({ condition: '(all of a or 1 of b) and 1 of c' }));
-    });
-
-    it('returns to the pickers once the text is cleared', () => {
-        renderEditor(advanced);
-        fireEvent.change(conditionField(), { target: { value: '' } });
-        expect(conditionField()).toHaveAttribute('readonly');
+        renderEditor({ condition: 'all of scam_context', onChange });
+        fireEvent.drop(piece(0));
+        expect(onChange).not.toHaveBeenCalled();
     });
 });
 
-describe('GroupConditionEditor — group editing still works', () => {
+describe('GroupConditionEditor — group edits carry the condition along', () => {
+    it('renaming a group renames its pieces', () => {
+        renderEditor({ condition: '(all of scam_context and 1 of pressure_tactics) or all of payment_request' });
+        fireEvent.change(screen.getByLabelText('Group 3 name'), { target: { value: 'payment_demand' } });
+        expect(conditionText()).toBe('(all of scam_context and 1 of pressure_tactics) or all of payment_demand');
+    });
+
+    it('a name emptied while typing keeps the pieces until the new name is valid', () => {
+        renderEditor({ condition: 'all of scam_context and all of pressure_tactics and all of payment_request' });
+        const field = screen.getByLabelText('Group 1 name');
+        fireEvent.change(field, { target: { value: '' } });
+        expect(conditionText()).toBe('all of scam_context and all of pressure_tactics and all of payment_request');
+        fireEvent.change(field, { target: { value: 'fraud_context' } });
+        expect(conditionText()).toBe('all of fraud_context and all of pressure_tactics and all of payment_request');
+    });
+
+    it('deleting a group removes its pieces and the operator that joined them', () => {
+        renderEditor({ condition: 'all of scam_context and all of pressure_tactics and all of payment_request' });
+        fireEvent.click(screen.getByLabelText('Delete group pressure_tactics'));
+        expect(conditionText()).toBe('all of scam_context and all of payment_request');
+    });
+
+    it('a new group is not added to the condition by itself', () => {
+        renderEditor({ condition: 'all of scam_context and all of pressure_tactics and all of payment_request' });
+        fireEvent.click(screen.getByText(/Add group/));
+        expect(conditionText()).toBe('all of scam_context and all of pressure_tactics and all of payment_request');
+        expect(problems()).toContain('Group "required" has no CEs — add some or delete the group.');
+        expect(problems()).toContain('Group "required" is not used by the condition — add one of its pieces or delete the group.');
+    });
+
+    it('shrinking a group turns an impossible "K of" into "all of"', () => {
+        renderEditor({ condition: 'all of scam_context and 2 of pressure_tactics and all of payment_request' });
+        fireEvent.click(screen.getByLabelText('Remove trust_seeding from pressure_tactics'));
+        expect(conditionText()).toBe('all of scam_context and all of pressure_tactics and all of payment_request');
+    });
+
     it('adds a CE to a group', () => {
         const onChange = vi.fn();
-        renderEditor({ condition: 'all of required', onChange });
-        fireEvent.change(screen.getByLabelText('Add a CE to required'), { target: { value: '3' } });
-        expect(onChange).toHaveBeenCalledWith(expect.objectContaining({
-            groupList: [expect.objectContaining({ ceIds: [1, 2, 3] })],
-        }));
+        renderEditor({ groupList: [{ name: 'required', ceIds: [1] }], condition: 'all of required', onChange });
+        fireEvent.change(screen.getByLabelText('Add a CE to required'), { target: { value: '2' } });
+        expect(onChange).toHaveBeenLastCalledWith({
+            groupList: [{ name: 'required', ceIds: [1, 2] }],
+            condition: 'all of required',
+        });
     });
 
     it('marks an invalid group name', () => {
         renderEditor({ groupList: [{ name: 'Bad Name', ceIds: [1] }], condition: '' });
-        expect(screen.getByLabelText('Group 1 name')).toHaveStyle({
-            border: '1px solid rgba(248, 113, 113, 0.65)',
-        });
+        expect(screen.getByLabelText('Group 1 name').style.border).toMatch(/248, 113, 113/);
+    });
+});
+
+describe('GroupConditionEditor — stored conditions', () => {
+    it('opens a mixed condition as pieces', () => {
+        renderEditor({ condition: '(all of scam_context and 1 of pressure_tactics) or all of payment_request' });
+        expect(rowPieces()).toEqual(['(', 'all of scam_context', 'and', '1 of pressure_tactics', ')', 'or', 'all of payment_request']);
+        expect(screen.queryByRole('list', { name: 'Condition problems' })).toBeNull();
     });
 
-    it('says every group is part of the condition', () => {
-        renderEditor({ groupList: [{ name: 'a', ceIds: [1] }], condition: 'all of a' });
-        expect(screen.getByText(/Every group is part of it/i)).toBeInTheDocument();
+    describe('a condition the pieces cannot show', () => {
+        const withNot = 'all of scam_context and not all of pressure_tactics and all of payment_request';
+
+        it('stays editable as text and says why', () => {
+            renderEditor({ condition: withNot });
+            const field = screen.getByLabelText('Condition text');
+            expect(field).toHaveValue(withNot);
+            expect(field).not.toHaveAttribute('readonly');
+            expect(screen.getByText(/which GAVEL rules do not allow/)).toBeInTheDocument();
+            expect(problems()[0]).toMatch(/cannot use "not"/);
+            expect(screen.queryByRole('group', { name: 'Operators' })).toBeNull();
+        });
+
+        it('is not rewritten by an unrelated group edit', () => {
+            const onChange = vi.fn();
+            renderEditor({ condition: withNot, onChange });
+            fireEvent.change(screen.getByLabelText('Add a CE to payment_request'), { target: { value: '1' } });
+            expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ condition: withNot }));
+        });
+
+        it('"Clear and use pieces" brings the builder back', () => {
+            renderEditor({ condition: withNot });
+            fireEvent.click(screen.getByRole('button', { name: 'Clear and use pieces' }));
+            expect(screen.getByRole('group', { name: 'Operators' })).toBeInTheDocument();
+            expect(rowPieces()).toEqual([]);
+        });
     });
 });
