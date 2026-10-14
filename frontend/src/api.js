@@ -381,8 +381,13 @@ export const embedResources = async ({ ruleId, ceIds = [], userId, classifierId 
 // Discard a half-finished pipeline run — removes the local-draft rule
 // + draft CEs. The wizard's "Skip" path on step 2A uses this when the
 // user rejects the AI's proposed rule.
-export const discardPipelineResources = async (ceIds, ruleId = null) =>
-    api.post(`/ai/discard-pipeline-resources`, { ce_ids: ceIds, rule_id: ruleId });
+// `ruleIds` lists every rule of a multi-rule proposal (ruleId may be one of them).
+export const discardPipelineResources = async (ceIds, ruleId = null, ruleIds = []) =>
+    api.post(`/ai/discard-pipeline-resources`, {
+        ce_ids: ceIds,
+        rule_id: ruleId,
+        ...(ruleIds && ruleIds.length ? { rule_ids: ruleIds } : {}),
+    });
 
 // CE calibration generation (reference 2C two-phase recipe — see Phase 1).
 export const generateCeCalibration = async (ceId, targetCount = 30) =>

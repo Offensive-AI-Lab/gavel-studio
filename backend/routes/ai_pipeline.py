@@ -271,8 +271,13 @@ def _correct_rule_with_feedback(rg, prompt: str, response: str, rule_data: dict,
     return best
 
 
-def _generate_rule_from_scenario(scenario_description: str):
+def _generate_one_rule(scenario_description: str, extra_ces: Optional[dict] = None):
+    """ONE rule for ONE misuse. `extra_ces`: CEs an earlier rule of the same
+    scenario defined; they are offered as available (and accepted by validation),
+    so this rule reuses them instead of inventing near-duplicates."""
     ces_dict = fetch_ces_dict()
+    if extra_ces:
+        ces_dict = {**ces_dict, **extra_ces}
     rules_dict = fetch_rules_dict()
     categories_list = fetch_categories_dict()
 
@@ -331,6 +336,181 @@ def _generate_rule_from_scenario(scenario_description: str):
         "rule_data": rule_data,
         "validation_issues": validation_issues,
         "reasoning": response,
+    }
+
+
+# Tries per rule of a multi-rule scenario before its remaining problems are accepted.
+_PART_ATTEMPTS = 2
+
+
+def _same_scheme(scenario: str, part_a: str, part_b: str) -> bool:
+    """Are two proposed parts steps of ONE scheme (True) or independent problems
+    (False)? Only a clear "INDEPENDENT" answers False; an error or odd output
+    means True (merge), i.e. towards one rule as before."""
+    try:
+        template = _load_prompt("scenario_pair_check.md")
+        prompt = template.format(scenario_description=scenario, part_a=part_a, part_b=part_b)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", "Pydantic serializer warnings", UserWarning)
+            resp = _get_llm_client().complete(
+                model="gpt-4.1",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+        data = json.loads(resp.choices[0].message.content)
+        return not (isinstance(data, dict)
+                    and str(data.get("relation", "")).strip().upper() == "INDEPENDENT")
+    except Exception as e:  # noqa: BLE001 — never a reason to fail
+        print(f"[Pipeline] scenario pair check skipped: {e}")
+        return True
+
+
+def _cluster_parts(scenario: str, parts: list) -> list:
+    """Merge the parts that are steps of one scheme. A small model judges ONE
+    pair far more reliably than a whole list, so every pair is compared. A part
+    joins a group only if it is the same scheme as EVERY part already in it, so
+    one wrong "same scheme" answer cannot chain unrelated parts together.
+    Returns one text per group, in the original order."""
+    n = len(parts)
+    same = {(i, j): _same_scheme(scenario, parts[i], parts[j])
+            for i in range(n) for j in range(i + 1, n)}
+    groups: list = []
+    for i in range(n):
+        for group in groups:
+            if all(same[(m, i)] for m in group):
+                group.append(i)
+                break
+        else:
+            groups.append([i])
+    return [" ".join(parts[m] for m in group) for group in groups]
+
+
+def _split_scenario(scenario: str) -> list:
+    """The separate misuses a scenario describes, each as its own scenario text.
+
+    ONE entry (the scenario itself, untouched) in almost every case. Best-effort
+    and fail-safe: any problem — the model errors, answers with something
+    unparseable, or splits into more than the limit — returns [scenario], i.e. one
+    rule exactly as before this existed."""
+    try:
+        template = _load_prompt("scenario_splitter.md")
+        prompt = template.format(scenario_description=scenario)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", "Pydantic serializer warnings", UserWarning)
+            resp = _get_llm_client().complete(
+                model="gpt-4.1",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+        data = json.loads(resp.choices[0].message.content)
+        items = data.get("misuses") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return [scenario]
+        parts, seen = [], set()
+        for item in items:
+            text = item.strip() if isinstance(item, str) else ""
+            if text and text.lower() not in seen:
+                seen.add(text.lower())
+                parts.append(text)
+        if len(parts) < 2:
+            return [scenario]
+        # A small model splits one scheme (several tactics, steps, channels) far too
+        # eagerly, so the parts are compared two at a time and those that turn out
+        # to be one scheme are merged back together.
+        groups = _cluster_parts(scenario, parts)
+        return groups if len(groups) >= 2 else [scenario]
+    except Exception as e:  # noqa: BLE001 — splitting is optional, never a reason to fail
+        print(f"[Pipeline] scenario split skipped: {e}")
+        return [scenario]
+
+
+def _ces_for_reuse(new_ces: dict) -> dict:
+    """CE definitions from a rule's `new_ces`, shaped like the library's CEs."""
+    out = {}
+    for name, details in (new_ces or {}).items():
+        if not isinstance(details, dict):
+            continue
+        out[name] = {
+            "definition": str(details.get("definition", "")),
+            "examples": [e for e in (details.get("examples") or [])
+                         if isinstance(e, dict) and "input" in e and "output" in e],
+        }
+    return out
+
+
+def _cross_rule_issues(rules: list) -> list:
+    """Problems between rules: a duplicate name or identical logic would be merged
+    into ONE rule by the database layer."""
+    issues, names, logic = [], set(), {}
+    for rule in rules:
+        name = rule.get("rule_name")
+        if name in names:
+            issues.append(f"Two rules are both named {name!r}; every rule needs its own name")
+        names.add(name)
+        try:
+            from sql_scripts.junction_scripts import compute_rule_fingerprint_v2
+            groups = rule.get("groups") if isinstance(rule.get("groups"), dict) else {}
+            fp = compute_rule_fingerprint_v2(groups, rule.get("condition"))
+        except Exception:  # noqa: BLE001 — malformed logic is reported per rule already
+            continue
+        if fp in logic:
+            issues.append(f"Rules {logic[fp]!r} and {name!r} have identical logic")
+        else:
+            logic[fp] = name
+    return issues
+
+
+def _generate_rule_from_scenario(scenario_description: str):
+    """One scenario -> one rule, or several when it names separate misuses.
+
+    A small first step decides how many rules the scenario needs. One rule (the
+    normal case) goes through `_generate_one_rule` exactly as it always did.
+    Several are generated one after the other, each from its own misuse
+    description with the same prompt; a rule sees the new CEs the earlier ones
+    defined and reuses them, and each carries its own `scenario` for its test data.
+    """
+    parts = _split_scenario(scenario_description)
+    if len(parts) == 1:
+        result = _generate_one_rule(scenario_description)
+        if result.get("success"):
+            result["rules_data"] = [result["rule_data"]]
+            result["new_ces"] = result["rule_data"].get("new_ces") or {}
+        return result
+
+    rules, issues, reasoning, pool = [], [], [], {}
+    for i, part in enumerate(parts, start=1):
+        best = None
+        for _ in range(_PART_ATTEMPTS):
+            res = _generate_one_rule(part, extra_ces=_ces_for_reuse(pool))
+            if not res.get("success"):
+                best = best or res
+                continue
+            if best is None or not best.get("success") or (
+                    len(res.get("validation_issues") or []) < len(best.get("validation_issues") or [])):
+                best = res
+            if not res.get("validation_issues"):
+                break
+        if not best.get("success"):
+            return {"success": False,
+                    "error": f"Rule {i} of {len(parts)} could not be generated: {best.get('error')}",
+                    "reasoning": best.get("reasoning")}
+        rule = best["rule_data"]
+        rule["scenario"] = part
+        for name, details in (rule.get("new_ces") or {}).items():
+            pool.setdefault(name, details)
+        rules.append(rule)
+        issues += [f"[rule '{rule.get('rule_name')}'] {x}" for x in best.get("validation_issues") or []]
+        reasoning.append(f"=== Rule {i}: {part}\n{best.get('reasoning')}")
+    issues += _cross_rule_issues(rules)
+    return {
+        "success": True,
+        "rule_data": rules[0],
+        "rules_data": rules,
+        "new_ces": pool,
+        "validation_issues": issues,
+        "reasoning": "\n\n".join(reasoning),
     }
 
 
@@ -464,8 +644,28 @@ class NameConflict(BaseModel):
     existing_summary: Optional[dict] = None  # for inline preview
 
 
+class RuleProposal(BaseModel):
+    """One rule of a generated proposal (a scenario can yield several)."""
+    rule_id: Optional[int] = None
+    name: str
+    predicate: str = ""
+    description: Optional[str] = None
+    groups: Dict[str, List[str]] = {}
+    condition: str = ""
+    categories: List[str] = []
+    # Names of the NEW CEs (from the response's `new_ces`) this rule uses.
+    new_ce_names: List[str] = []
+    # Misuse scenario used to generate THIS rule's test data. Set only when the
+    # answer holds several rules (each needs its own); None means "use the
+    # user's original scenario", exactly as a single-rule build always did.
+    scenario: Optional[str] = None
+    rule_name_conflict: Optional[NameConflict] = None
+
+
 class RuleGenerationResponse(BaseModel):
     success: bool
+    # The FIRST rule is mirrored at the top level so a client that only knows
+    # about one rule keeps working; `rules` holds every rule (1 or more).
     rule_id: Optional[int] = None
     name: str
     predicate: str
@@ -485,6 +685,164 @@ class RuleGenerationResponse(BaseModel):
     # show the user a "this exists, what do you want to do?" modal.
     rule_name_conflict: Optional[NameConflict] = None
     ce_name_conflicts: List[NameConflict] = []
+    rules: List[RuleProposal] = []
+
+def _rollback_saved_rules(rule_ids: list) -> None:
+    """Undo the rules a failed generate-pipeline request already saved. Only
+    pending local drafts are touched: a save can merge into an existing rule of
+    the same name, and that one must survive."""
+    for rid in rule_ids:
+        try:
+            execute_query(
+                "DELETE FROM rules WHERE rule_id = %s AND is_local_draft = TRUE AND is_ready = FALSE",
+                (rid,),
+            )
+        except Exception:
+            pass
+    if rule_ids:
+        print(f"[!] [Pipeline] Rolled back {len(rule_ids)} pending rule(s) from failed pipeline")
+
+
+def _save_rule_proposal(rule_data: dict, scenario_text: str, new_ce_names: list,
+                        multi: bool, existing_rules: Optional[dict] = None) -> "RuleProposal":
+    """Persist ONE generated rule (pending until the build finishes) and describe
+    it for the response. `multi` is True when the answer holds several rules: then
+    the rule also carries its own scenario for its test data."""
+    # Rule logic is named CE groups + a v2-grammar condition. The display
+    # predicate is DERIVED from them (render_predicate); the condition/groups
+    # pair is the source of truth persisted on the rules row.
+    from utils.rule_condition import ConditionError, parse, render_predicate
+    from sql_scripts.junction_scripts import compute_rule_fingerprint_v2
+
+    existing_rules = existing_rules or fetch_rules_dict()
+    proposed_name = rule_data.get('rule_name', '')
+
+    ce_groups = {
+        str(gname): [m for m in (members or []) if isinstance(m, str)]
+        for gname, members in (rule_data.get('groups') or {}).items()
+    }
+    condition = (rule_data.get('condition') or '').strip()
+
+    try:
+        predicate = render_predicate(parse(condition), ce_groups) if condition else "TRUE"
+    except (ConditionError, KeyError):
+        # Malformed logic — already surfaced in validation_issues; the
+        # upsert below will reject it with a clear error.
+        predicate = condition or "TRUE"
+
+    # If a rule with this name exists and the logic is structurally
+    # identical (canonical fingerprint over member names — group names and
+    # and/or order don't matter), keep the stored predicate string so a
+    # retry run doesn't churn the display rendering.
+    if proposed_name in existing_rules:
+        existing = existing_rules[proposed_name]
+        existing_fp = compute_rule_fingerprint_v2(
+            existing.get('ce_groups'), existing.get('condition')
+        )
+        if existing_fp == compute_rule_fingerprint_v2(ce_groups, condition):
+            predicate = existing.get('predicate') or predicate
+            print(f"[INFO] Rule '{proposed_name}' structure unchanged. Preserving existing predicate.")
+
+    # Save Rule to DB for persistence (embeddings are deferred)
+    rule_data['predicate'] = predicate
+    # ensure description is present
+    if 'description' not in rule_data:
+        rule_data['description'] = f"Generated rule for scenario: {scenario_text[:50]}"
+
+    # Handle new category creation (upsert to the local DB).
+    # 1. From 'new_category' field (preferred per prompt)
+    if "new_category" in rule_data:
+        nc = rule_data["new_category"]
+        if isinstance(nc, dict) and nc.get("name"):
+            try:
+                upsert_category(nc["name"], nc.get("description", ""))
+            except Exception as e:
+                print(f"  [!] Failed to create new_category {nc['name']}: {e}")
+
+    # 2. From 'assigned_categories' if complex objects (fallback)
+    assigned_categories = rule_data.get("assigned_categories", [])
+    if assigned_categories:
+        for cat in assigned_categories:
+            if isinstance(cat, dict) and cat.get("is_new") and cat.get("name"):
+                try:
+                    upsert_category(cat["name"], cat.get("description", ""))
+                except Exception as e:
+                    print(f"  [!] Failed to create assigned category {cat['name']}: {e}")
+
+    # Use the already-resolved string names prepared by _generate_rule_from_scenario
+    category_names = rule_data.get("categories", [])
+
+    rule_data["categories"] = category_names
+
+    # mark_pending=True: the rule is invisible until /ai/embed-resources
+    # confirms training+embeddings are done. Recovery wipes it if the
+    # pipeline doesn't finish. upsert_rule_with_links validates the
+    # (ce_groups, condition) pair, dedups structurally, derives the stored
+    # predicate, and rebuilds the membership links.
+    rule_id = upsert_rule_with_links(
+        {
+            "rule_name": proposed_name,
+            "description": rule_data.get("description", ""),
+            "ce_groups": ce_groups,
+            "condition": condition,
+            "categories": category_names,
+        },
+        mark_pending=True,
+    )
+
+    # The misuse description (request.scenario) is carried in the
+    # response so the frontend can hand it to /ai/embed-resources,
+    # which generates this rule's default test/calibration set once
+    # the rule is finalized (is_ready=TRUE). No separate scenarios
+    # table — the scenario ends up inside the generated set's config.
+
+    # ----- Early name-conflict detection (rule) -----
+    # The public library is mirrored into the local DB by the gavel-rules
+    # sync, so "name exists in the library" is simply a local row carrying
+    # a public_id. Probe the AI-proposed name against those rows so the
+    # frontend can show a "this exists" modal BEFORE the user invests
+    # minutes in training-data generation. (The upsert above may have
+    # merged into a synced row of the same name — matching by name still
+    # finds it, which is exactly the collision we want to surface.)
+    rule_name_conflict = None
+    try:
+        from routes.library import _lookup_conflict_summary as _summary_lookup
+
+        proposed_rule_name = rule_data.get("rule_name")
+        if proposed_rule_name:
+            rows = execute_query_dict(
+                "SELECT public_id FROM rules "
+                "WHERE name = %s AND public_id IS NOT NULL",
+                (proposed_rule_name,),
+            ) or []
+            if rows:
+                existing_pid = rows[0]["public_id"]
+                rule_name_conflict = NameConflict(
+                    kind="rule",
+                    name=proposed_rule_name,
+                    existing_public_id=existing_pid,
+                    existing_summary=_summary_lookup("rule", existing_pid),
+                )
+    except Exception as e:
+        # Conflict probing failure is non-fatal — just log and move on.
+        print(f"[!] [Pipeline] Early name-conflict probe failed: {e}")
+
+    used = {m for members in ce_groups.values() for m in members}
+    return RuleProposal(
+        rule_id=rule_id,
+        name=rule_data.get('rule_name', f"AI Rule: {scenario_text[:30]}"),
+        predicate=predicate,
+        description=rule_data.get('description', ''),
+        groups=ce_groups,
+        condition=condition,
+        categories=category_names,
+        new_ce_names=[n for n in new_ce_names if n in used],
+        scenario=((rule_data.get("scenario") or rule_data.get("description") or "").strip() or None)
+        if multi else None,
+        rule_name_conflict=rule_name_conflict,
+    )
+
+
 
 @router.post("/generate-pipeline", response_model=RuleGenerationResponse)
 def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_current_user)):
@@ -503,6 +861,7 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
     # reference it — a failure raised before any CE is created must surface
     # its real detail, not an UnboundLocalError from the except block.
     new_ces_info = []
+    saved_rule_ids: list = []   # rules saved by THIS request (removed again if it fails)
     try:
         # Call rule generation (delegates to the reference rule_generator)
         result = _generate_rule_from_scenario(request.scenario)
@@ -519,8 +878,11 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
         
         rule_data = result['rule_data']
         
-        # Process NEW CEs - create them in database
-        new_ces_dict = rule_data.get('new_ces', {})
+        # Process NEW CEs - create them in database. They are shared by every
+        # rule of the answer, so each is created exactly once.
+        new_ces_dict = result.get('new_ces')
+        if new_ces_dict is None:
+            new_ces_dict = rule_data.get('new_ces', {})
         
         for ce_name, ce_details in new_ces_dict.items():
             # Extract CE properties from o3's response
@@ -611,87 +973,20 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
                 is_created_recently=created_ce.get('is_new', False)
             ))
         
-        # Rule logic is named CE groups + a v2-grammar condition. The display
-        # predicate is DERIVED from them (render_predicate); the condition/groups
-        # pair is the source of truth persisted on the rules row.
-        from utils.rule_condition import ConditionError, parse, render_predicate
-        from sql_scripts.junction_scripts import compute_rule_fingerprint_v2
-
+        # Rule logic is named CE groups + a v2-grammar condition (see
+        # _save_rule_proposal). One answer can hold several rules; they share the
+        # new CEs created above. Each is saved as a pending rule row.
+        rules_data = result.get('rules_data') or [rule_data]
+        multi = len(rules_data) > 1
+        new_ce_names = [ce.ce_name for ce in new_ces_info]
         existing_rules = fetch_rules_dict()
-        proposed_name = rule_data.get('rule_name', '')
-
-        ce_groups = {
-            str(gname): [m for m in (members or []) if isinstance(m, str)]
-            for gname, members in (rule_data.get('groups') or {}).items()
-        }
-        condition = (rule_data.get('condition') or '').strip()
-
-        try:
-            predicate = render_predicate(parse(condition), ce_groups) if condition else "TRUE"
-        except (ConditionError, KeyError):
-            # Malformed logic — already surfaced in validation_issues; the
-            # upsert below will reject it with a clear error.
-            predicate = condition or "TRUE"
-
-        # If a rule with this name exists and the logic is structurally
-        # identical (canonical fingerprint over member names — group names and
-        # and/or order don't matter), keep the stored predicate string so a
-        # retry run doesn't churn the display rendering.
-        if proposed_name in existing_rules:
-            existing = existing_rules[proposed_name]
-            existing_fp = compute_rule_fingerprint_v2(
-                existing.get('ce_groups'), existing.get('condition')
-            )
-            if existing_fp == compute_rule_fingerprint_v2(ce_groups, condition):
-                predicate = existing.get('predicate') or predicate
-                print(f"[INFO] Rule '{proposed_name}' structure unchanged. Preserving existing predicate.")
-
-        # Save Rule to DB for persistence (embeddings are deferred)
-        rule_data['predicate'] = predicate
-        # ensure description is present
-        if 'description' not in rule_data:
-            rule_data['description'] = f"Generated rule for scenario: {request.scenario[:50]}"
-            
-        # Handle new category creation (upsert to the local DB).
-        # 1. From 'new_category' field (preferred per prompt)
-        if "new_category" in rule_data:
-            nc = rule_data["new_category"]
-            if isinstance(nc, dict) and nc.get("name"):
-                try:
-                    upsert_category(nc["name"], nc.get("description", ""))
-                except Exception as e:
-                    print(f"  [!] Failed to create new_category {nc['name']}: {e}")
-
-        # 2. From 'assigned_categories' if complex objects (fallback)
-        assigned_categories = rule_data.get("assigned_categories", [])
-        if assigned_categories:
-            for cat in assigned_categories:
-                if isinstance(cat, dict) and cat.get("is_new") and cat.get("name"):
-                    try:
-                        upsert_category(cat["name"], cat.get("description", ""))
-                    except Exception as e:
-                        print(f"  [!] Failed to create assigned category {cat['name']}: {e}")
-
-        # Use the already-resolved string names prepared by _generate_rule_from_scenario
-        category_names = rule_data.get("categories", [])
-
-        rule_data["categories"] = category_names
-
-        # mark_pending=True: the rule is invisible until /ai/embed-resources
-        # confirms training+embeddings are done. Recovery wipes it if the
-        # pipeline doesn't finish. upsert_rule_with_links validates the
-        # (ce_groups, condition) pair, dedups structurally, derives the stored
-        # predicate, and rebuilds the membership links.
-        rule_id = upsert_rule_with_links(
-            {
-                "rule_name": proposed_name,
-                "description": rule_data.get("description", ""),
-                "ce_groups": ce_groups,
-                "condition": condition,
-                "categories": category_names,
-            },
-            mark_pending=True,
-        )
+        proposals = []
+        for one_rule in rules_data:
+            proposal = _save_rule_proposal(
+                one_rule, request.scenario, new_ce_names, multi, existing_rules)
+            if proposal.rule_id:
+                saved_rule_ids.append(proposal.rule_id)
+            proposals.append(proposal)
 
         # The misuse description (request.scenario) is carried in the
         # response so the frontend can hand it to /ai/embed-resources,
@@ -699,34 +994,10 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
         # the rule is finalized (is_ready=TRUE). No separate scenarios
         # table — the scenario ends up inside the generated set's config.
 
-        # ----- Early name-conflict detection -----
-        # The public library is mirrored into the local DB by the gavel-rules
-        # sync, so "name exists in the library" is simply a local row carrying
-        # a public_id. Probe the AI-proposed names against those rows so the
-        # frontend can show a "this exists" modal BEFORE the user invests
-        # minutes in training-data generation. (The upsert above may have
-        # merged into a synced row of the same name — matching by name still
-        # finds it, which is exactly the collision we want to surface.)
-        rule_name_conflict = None
+        # ----- Early name-conflict detection (new CEs) -----
         ce_name_conflicts: list = []
         try:
             from routes.library import _lookup_conflict_summary as _summary_lookup
-
-            proposed_rule_name = rule_data.get("rule_name")
-            if proposed_rule_name:
-                rows = execute_query_dict(
-                    "SELECT public_id FROM rules "
-                    "WHERE name = %s AND public_id IS NOT NULL",
-                    (proposed_rule_name,),
-                ) or []
-                if rows:
-                    existing_pid = rows[0]["public_id"]
-                    rule_name_conflict = NameConflict(
-                        kind="rule",
-                        name=proposed_rule_name,
-                        existing_public_id=existing_pid,
-                        existing_summary=_summary_lookup("rule", existing_pid),
-                    )
 
             for new_ce in new_ces_info:
                 rows = execute_query_dict(
@@ -746,26 +1017,30 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
             # Conflict probing failure is non-fatal — just log and move on.
             print(f"[!] [Pipeline] Early name-conflict probe failed: {e}")
 
-        # Return structured response
+        # Return structured response. The FIRST rule is mirrored at the top
+        # level (older clients read only that); `rules` lists every rule.
+        first = proposals[0]
         return RuleGenerationResponse(
             success=True,
-            rule_id=rule_id,
-            name=rule_data.get('rule_name', f"AI Rule: {request.scenario[:30]}"),
-            predicate=predicate,
-            description=rule_data.get('description', ''),
+            rule_id=first.rule_id,
+            name=first.name or f"AI Rule: {request.scenario[:30]}",
+            predicate=first.predicate,
+            description=first.description or '',
             new_ces=new_ces_info,
-            groups=ce_groups,
-            condition=condition,
+            groups=first.groups,
+            condition=first.condition,
             reasoning=result.get('reasoning', '')[:2000],  # Truncate for response size
             validation_issues=result.get('validation_issues', []),
             error=None,
-            categories=category_names,
-            rule_name_conflict=rule_name_conflict,
+            categories=first.categories,
+            rule_name_conflict=first.rule_name_conflict,
             ce_name_conflicts=ce_name_conflicts,
+            rules=proposals,
         )
         
     except HTTPException:
-        # Rollback: delete any CEs created during this failed pipeline run
+        # Rollback: delete any CEs (and pending rules) created during this failed pipeline run
+        _rollback_saved_rules(saved_rule_ids)
         if new_ces_info:
             for ce in new_ces_info:
                 try:
@@ -775,7 +1050,8 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
             print(f"[!] [Pipeline] Rolled back {len(new_ces_info)} CEs from failed pipeline")
         raise
     except Exception as e:
-        # Rollback: delete any CEs created during this failed pipeline run
+        # Rollback: delete any CEs (and pending rules) created during this failed pipeline run
+        _rollback_saved_rules(saved_rule_ids)
         if new_ces_info:
             for ce in new_ces_info:
                 try:
@@ -790,6 +1066,8 @@ def generate_gavel_pipeline(request: PipelineRequest, _: int = Depends(get_curre
 class DiscardPipelineRequest(BaseModel):
     ce_ids: List[int]
     rule_id: Optional[int] = None
+    # Every rule of a multi-rule proposal (rule_id may repeat the first one).
+    rule_ids: List[int] = []
 
 @router.post("/discard-pipeline-resources")
 async def discard_pipeline_resources(req: DiscardPipelineRequest):
@@ -813,15 +1091,17 @@ async def discard_pipeline_resources(req: DiscardPipelineRequest):
         deleted_rule = 0
         skipped = 0
 
-        # Rule: only delete if it's a local draft.
-        if req.rule_id:
+        # Rules: only delete local drafts.
+        rule_ids = list(dict.fromkeys(
+            ([req.rule_id] if req.rule_id else []) + list(req.rule_ids or [])))
+        for rid in rule_ids:
             row = execute_query_dict(
                 "SELECT is_local_draft FROM rules WHERE rule_id = %s",
-                (req.rule_id,),
+                (rid,),
             ) or []
             if row and row[0]["is_local_draft"]:
-                execute_query("DELETE FROM rules WHERE rule_id = %s", (req.rule_id,))
-                deleted_rule = 1
+                execute_query("DELETE FROM rules WHERE rule_id = %s", (rid,))
+                deleted_rule += 1
             elif row:
                 skipped += 1
 
@@ -1662,6 +1942,10 @@ def _format_rules_for_calibration_prompt(rules: Dict[str, dict]) -> str:
     return "\n".join(lines)
 
 
+# Fresh calls for a CE calibration config before the step gives up.
+_CAL_CONFIG_ATTEMPTS = 3
+
+
 def _generate_ce_calibration_config(
     ce_id: int,
     current_rule: Optional[dict] = None,
@@ -1705,21 +1989,32 @@ def _generate_ce_calibration_config(
         current_rule=current_rule_str,
     )
 
-    response = _get_llm_client().complete(
-        model="gpt-4.1",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.7,
-        response_format={"type": "json_object"},
-    )
-    raw = response.choices[0].message.content or ""
-    # The prompt instructs the model to emit JSON inside a ```json fence
-    # after the reasoning text. Tolerate either bare JSON or fenced JSON
-    # — `response_format=json_object` already forces a JSON-only reply,
-    # but the fence-tolerant parse is here in case a future model
-    # downgrade loses that guarantee.
-    m = re.search(r"```json\s*(.*?)```", raw, re.DOTALL)
-    json_text = m.group(1).strip() if m else raw.strip()
-    return json.loads(json_text)
+    # A local model can still return broken JSON after llm_client's own
+    # regenerations (those run at a low temperature and tend to repeat the
+    # slip). A FRESH call usually gets it right, so try a few before failing
+    # the whole calibration step. OpenAI's JSON mode parses on the first try.
+    last_err = None
+    for _ in range(_CAL_CONFIG_ATTEMPTS):
+        response = _get_llm_client().complete(
+            model="gpt-4.1",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content or ""
+        # The prompt instructs the model to emit JSON inside a ```json fence
+        # after the reasoning text. Tolerate either bare JSON or fenced JSON
+        # — `response_format=json_object` already forces a JSON-only reply,
+        # but the fence-tolerant parse is here in case a future model
+        # downgrade loses that guarantee.
+        m = re.search(r"```json\s*(.*?)```", raw, re.DOTALL)
+        json_text = m.group(1).strip() if m else raw.strip()
+        try:
+            return json.loads(json_text)
+        except json.JSONDecodeError as e:
+            last_err = e
+            print(f"[calibration] config for CE {ce_name!r} was not valid JSON ({e}); asking again")
+    raise last_err
 
 
 def _generate_calibration_conversations(

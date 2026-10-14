@@ -107,6 +107,89 @@ describe('buildRuleInBackground', () => {
     });
 });
 
+describe('buildRuleInBackground with several rules', () => {
+    const multiRun = {
+        run_id: 31, rule_id: 601,
+        steps: {
+            '1': { data: { description: 'doctor and bank scenario' } },
+            '2A': { data: {
+                rule_ids: [601, 602],
+                new_ces: [
+                    { ce_id: 11, ce_name: 'fake_doctor_claim', definition: 'd' },
+                    { ce_id: 22, ce_name: 'card_number_request', definition: 'd' },
+                ],
+                proposal: {
+                    name: 'doctor_rule',
+                    rules: [
+                        { rule_id: 601, name: 'doctor_rule', scenario: 'doctor scenario', new_ce_names: ['fake_doctor_claim'] },
+                        { rule_id: 602, name: 'bank_rule', scenario: 'bank scenario', new_ce_names: ['card_number_request'] },
+                    ],
+                },
+            } },
+        },
+    };
+
+    it('trains and calibrates the shared CEs once, then builds each rule with its own CEs and scenario', async () => {
+        expect(buildRuleInBackground(tray, { run: multiRun, userId: 7 })).toBe(true);
+
+        await waitFor(() => expect(api.embedResources).toHaveBeenCalledTimes(2));
+        expect(api.generateCeTraining).toHaveBeenCalledTimes(2);
+        expect(api.generateCeCalibration).toHaveBeenCalledTimes(2);
+        expect(api.embedResources).toHaveBeenNthCalledWith(1,
+            expect.objectContaining({ ruleId: 601, ceIds: [11], scenario: 'doctor scenario' }));
+        expect(api.embedResources).toHaveBeenNthCalledWith(2,
+            expect.objectContaining({ ruleId: 602, ceIds: [22], scenario: 'bank scenario' }));
+        await waitFor(() => expect(api.completePipelineRun).toHaveBeenCalledTimes(1));
+        expect(api.completePipelineRun).toHaveBeenCalledWith(31);
+    });
+
+    it('builds the rules one after the other', async () => {
+        const order = [];
+        api.embedResources.mockImplementation(async ({ ruleId }) => { order.push(`embed ${ruleId}`); return { data: {} }; });
+        api.getRuleDefaultsStatus.mockImplementation(async (id) => { order.push(`status ${id}`); return { data: { state: 'ready' } }; });
+        buildRuleInBackground(tray, { run: multiRun, userId: 1 });
+        await waitFor(() => expect(order).toHaveLength(4));
+        expect(order).toEqual(['embed 601', 'status 601', 'embed 602', 'status 602']);
+    });
+
+    it('titles the tray chip with the first rule and the number of others', () => {
+        buildRuleInBackground(tray, { run: multiRun, userId: 1 });
+        expect(tray.start.mock.calls[0][0].title).toBe('Building “doctor_rule” +1 more');
+    });
+
+    it('a failed set for one rule does not stop the other, and the error names the failed rule', async () => {
+        api.getRuleDefaultsStatus.mockImplementation(async (id) =>
+            ({ data: id === 601 ? { state: 'error', error: 'quota' } : { state: 'ready' } }));
+        buildRuleInBackground(tray, { run: multiRun, userId: 1 });
+        await waitFor(() => expect(trayTask.error).toHaveBeenCalled());
+        expect(api.embedResources).toHaveBeenCalledTimes(2);
+        const subtitle = trayTask.error.mock.calls[0][0].subtitle;
+        expect(subtitle).toContain('“doctor_rule” (quota)');
+        expect(subtitle).not.toContain('bank_rule');
+        expect(api.completePipelineRun).toHaveBeenCalledWith(31);
+    });
+
+    it('a new CE that no rule uses is still finalized, with the first rule', async () => {
+        const run = JSON.parse(JSON.stringify(multiRun));
+        run.steps['2A'].data.new_ces.push({ ce_id: 33, ce_name: 'defined_but_unused', definition: 'd' });
+        buildRuleInBackground(tray, { run, userId: 1 });
+        await waitFor(() => expect(api.embedResources).toHaveBeenCalledTimes(2));
+        expect(api.embedResources).toHaveBeenNthCalledWith(1, expect.objectContaining({ ruleId: 601, ceIds: [11, 33] }));
+        expect(api.embedResources).toHaveBeenNthCalledWith(2, expect.objectContaining({ ruleId: 602, ceIds: [22] }));
+        expect(api.generateCeTraining).toHaveBeenCalledTimes(3);
+    });
+
+    it('a one-entry rules list is built exactly like the original single rule', async () => {
+        const single = JSON.parse(JSON.stringify(multiRun));
+        single.steps['2A'].data.proposal.rules = [single.steps['2A'].data.proposal.rules[0]];
+        single.steps['2A'].data.ce_ids = [11, 22];
+        buildRuleInBackground(tray, { run: single, userId: 1 });
+        await waitFor(() => expect(api.embedResources).toHaveBeenCalledTimes(1));
+        expect(api.embedResources).toHaveBeenCalledWith(
+            expect.objectContaining({ ruleId: 601, ceIds: [11, 22], scenario: 'doctor and bank scenario' }));
+    });
+});
+
 describe('buildCeInBackground', () => {
     const ceRun = { run_id: 88, steps: { '1': { data: { ce_data: { name: 'MyCE', definition: 'd', type: 'ACTION' } } } } };
 
