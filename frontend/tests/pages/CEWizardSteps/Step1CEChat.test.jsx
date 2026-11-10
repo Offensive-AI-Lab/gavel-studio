@@ -148,6 +148,21 @@ describe('Step1CEChat', () => {
         expect(screen.queryByRole('button', { name: /Set API key/i })).toBeNull();
     });
 
+    it('clears error and replays the failed message when the key modal broadcasts save', async () => {
+        generateCe.mockRejectedValueOnce(keyMissingError());
+        renderChat();
+        typeAndSend('some concept');
+
+        expect(await screen.findByText(KEY_MESSAGE)).toBeInTheDocument();
+
+        generateCe.mockResolvedValueOnce({ data: { ce_data: { name: 'after_broadcast', type: 'ACTION', definition: 'd' } } });
+        await act(async () => { notifyOpenAiKeySaved(); });
+
+        expect(await screen.findByText('after_broadcast')).toBeInTheDocument();
+        expect(generateCe).toHaveBeenLastCalledWith('some concept', null, []);
+        expect(screen.queryByRole('button', { name: /Set API key/i })).toBeNull();
+    });
+
     it('opens the key modal itself when a 200 body carries the marker', async () => {
         // No axios error → the interceptor never sees this one.
         generateCe.mockResolvedValueOnce({ data: { success: false, detail: { code: 'OPENAI_KEY_MISSING', message: KEY_MESSAGE } } });

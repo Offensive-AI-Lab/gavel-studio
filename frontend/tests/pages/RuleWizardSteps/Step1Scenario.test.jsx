@@ -560,6 +560,32 @@ describe('Step1Scenario — missing OpenAI key', () => {
         expect(prompted).toHaveBeenCalledTimes(1);
     });
 
+    it('clears error and replays the failed message once a key is saved', async () => {
+        sendScenarioChatMessage.mockRejectedValueOnce({
+            response: {
+                status: 503,
+                data: { detail: { code: 'OPENAI_KEY_MISSING', message: 'No API key is set.' } },
+            },
+        });
+        setup();
+        await screen.findByText('Hi, describe your scenario');
+        const input = screen.getByPlaceholderText(/Describe the misuse/i);
+        fireEvent.change(input, { target: { value: 'prompt injection' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+
+        expect(await screen.findByText('No API key is set.')).toBeInTheDocument();
+
+        // Simulate key saved in modal (broadcasts notifyOpenAiKeySaved)
+        sendScenarioChatMessage.mockResolvedValueOnce({
+            data: { message: 'AI response to scenario', is_final: false },
+        });
+        await act(async () => { notifyOpenAiKeySaved(); });
+
+        await waitFor(() => expect(screen.queryByText('No API key is set.')).toBeNull());
+        expect(await screen.findByText('AI response to scenario')).toBeInTheDocument();
+        expect(screen.getAllByText('prompt injection')).toHaveLength(1);
+    });
+
     it('re-opens the chat once a key is added after a failed bootstrap', async () => {
         startScenarioChat.mockRejectedValueOnce({
             response: {
