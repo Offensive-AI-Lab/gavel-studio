@@ -29,6 +29,11 @@ npm test
 
 This runs the test suite once. `npm run test:watch` re-runs tests as you edit, `npm run test:coverage` writes a coverage report, and `npm run lint` checks code style.
 
+> **Note for Node.js 22+ / 25+:** Node 25 (and recent Node 22 releases) enables built-in experimental web storage by default, which shadows JSDOM's virtual `localStorage` implementation and leads to `localStorage.clear is not a function` errors. If you encounter this, run the tests with the experimental flag disabled:
+> ```sh
+> NODE_OPTIONS="--no-experimental-webstorage" npm test
+> ```
+
 ## Learn more
 
 * [Repository README](../README.md) — what GAVEL Studio is, how to run the whole application, and how to configure it.

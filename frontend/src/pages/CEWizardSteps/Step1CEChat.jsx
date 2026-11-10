@@ -18,6 +18,7 @@ import {
     isOpenAiKeyMissing,
     openAiKeyMissingMessage,
     promptForOpenAiKey,
+    subscribeOpenAiKeySaved,
 } from '../../components/OpenAiKeyModal/openAiKeyPrompt';
 import { promptForLocalLlm } from '../../components/LocalLlmModal/localLlmPrompt';
 import useOpenAiKeyStatus from '../../hooks/useOpenAiKeyStatus';
@@ -106,9 +107,23 @@ export default function Step1CEChat({ run, onPatchStep, onAdvance }) {
         if (!sending && !ceData) inputRef.current?.focus();
     }, [sending, ceData]);
 
+    const clearKeyErrorAndRetry = () => {
+        setNeedsKey(false);
+        setError(null);
+        const retry = retryRef.current;
+        retryRef.current = null;
+        retry?.();
+    };
+
     // Open the key modal; once the key is saved, replay the turn that failed.
-    const askForKey = () => promptForOpenAiKey({ onSaved: () => retryRef.current?.() });
-    const askForLocalLlm = () => promptForLocalLlm({ onSaved: () => retryRef.current?.() });
+    const askForKey = () => promptForOpenAiKey({ onSaved: clearKeyErrorAndRetry });
+    const askForLocalLlm = () => promptForLocalLlm({ onSaved: clearKeyErrorAndRetry });
+
+    // The axios interceptor auto-opens the key modal without an onSaved callback.
+    // Listen for the broadcast when a key is saved to clear the error and retry.
+    useEffect(() => {
+        return subscribeOpenAiKeySaved(clearKeyErrorAndRetry);
+    }, []);
 
     const showKeyPrompt = (message, openNow) => {
         setError(message);
@@ -123,6 +138,7 @@ export default function Step1CEChat({ run, onPatchStep, onAdvance }) {
         retryRef.current = () => generate(theConcept, hist, msgs);
         try {
             const res = await generateCe(theConcept, null, hist);
+            retryRef.current = null;
             const d = res.data || {};
             if (d.needs_clarification) {
                 const q = d.clarification_question || 'Could you clarify?';

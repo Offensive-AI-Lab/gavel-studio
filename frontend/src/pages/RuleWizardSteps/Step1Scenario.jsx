@@ -17,6 +17,7 @@ import {
     isOpenAiKeyMissing,
     openAiKeyMissingMessage,
     promptForOpenAiKey,
+    subscribeOpenAiKeySaved,
 } from '../../components/OpenAiKeyModal/openAiKeyPrompt';
 import { promptForLocalLlm } from '../../components/LocalLlmModal/localLlmPrompt';
 import useOpenAiKeyStatus from '../../hooks/useOpenAiKeyStatus';
@@ -52,8 +53,22 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
     const { configured: keyConfigured, checked: keyChecked } = useOpenAiKeyStatus();
     const { configured: localConfigured, checked: localChecked } = useLocalLlmStatus();
 
-    const askForKey = () => promptForOpenAiKey({ onSaved: () => retryRef.current?.() });
-    const askForLocalLlm = () => promptForLocalLlm({ onSaved: () => retryRef.current?.() });
+    const clearKeyErrorAndRetry = () => {
+        setNeedsKey(false);
+        setError(null);
+        const retry = retryRef.current;
+        retryRef.current = null;
+        retry?.();
+    };
+
+    const askForKey = () => promptForOpenAiKey({ onSaved: clearKeyErrorAndRetry });
+    const askForLocalLlm = () => promptForLocalLlm({ onSaved: clearKeyErrorAndRetry });
+
+    // The axios interceptor auto-opens the key modal without an onSaved callback.
+    // Listen for the broadcast when a key is saved to clear the error and retry.
+    useEffect(() => {
+        return subscribeOpenAiKeySaved(clearKeyErrorAndRetry);
+    }, []);
 
     // Every failure lands here so the banner always holds a STRING — the
     // backend's `detail` is an object for the missing-key error.
@@ -106,20 +121,17 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
         }
     }, [sending, sessionId, finalized]);
 
-    const send = async () => {
-        const text = input.trim();
-        if (!text || !sessionId || sending) return;
+    const sendMessage = async (text, currentMessages) => {
         setSending(true);
         setError(null);
-        const newMessages = [...messages, { role: 'user', content: text }];
-        setMessages(newMessages);
-        setInput('');
+        setNeedsKey(false);
         try {
             const res = await sendScenarioChatMessage(sessionId, text);
+            retryRef.current = null;
             const reply = res.data.message;
             const isFinal = res.data.is_final;
             const description = res.data.scenario_description;
-            const updated = [...newMessages, { role: 'assistant', content: reply }];
+            const updated = [...currentMessages, { role: 'assistant', content: reply }];
             setMessages(updated);
 
             let resolvedName = name;
@@ -161,10 +173,19 @@ export default function Step1Scenario({ run, onPatchStep, onAdvance }) {
         } catch (err) {
             // Non-blocking: the banner shows the backend detail (e.g.
             // "LLM error: ...") and the input stays usable for a retry.
-            showFailure(err, null, 'Could not send that message.');
+            showFailure(err, () => sendMessage(text, currentMessages), 'Could not send that message.');
         } finally {
             setSending(false);
         }
+    };
+
+    const send = async () => {
+        const text = input.trim();
+        if (!text || !sessionId || sending) return;
+        const newMessages = [...messages, { role: 'user', content: text }];
+        setMessages(newMessages);
+        setInput('');
+        await sendMessage(text, newMessages);
     };
 
     const saveScenarioOverride = async () => {
